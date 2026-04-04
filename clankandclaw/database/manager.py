@@ -1,6 +1,11 @@
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class DatabaseManager:
@@ -36,7 +41,10 @@ class DatabaseManager:
                     id TEXT PRIMARY KEY,
                     candidate_id TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
+                    locked_by TEXT,
+                    locked_at TEXT,
                     FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
                 );
                 """
@@ -85,14 +93,27 @@ class DatabaseManager:
     def create_review_item(self, review_id: str, candidate_id: str, expires_at: str) -> None:
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO review_items (id, candidate_id, status, expires_at) VALUES (?, ?, 'pending', ?)",
-                (review_id, candidate_id, expires_at),
+                "INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at) VALUES (?, ?, 'pending', ?, ?, NULL, NULL)",
+                (review_id, candidate_id, _utc_now_iso(), expires_at),
             )
+
+    def get_review_item(self, review_id: str) -> Optional[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM review_items WHERE id = ?",
+                (review_id,),
+            ).fetchone()
 
     def lock_review_item(self, review_id: str, locked_by: str) -> bool:
         with self._connect() as conn:
-            cur = conn.execute(
-                "UPDATE review_items SET status = 'deploying' WHERE id = ? AND status = 'pending'",
+            row = conn.execute(
+                "SELECT status FROM review_items WHERE id = ?",
                 (review_id,),
+            ).fetchone()
+            if row is None or row["status"] != "pending":
+                return False
+            cur = conn.execute(
+                "UPDATE review_items SET status = 'deploying', locked_by = ?, locked_at = ? WHERE id = ? AND status = 'pending'",
+                (locked_by, _utc_now_iso(), review_id),
             )
         return cur.rowcount == 1
