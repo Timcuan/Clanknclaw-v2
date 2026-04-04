@@ -54,13 +54,23 @@ def test_database_manager_upgrades_legacy_review_items_schema(tmp_path, monkeypa
     db = DatabaseManager(db_path)
     db.initialize()
 
-    columns = {
-        row[1]
-        for row in sqlite3.connect(db_path).execute("PRAGMA table_info(review_items)").fetchall()
-    }
-    assert {"created_at", "locked_by", "locked_at"}.issubset(columns)
+    with sqlite3.connect(db_path) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(review_items)").fetchall()]
+        foreign_keys = conn.execute("PRAGMA foreign_key_list(review_items)").fetchall()
+
+    assert columns == [
+        "id",
+        "candidate_id",
+        "status",
+        "created_at",
+        "expires_at",
+        "locked_by",
+        "locked_at",
+    ]
+    assert any(row[2] == "signal_candidates" and row[3] == "candidate_id" and row[4] == "id" for row in foreign_keys)
 
     monkeypatch.setattr("clankandclaw.database.manager._utc_now_iso", lambda: "2026-04-05T00:00:00Z")
+    db.save_candidate("sig-1", "x", "tweet-1", "fp-1", "deploy pepe")
     db.create_review_item("review-1", "sig-1", "2099-01-01T00:00:00Z")
 
     row = db.get_review_item("review-1")
@@ -70,3 +80,6 @@ def test_database_manager_upgrades_legacy_review_items_schema(tmp_path, monkeypa
     assert row["created_at"] == "2026-04-05T00:00:00Z"
     assert row["locked_by"] is None
     assert row["locked_at"] is None
+
+    with pytest.raises(sqlite3.IntegrityError):
+        db.create_review_item("review-2", "missing", "2099-01-01T00:00:00Z")

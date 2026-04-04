@@ -18,18 +18,67 @@ class DatabaseManager:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
-    def _ensure_review_items_columns(self, conn: sqlite3.Connection) -> None:
+    def _review_items_has_fresh_schema(self, conn: sqlite3.Connection) -> bool:
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(review_items)").fetchall()]
+        expected_columns = [
+            "id",
+            "candidate_id",
+            "status",
+            "created_at",
+            "expires_at",
+            "locked_by",
+            "locked_at",
+        ]
+        if columns != expected_columns:
+            return False
+        foreign_keys = conn.execute("PRAGMA foreign_key_list(review_items)").fetchall()
+        return any(
+            row["from"] == "candidate_id"
+            and row["table"] == "signal_candidates"
+            and row["to"] == "id"
+            for row in foreign_keys
+        )
+
+    def _rebuild_review_items_table(self, conn: sqlite3.Connection) -> None:
         columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(review_items)").fetchall()
         }
-        for column_name, column_sql in (
-            ("created_at", "TEXT"),
-            ("locked_by", "TEXT"),
-            ("locked_at", "TEXT"),
-        ):
-            if column_name not in columns:
-                conn.execute(f"ALTER TABLE review_items ADD COLUMN {column_name} {column_sql}")
+        created_at_fallback = _utc_now_iso()
+        select_parts = [
+            "id",
+            "candidate_id",
+            "status",
+            "COALESCE(created_at, ?) AS created_at" if "created_at" in columns else "? AS created_at",
+            "expires_at",
+            "locked_by" if "locked_by" in columns else "NULL AS locked_by",
+            "locked_at" if "locked_at" in columns else "NULL AS locked_at",
+        ]
+
+        conn.execute("ALTER TABLE review_items RENAME TO review_items_legacy")
+        conn.execute(
+            """
+            CREATE TABLE review_items (
+                id TEXT PRIMARY KEY,
+                candidate_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                locked_by TEXT,
+                locked_at TEXT,
+                FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
+            );
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at)
+            SELECT {", ".join(select_parts)}
+            FROM review_items_legacy
+            """,
+            (created_at_fallback,),
+        )
+        conn.execute("DROP TABLE review_items_legacy")
 
     def initialize(self) -> None:
         with self._connect() as conn:
@@ -62,7 +111,12 @@ class DatabaseManager:
                 );
                 """
             )
-            self._ensure_review_items_columns(conn)
+            if not self._review_items_has_fresh_schema(conn):
+                table_exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_items'"
+                ).fetchone()
+                if table_exists is not None:
+                    self._rebuild_review_items_table(conn)
 
     def list_tables(self) -> list[str]:
         with self._connect() as conn:
