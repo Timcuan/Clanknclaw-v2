@@ -1,0 +1,9 @@
+aiogram
+httpx
+pillow
+pydantic
+pyyaml
+pytest
+pytest-asyncio
+twscrape
+web3

@@ -1,0 +1,6 @@
+app:
+  log_level: INFO
+  review_expiry_seconds: 900
+deployment:
+  platform: clanker
+  tax_bps: 1000
