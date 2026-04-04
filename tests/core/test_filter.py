@@ -22,3 +22,21 @@ def test_quick_filter_rejects_without_deploy_keyword():
     decision = quick_filter(build_candidate("gm"))
     assert decision.allowed is False
     assert "missing_deploy_keyword" in decision.reason_codes
+
+
+def test_quick_filter_rejects_substring_only_prelaunch():
+    decision = quick_filter(build_candidate("prelaunch the token"))
+    assert decision.allowed is False
+    assert "missing_deploy_keyword" in decision.reason_codes
+
+
+def test_quick_filter_rejects_substring_only_launched():
+    decision = quick_filter(build_candidate("launched the token"))
+    assert decision.allowed is False
+    assert "missing_deploy_keyword" in decision.reason_codes
+
+
+def test_quick_filter_accepts_whole_word_launch():
+    decision = quick_filter(build_candidate("launch the token"))
+    assert decision.allowed is True
+    assert "keyword_match" in decision.reason_codes
