@@ -1,44 +1,64 @@
 import asyncio
+import http.client
 import ipaddress
 import socket
-from urllib.parse import urlparse
+import ssl
+from dataclasses import dataclass
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_REDIRECTS = 20
+REQUEST_TIMEOUT_SECONDS = 8.0
+READ_CHUNK_SIZE = 64 * 1024
+
+
+@dataclass(frozen=True)
+class _ResolvedFetchTarget:
+    url: str
+    scheme: str
+    hostname: str
+    port: int
+    ip_text: str
+    request_target: str
+    host_header: str
+
+
+@dataclass(frozen=True)
+class _PinnedResponse:
+    status_code: int
+    headers: dict[str, str]
+    body: bytes
 
 
 async def fetch_image_bytes(url: str) -> bytes:
-    await _validate_fetch_target(url)
+    current_url = url
+    redirects_followed = 0
 
-    async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
-        request = client.build_request("GET", url)
-        redirects_followed = 0
-        max_redirects = getattr(client, "max_redirects", 20)
+    while True:
+        target = await _resolve_fetch_target(current_url)
+        response = await asyncio.to_thread(_send_pinned_request, target)
 
-        while True:
-            response = await client.send(
-                request,
-                stream=True,
-                follow_redirects=False,
-            )
-            try:
-                if response.is_redirect and "location" in response.headers:
-                    redirects_followed += 1
-                    if redirects_followed > max_redirects:
-                        raise httpx.TooManyRedirects("Exceeded maximum allowed redirects.")
+        redirect_location = response.headers.get("location")
+        if _is_redirect(response.status_code) and redirect_location:
+            redirects_followed += 1
+            if redirects_followed > MAX_REDIRECTS:
+                raise httpx.TooManyRedirects("Exceeded maximum allowed redirects.")
 
-                    redirect_url = str(request.url.join(response.headers["location"]))
-                    await _validate_fetch_target(redirect_url)
-                    request = client.build_request("GET", redirect_url)
-                    continue
+            current_url = urljoin(current_url, redirect_location)
+            continue
 
-                response.raise_for_status()
-                _validate_content_type(response.headers.get("content-type"))
-                _validate_size(response.headers.get("content-length"))
-                return await _read_limited_body(response)
-            finally:
-                await response.aclose()
+        request = httpx.Request("GET", current_url)
+        httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            request=request,
+        ).raise_for_status()
+
+        _validate_content_type(response.headers.get("content-type"))
+        _validate_size(response.headers.get("content-length"))
+        return response.body
 
 
 def _validate_image_url(url: str) -> None:
@@ -50,12 +70,9 @@ def _validate_image_url(url: str) -> None:
         raise ValueError("unsafe image URL")
 
 
-async def _validate_fetch_target(url: str) -> None:
+async def _resolve_fetch_target(url: str) -> _ResolvedFetchTarget:
     _validate_image_url(url)
-    await _validate_resolved_hostname(url)
 
-
-async def _validate_resolved_hostname(url: str) -> None:
     parsed = urlparse(url)
     hostname = parsed.hostname
     if not hostname:
@@ -70,12 +87,111 @@ async def _validate_resolved_hostname(url: str) -> None:
         socket.SOCK_STREAM,
     )
 
+    chosen_ip: str | None = None
     for family, _socktype, _proto, _canonname, sockaddr in resolved_records:
         if family not in {socket.AF_INET, socket.AF_INET6}:
             continue
 
-        if _is_unsafe_ip_address(sockaddr[0]):
+        resolved_ip = sockaddr[0]
+        if _is_unsafe_ip_address(resolved_ip):
             raise ValueError("unsafe image URL")
+        if chosen_ip is None:
+            chosen_ip = resolved_ip
+
+    if chosen_ip is None:
+        raise ValueError("unsafe image URL")
+
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    return _ResolvedFetchTarget(
+        url=url,
+        scheme=parsed.scheme,
+        hostname=hostname,
+        port=port,
+        ip_text=chosen_ip,
+        request_target=path,
+        host_header=_format_host_header(hostname, port, parsed.scheme),
+    )
+
+
+def _send_pinned_request(target: _ResolvedFetchTarget) -> _PinnedResponse:
+    base_socket = socket.create_connection(
+        (target.ip_text, target.port),
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    connection = base_socket
+    response: http.client.HTTPResponse | None = None
+
+    try:
+        if target.scheme == "https":
+            context = ssl.create_default_context()
+            connection = context.wrap_socket(base_socket, server_hostname=target.hostname)
+
+        connection.sendall(_build_request_bytes(target))
+
+        response = http.client.HTTPResponse(connection)
+        response.begin()
+        headers = {name.lower(): value for name, value in response.getheaders()}
+        body = _read_limited_body(response)
+        return _PinnedResponse(
+            status_code=response.status,
+            headers=headers,
+            body=body,
+        )
+    finally:
+        if response is not None:
+            response.close()
+        connection.close()
+        if connection is not base_socket:
+            base_socket.close()
+
+
+def _build_request_bytes(target: _ResolvedFetchTarget) -> bytes:
+    request_lines = [
+        f"GET {target.request_target} HTTP/1.1",
+        f"Host: {target.host_header}",
+        "Accept: image/*",
+        "Connection: close",
+        "User-Agent: clankandclaw-image-fetcher/1.0",
+        "",
+        "",
+    ]
+    return "\r\n".join(request_lines).encode("ascii")
+
+
+def _format_host_header(hostname: str, port: int, scheme: str) -> str:
+    is_default_port = (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+    host_value = hostname
+    if ":" in hostname and not hostname.startswith("["):
+        host_value = f"[{hostname}]"
+
+    if is_default_port:
+        return host_value
+    return f"{host_value}:{port}"
+
+
+def _read_limited_body(response: http.client.HTTPResponse) -> bytes:
+    chunks: list[bytes] = []
+    total_size = 0
+
+    while True:
+        chunk = response.read(READ_CHUNK_SIZE)
+        if not chunk:
+            break
+
+        total_size += len(chunk)
+        if total_size > MAX_IMAGE_BYTES:
+            raise ValueError("image response is too large")
+
+        chunks.append(chunk)
+
+    return b"".join(chunks)
+
+
+def _is_redirect(status_code: int) -> bool:
+    return status_code in {301, 302, 303, 307, 308}
 
 
 def _is_unsafe_host(hostname: str) -> bool:
@@ -132,16 +248,3 @@ def _validate_size(content_length: str | None) -> None:
             declared_size = 0
         if declared_size > MAX_IMAGE_BYTES:
             raise ValueError("image response is too large")
-
-
-async def _read_limited_body(response: httpx.Response) -> bytes:
-    chunks: list[bytes] = []
-    total_size = 0
-
-    async for chunk in response.aiter_bytes():
-        total_size += len(chunk)
-        if total_size > MAX_IMAGE_BYTES:
-            raise ValueError("image response is too large")
-        chunks.append(chunk)
-
-    return b"".join(chunks)
