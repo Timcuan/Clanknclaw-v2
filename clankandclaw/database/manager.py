@@ -81,3 +81,18 @@ class DatabaseManager:
                 "SELECT * FROM candidate_decisions WHERE candidate_id = ?",
                 (candidate_id,),
             ).fetchone()
+
+    def create_review_item(self, review_id: str, candidate_id: str, expires_at: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO review_items (id, candidate_id, status, expires_at) VALUES (?, ?, 'pending', ?)",
+                (review_id, candidate_id, expires_at),
+            )
+
+    def lock_review_item(self, review_id: str, locked_by: str) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE review_items SET status = 'deploying' WHERE id = ? AND status = 'pending'",
+                (review_id,),
+            )
+        return cur.rowcount == 1
