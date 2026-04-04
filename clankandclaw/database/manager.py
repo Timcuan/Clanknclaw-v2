@@ -1,5 +1,6 @@
 import sqlite3
 from pathlib import Path
+from typing import Optional
 
 
 class DatabaseManager:
@@ -9,6 +10,7 @@ class DatabaseManager:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     def initialize(self) -> None:
@@ -27,13 +29,15 @@ class DatabaseManager:
                     score INTEGER NOT NULL,
                     decision TEXT NOT NULL,
                     reason_codes TEXT NOT NULL,
-                    recommended_platform TEXT NOT NULL
+                    recommended_platform TEXT NOT NULL,
+                    FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
                 );
                 CREATE TABLE IF NOT EXISTS review_items (
                     id TEXT PRIMARY KEY,
                     candidate_id TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    expires_at TEXT NOT NULL
+                    expires_at TEXT NOT NULL,
+                    FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
                 );
                 """
             )
@@ -71,7 +75,7 @@ class DatabaseManager:
                 (candidate_id, score, decision, ",".join(reason_codes), recommended_platform),
             )
 
-    def get_candidate_decision(self, candidate_id: str) -> sqlite3.Row:
+    def get_candidate_decision(self, candidate_id: str) -> Optional[sqlite3.Row]:
         with self._connect() as conn:
             return conn.execute(
                 "SELECT * FROM candidate_decisions WHERE candidate_id = ?",
