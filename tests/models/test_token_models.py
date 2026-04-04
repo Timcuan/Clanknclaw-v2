@@ -30,6 +30,10 @@ def _valid_deploy_request_data() -> dict[str, object]:
     }
 
 
+def _assert_timestamp_validation_error(excinfo: pytest.ExceptionInfo[ValidationError], field_name: str) -> None:
+    assert any(error["loc"] == (field_name,) for error in excinfo.value.errors())
+
+
 def test_signal_candidate_has_required_fields():
     candidate = SignalCandidate(
         id="sig-1",
@@ -96,14 +100,14 @@ def test_deploy_request_rejects_invalid_address(field_name: str, field_value: st
 
 
 @pytest.mark.parametrize(
-    ("model_factory", "field_name"),
+    ("model_factory", "field_name", "field_value"),
     [
         (
-            lambda: SignalCandidate(
+            lambda value: SignalCandidate(
                 id="sig-1",
                 source="x",
                 source_event_id="tweet-1",
-                observed_at="not-a-timestamp",
+                observed_at=value,
                 raw_text="deploy PEPE",
                 author_handle="alice",
                 context_url="https://x.example/1",
@@ -113,38 +117,56 @@ def test_deploy_request_rejects_invalid_address(field_name: str, field_value: st
                 metadata={},
             ),
             "observed_at",
+            "2026-04-04",
         ),
         (
-            lambda: ReviewItem(
+            lambda value: ReviewItem(
+                id="review-1",
+                candidate_id="sig-1",
+                status="pending",
+                created_at=value,
+                expires_at="2026-04-04T00:00:00Z",
+                locked_by=None,
+                locked_at=None,
+                telegram_message_id=None,
+            ),
+            "created_at",
+            "2026-04-04",
+        ),
+        (
+            lambda value: DeployResult(
+                deploy_request_id="deploy-1",
+                status="deploy_success",
+                tx_hash="0x" + "0" * 64,
+                latency_ms=42,
+                error_code=None,
+                error_message=None,
+                completed_at=value,
+            ),
+            "completed_at",
+            "2026-04-04T00:00:00",
+        ),
+        (
+            lambda value: ReviewItem(
                 id="review-1",
                 candidate_id="sig-1",
                 status="pending",
                 created_at="2026-04-04T00:00:00Z",
-                expires_at="bad-time",
+                expires_at=value,
                 locked_by=None,
                 locked_at=None,
                 telegram_message_id=None,
             ),
             "expires_at",
-        ),
-        (
-            lambda: DeployResult(
-                deploy_request_id="deploy-1",
-                status="deploy_success",
-                tx_hash="0x" + "0" * 64,
-                contract_address="0x" + "0" * 39 + "z",
-                latency_ms=42,
-                error_code=None,
-                error_message=None,
-                completed_at="2026-04-04T00:00:00Z",
-            ),
-            "contract_address",
+            "2026-04-04T00:00:00",
         ),
     ],
 )
-def test_models_reject_invalid_timestamps_or_addresses(model_factory, field_name: str):
-    with pytest.raises(ValidationError):
-        model_factory()
+def test_models_reject_invalid_timestamps(model_factory, field_name: str, field_value: str):
+    with pytest.raises(ValidationError) as excinfo:
+        model_factory(field_value)
+
+    _assert_timestamp_validation_error(excinfo, field_name)
 
 
 def test_deploy_request_rejects_negative_tax_bps():

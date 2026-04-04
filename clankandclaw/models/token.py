@@ -10,15 +10,19 @@ _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 def _validate_iso_datetime(value: Any, field_name: str) -> str:
     if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{field_name} must be a valid ISO 8601 datetime")
         return value.isoformat()
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be a valid ISO 8601 datetime")
 
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
-        datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
     except ValueError as exc:
         raise ValueError(f"{field_name} must be a valid ISO 8601 datetime") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must be a valid ISO 8601 datetime")
     return value
 
 
