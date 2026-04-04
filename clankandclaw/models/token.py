@@ -61,3 +61,4 @@ class DeployResult(BaseModel):
     latency_ms: int
     error_code: str | None = None
     error_message: str | None = None
+    completed_at: str
