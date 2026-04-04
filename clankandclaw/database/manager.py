@@ -18,6 +18,10 @@ class DatabaseManager:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
+    def _existing_tables(self, conn: sqlite3.Connection) -> set[str]:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        return {row["name"] for row in rows}
+
     def _review_items_has_fresh_schema(self, conn: sqlite3.Connection) -> bool:
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(review_items)").fetchall()]
         expected_columns = [
@@ -105,43 +109,86 @@ class DatabaseManager:
             conn.execute("RELEASE SAVEPOINT review_items_rebuild")
             raise
 
+    def _legacy_review_items_orphan_candidate_ids(self, conn: sqlite3.Connection) -> list[str]:
+        existing_tables = self._existing_tables(conn)
+        if "review_items" not in existing_tables:
+            return []
+
+        if "signal_candidates" in existing_tables:
+            query = """
+                SELECT DISTINCT legacy.candidate_id
+                FROM review_items AS legacy
+                LEFT JOIN signal_candidates AS candidates
+                    ON candidates.id = legacy.candidate_id
+                WHERE candidates.id IS NULL
+            """
+        else:
+            query = """
+                SELECT DISTINCT candidate_id
+                FROM review_items
+            """
+
+        return [row["candidate_id"] for row in conn.execute(query).fetchall()]
+
     def initialize(self) -> None:
         with self._connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS signal_candidates (
-                    id TEXT PRIMARY KEY,
-                    source TEXT NOT NULL,
-                    source_event_id TEXT NOT NULL,
-                    fingerprint TEXT NOT NULL,
-                    raw_text TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS candidate_decisions (
-                    candidate_id TEXT PRIMARY KEY,
-                    score INTEGER NOT NULL,
-                    decision TEXT NOT NULL,
-                    reason_codes TEXT NOT NULL,
-                    recommended_platform TEXT NOT NULL,
-                    FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
-                );
-                CREATE TABLE IF NOT EXISTS review_items (
-                    id TEXT PRIMARY KEY,
-                    candidate_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    locked_by TEXT,
-                    locked_at TEXT,
-                    FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
-                );
-                """
-            )
-            if not self._review_items_has_fresh_schema(conn):
-                table_exists = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_items'"
-                ).fetchone()
-                if table_exists is not None:
+            conn.execute("BEGIN")
+            try:
+                existing_tables = self._existing_tables(conn)
+                review_items_exists = "review_items" in existing_tables
+                legacy_review_items = review_items_exists and not self._review_items_has_fresh_schema(conn)
+
+                if legacy_review_items:
+                    orphan_candidate_ids = self._legacy_review_items_orphan_candidate_ids(conn)
+                    if orphan_candidate_ids:
+                        raise sqlite3.IntegrityError(
+                            "Cannot rebuild review_items: missing signal_candidates for candidate_id(s): "
+                            + ", ".join(sorted(orphan_candidate_ids))
+                        )
+
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS signal_candidates (
+                        id TEXT PRIMARY KEY,
+                        source TEXT NOT NULL,
+                        source_event_id TEXT NOT NULL,
+                        fingerprint TEXT NOT NULL,
+                        raw_text TEXT NOT NULL
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS candidate_decisions (
+                        candidate_id TEXT PRIMARY KEY,
+                        score INTEGER NOT NULL,
+                        decision TEXT NOT NULL,
+                        reason_codes TEXT NOT NULL,
+                        recommended_platform TEXT NOT NULL,
+                        FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS review_items (
+                        id TEXT PRIMARY KEY,
+                        candidate_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        locked_by TEXT,
+                        locked_at TEXT,
+                        FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
+                    );
+                    """
+                )
+                if legacy_review_items:
                     self._rebuild_review_items_table(conn)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def list_tables(self) -> list[str]:
         with self._connect() as conn:

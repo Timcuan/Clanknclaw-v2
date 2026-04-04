@@ -42,6 +42,23 @@ def test_database_manager_upgrades_legacy_review_items_schema(tmp_path, monkeypa
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
+            CREATE TABLE signal_candidates (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                raw_text TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO signal_candidates (id, source, source_event_id, fingerprint, raw_text)
+            VALUES ('sig-1', 'x', 'tweet-1', 'fp-1', 'deploy pepe');
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE review_items (
                 id TEXT PRIMARY KEY,
                 candidate_id TEXT NOT NULL,
@@ -50,8 +67,15 @@ def test_database_manager_upgrades_legacy_review_items_schema(tmp_path, monkeypa
             );
             """
         )
+        conn.execute(
+            """
+            INSERT INTO review_items (id, candidate_id, status, expires_at)
+            VALUES ('review-1', 'sig-1', 'pending', '2099-01-01T00:00:00Z');
+            """
+        )
 
     db = DatabaseManager(db_path)
+    monkeypatch.setattr("clankandclaw.database.manager._utc_now_iso", lambda: "2026-04-05T00:00:00Z")
     db.initialize()
 
     with sqlite3.connect(db_path) as conn:
@@ -68,16 +92,12 @@ def test_database_manager_upgrades_legacy_review_items_schema(tmp_path, monkeypa
         "locked_at",
     ]
     assert any(row[2] == "signal_candidates" and row[3] == "candidate_id" and row[4] == "id" for row in foreign_keys)
-
-    monkeypatch.setattr("clankandclaw.database.manager._utc_now_iso", lambda: "2026-04-05T00:00:00Z")
-    db.save_candidate("sig-1", "x", "tweet-1", "fp-1", "deploy pepe")
-    db.create_review_item("review-1", "sig-1", "2099-01-01T00:00:00Z")
-
     row = db.get_review_item("review-1")
     assert row is not None
     assert row["candidate_id"] == "sig-1"
     assert row["status"] == "pending"
     assert row["created_at"] == "2026-04-05T00:00:00Z"
+    assert row["expires_at"] == "2099-01-01T00:00:00Z"
     assert row["locked_by"] is None
     assert row["locked_at"] is None
 
@@ -88,29 +108,6 @@ def test_database_manager_upgrades_legacy_review_items_schema(tmp_path, monkeypa
 def test_database_manager_fails_cleanly_when_legacy_review_items_has_orphans(tmp_path):
     db_path = tmp_path / "state.db"
     with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE signal_candidates (
-                id TEXT PRIMARY KEY,
-                source TEXT NOT NULL,
-                source_event_id TEXT NOT NULL,
-                fingerprint TEXT NOT NULL,
-                raw_text TEXT NOT NULL
-            );
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE candidate_decisions (
-                candidate_id TEXT PRIMARY KEY,
-                score INTEGER NOT NULL,
-                decision TEXT NOT NULL,
-                reason_codes TEXT NOT NULL,
-                recommended_platform TEXT NOT NULL,
-                FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
-            );
-            """
-        )
         conn.execute(
             """
             CREATE TABLE review_items (
@@ -137,6 +134,8 @@ def test_database_manager_fails_cleanly_when_legacy_review_items_has_orphans(tmp
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         columns = [row[1] for row in conn.execute("PRAGMA table_info(review_items)").fetchall()]
 
-    assert "review_items" in tables
+    assert tables == {"review_items"}
     assert "review_items_legacy" not in tables
+    assert "signal_candidates" not in tables
+    assert "candidate_decisions" not in tables
     assert columns == ["id", "candidate_id", "status", "expires_at"]
