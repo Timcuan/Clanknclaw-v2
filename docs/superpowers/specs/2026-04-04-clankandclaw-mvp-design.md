@@ -14,6 +14,7 @@ The system is optimized for speed, low operator friction, and future extensibili
 
 - Real-time signal ingestion from X via `twscrape`
 - Real-time signal ingestion from GMGN Base new-launch polling
+- Proxy-capable ingestion for sources that need non-datacenter egress
 - Shared normalization into one internal candidate model
 - Deterministic quick filtering
 - Lightweight scoring with explicit reason codes
@@ -37,6 +38,7 @@ The system is optimized for speed, low operator friction, and future extensibili
 - Advanced reputation systems
 - Heavy LLM dependence
 - Fully automated no-approval deployment
+- Running the full executor behind third-party proxies
 
 ## Product Constraints
 
@@ -63,6 +65,8 @@ Primary workers:
 
 The detectors ingest source events independently and normalize them into a shared internal format. The pipeline performs dedupe, filtering, scoring, routing, and review creation. Telegram acts as the operator surface for approval or rejection. Only approved items continue to metadata preparation and deploy execution. The Clanker deployer is the only live deploy implementation in this phase.
 
+Operationally, the core executor is expected to run 24/7 on Hetzner. Source ingestion must not assume all upstreams are reachable from that datacenter egress. The source layer therefore needs to support source-specific network routing decisions without pushing proxy complexity into scoring, approval, or deploy execution.
+
 This architecture keeps the MVP fast while preserving clean boundaries:
 
 - detectors do ingestion and normalization only
@@ -70,11 +74,12 @@ This architecture keeps the MVP fast while preserving clean boundaries:
 - router selects platform and review behavior
 - deployer accepts already-approved deploy requests
 - Telegram handlers do operator interaction only
+- source-specific proxy or remote collector handling stays inside the ingestion layer
 
 ## Execution Flow
 
 1. `XDetector` polls mentions and keyword matches from X.
-2. `GMGNDetector` polls Base new-launch signals.
+2. `GMGNDetector` receives GMGN signals from a collector path that can use non-datacenter egress when needed.
 3. Both detectors normalize events into `SignalCandidate`.
 4. `CandidatePipeline` applies dedupe and cooldown checks.
 5. Candidates pass through deterministic quick filters.
@@ -122,6 +127,12 @@ The pipeline must also record reason codes for both accepted and rejected candid
 - `core/detectors/gmgn_detector.py`
 
 Each detector is source-specific and output-compatible. Their job ends at normalized candidate creation. They do not score, route, or decide deployability.
+
+The detection layer must also support source-specific transport decisions:
+
+- X starts with direct access by default but must remain proxy-ready per account or session
+- GMGN must support a collector mode that can use residential or ISP egress outside the core Hetzner runtime
+- the normalized output contract must stay identical regardless of whether a source is local, proxied, or remote-collected
 
 ### Decision Pipeline
 
@@ -327,6 +338,49 @@ After approval and before onchain submission, the system performs a narrow prepa
 
 The preparation phase happens only after approval so the hot path before operator review remains short.
 
+## Source Access Strategy
+
+The MVP must explicitly separate `source access` from `core execution`.
+
+### Core Execution Host
+
+The main executor is expected to run continuously on Hetzner and owns:
+
+- SQLite persistence
+- scoring and routing
+- Telegram review and notifications
+- deploy preparation
+- Clanker deployment
+
+### GMGN Access
+
+GMGN access must not depend on Hetzner egress. The preferred operational mode is:
+
+- a GMGN collector process with `static residential` or `ISP proxy` egress
+- sticky sessions rather than rotating IPs on every request
+- normalized GMGN events forwarded into the core executor
+
+The collector may run:
+
+- as a separate lightweight process on the same Hetzner host using a residential or ISP proxy
+- on a separate low-cost host that forwards normalized events to the Hetzner executor
+
+The architectural contract is the same in either case: GMGN-specific anti-block handling belongs in the collector path, not in the candidate pipeline.
+
+### X Access
+
+X access should begin in direct mode for simplicity, but the detector must be proxy-ready from the start.
+
+Requirements:
+
+- account and session configuration must support optional proxy assignment
+- one X account should not implicitly depend on the same egress identity as unrelated accounts
+- migration from direct mode to sticky proxy mode must not require pipeline changes
+
+### Excluded Strategy
+
+The MVP should not route the entire executor through a global proxy. Only the source ingestion path that needs special egress should use it.
+
 ## Safety Rules
 
 The MVP safety layer is intentionally balanced rather than defensive-heavy.
@@ -377,7 +431,10 @@ Expected configuration domains:
 - Pinata credentials
 - Telegram bot token and chat rules
 - X scraping account/session config
+- optional X proxy config per account or session
 - GMGN polling intervals
+- GMGN collector transport mode
+- GMGN residential or ISP proxy settings
 - scoring thresholds
 - review expiration
 - tax basis points
@@ -388,6 +445,11 @@ Expected configuration domains:
 - deployer-specific contract settings
 
 The process should fail fast on startup if required deploy or notification secrets are missing.
+
+For source access configuration, startup validation should distinguish between required and optional settings:
+
+- X proxy settings are optional in the initial direct-access mode
+- GMGN collector settings are required for any deployment environment where direct Hetzner access is known to be blocked
 
 ## Logging and Notifications
 
@@ -433,6 +495,12 @@ Telegram notifications should cover:
 - duplicate approval attempts
 
 The MVP does not require live-chain end-to-end automation in CI. A manual smoke test is sufficient for the first deploy path.
+
+The source layer also needs operational verification:
+
+- GMGN collector connectivity and response success rate
+- proxy health and sticky-session continuity where applicable
+- X detector ability to run in both direct and proxied modes
 
 ## Folder Structure
 
@@ -497,6 +565,8 @@ The MVP is successful when all of the following are true:
 - the Clanker deploy path executes successfully
 - candidate and deploy history are queryable from SQLite
 - duplicate approvals and duplicate deploy attempts are blocked
+- GMGN ingestion remains functional in a 24/7 Hetzner deployment through source-specific egress handling
+- X ingestion can run direct first and later move to source-specific proxy mode without architecture changes
 
 ## Wallet Role Defaults
 
