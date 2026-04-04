@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+from collections.abc import Mapping
 
 import yaml
 from pydantic import BaseModel, Field
@@ -28,7 +29,13 @@ class AppConfig(BaseModel):
 
 
 def load_config(path: Path) -> AppConfig:
-    raw = yaml.safe_load(path.read_text()) or {}
+    raw = yaml.safe_load(path.read_text())
+    if raw is None:
+        raw = {}
+    elif not isinstance(raw, Mapping):
+        raise ValueError("YAML root must be a mapping")
+    else:
+        raw = dict(raw)
     wallets = {
         "deployer_signer_private_key": os.getenv("DEPLOYER_SIGNER_PRIVATE_KEY"),
         "token_admin": os.getenv("TOKEN_ADMIN_ADDRESS"),
