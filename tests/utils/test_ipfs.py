@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from clankandclaw.utils.ipfs import PinataClient
@@ -16,3 +17,80 @@ def test_pinata_client_requires_jwt(monkeypatch: pytest.MonkeyPatch):
 
     with pytest.raises(ValueError, match="PINATA_JWT is required"):
         PinataClient()
+
+
+class _DummyResponse:
+    def __init__(self, payload: dict[str, str]):
+        self.payload = payload
+        self.raise_for_status_called = False
+
+    def raise_for_status(self) -> None:
+        self.raise_for_status_called = True
+
+    def json(self) -> dict[str, str]:
+        return self.payload
+
+
+class _DummyClient:
+    response = _DummyResponse({"IpfsHash": "QmTest"})
+    calls: list[dict[str, object]] = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        type(self).calls = []
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url: str, **kwargs):
+        type(self).calls.append({"url": url, **kwargs})
+        return self.response
+
+
+@pytest.mark.asyncio
+async def test_pinata_client_upload_file_bytes_posts_multipart_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(httpx, "AsyncClient", _DummyClient)
+    _DummyClient.response = _DummyResponse({"IpfsHash": "QmFile"})
+
+    client = PinataClient(jwt="pinata-jwt")
+
+    ipfs_hash = await client.upload_file_bytes(
+        filename="image.png",
+        content=b"png-bytes",
+        content_type="image/png",
+    )
+
+    assert ipfs_hash == "QmFile"
+    assert _DummyClient.calls == [
+        {
+            "url": "https://api.pinata.cloud/pinning/pinFileToIPFS",
+            "headers": {"Authorization": "Bearer pinata-jwt"},
+            "files": {"file": ("image.png", b"png-bytes", "image/png")},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pinata_client_upload_json_metadata_posts_json_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(httpx, "AsyncClient", _DummyClient)
+    _DummyClient.response = _DummyResponse({"IpfsHash": "QmJson"})
+
+    client = PinataClient(jwt="pinata-jwt")
+
+    ipfs_hash = await client.upload_json_metadata({"name": "Pepe", "symbol": "PEPE"})
+
+    assert ipfs_hash == "QmJson"
+    assert _DummyClient.calls == [
+        {
+            "url": "https://api.pinata.cloud/pinning/pinJSONToIPFS",
+            "headers": {"Authorization": "Bearer pinata-jwt"},
+            "json": {"name": "Pepe", "symbol": "PEPE"},
+        }
+    ]

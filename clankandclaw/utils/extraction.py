@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import re
 
+from clankandclaw.utils.llm import call_token_identity_fallback
+
 
 @dataclass
 class ExtractionResult:
@@ -14,4 +16,13 @@ def extract_token_identity(text: str) -> ExtractionResult:
     symbol_match = re.search(r"symbol\s+([A-Z0-9]{2,10})", text)
     if name_match and symbol_match:
         return ExtractionResult(name_match.group(1), symbol_match.group(1), False)
-    raise ValueError("deterministic extraction failed")
+
+    try:
+        name, symbol = call_token_identity_fallback(text)
+    except Exception as exc:
+        raise ValueError("deterministic extraction failed") from exc
+
+    if not name or not symbol:
+        raise ValueError("deterministic extraction failed")
+
+    return ExtractionResult(name, symbol, True)
