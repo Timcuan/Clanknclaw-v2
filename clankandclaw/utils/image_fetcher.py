@@ -1,4 +1,6 @@
+import asyncio
 import ipaddress
+import socket
 from urllib.parse import urlparse
 
 import httpx
@@ -7,7 +9,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 async def fetch_image_bytes(url: str) -> bytes:
-    _validate_image_url(url)
+    await _validate_fetch_target(url)
 
     async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
         request = client.build_request("GET", url)
@@ -27,7 +29,7 @@ async def fetch_image_bytes(url: str) -> bytes:
                         raise httpx.TooManyRedirects("Exceeded maximum allowed redirects.")
 
                     redirect_url = str(request.url.join(response.headers["location"]))
-                    _validate_image_url(redirect_url)
+                    await _validate_fetch_target(redirect_url)
                     request = client.build_request("GET", redirect_url)
                     continue
 
@@ -48,6 +50,34 @@ def _validate_image_url(url: str) -> None:
         raise ValueError("unsafe image URL")
 
 
+async def _validate_fetch_target(url: str) -> None:
+    _validate_image_url(url)
+    await _validate_resolved_hostname(url)
+
+
+async def _validate_resolved_hostname(url: str) -> None:
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("unsafe image URL")
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    resolved_records = await asyncio.to_thread(
+        socket.getaddrinfo,
+        hostname,
+        port,
+        0,
+        socket.SOCK_STREAM,
+    )
+
+    for family, _socktype, _proto, _canonname, sockaddr in resolved_records:
+        if family not in {socket.AF_INET, socket.AF_INET6}:
+            continue
+
+        if _is_unsafe_ip_address(sockaddr[0]):
+            raise ValueError("unsafe image URL")
+
+
 def _is_unsafe_host(hostname: str) -> bool:
     normalized = hostname.lower()
     if (
@@ -62,6 +92,20 @@ def _is_unsafe_host(hostname: str) -> bool:
     except ValueError:
         return False
 
+    return _is_unsafe_ip(address)
+
+
+def _is_unsafe_ip_address(address_text: str) -> bool:
+    normalized = address_text.split("%", 1)[0]
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+
+    return _is_unsafe_ip(address)
+
+
+def _is_unsafe_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return any(
         (
             address.is_private,
@@ -88,6 +132,7 @@ def _validate_size(content_length: str | None) -> None:
             declared_size = 0
         if declared_size > MAX_IMAGE_BYTES:
             raise ValueError("image response is too large")
+
 
 async def _read_limited_body(response: httpx.Response) -> bytes:
     chunks: list[bytes] = []

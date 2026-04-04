@@ -1,3 +1,5 @@
+import socket
+
 import httpx
 import pytest
 
@@ -119,6 +121,40 @@ class _DummyClient:
         return _DummyStream(response)
 
 
+def _getaddrinfo_stub(
+    hostname_to_ip: dict[str, str],
+):
+    def _stub(host: str, port: int, *args, **kwargs):
+        resolved_ip = hostname_to_ip.get(host, "93.184.216.34")
+        if ":" in resolved_ip:
+            return [
+                (
+                    socket.AF_INET6,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    (resolved_ip, port, 0, 0),
+                )
+            ]
+
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                (resolved_ip, port),
+            )
+        ]
+
+    return _stub
+
+
+@pytest.fixture(autouse=True)
+def _stub_safe_dns_resolution(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(socket, "getaddrinfo", _getaddrinfo_stub({}))
+
+
 @pytest.mark.asyncio
 async def test_fetch_image_bytes_returns_response_content(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(httpx, "AsyncClient", _DummyClient)
@@ -138,6 +174,28 @@ async def test_fetch_image_bytes_returns_response_content(monkeypatch: pytest.Mo
 async def test_fetch_image_bytes_rejects_unsafe_url():
     with pytest.raises(ValueError, match="unsafe image URL"):
         await fetch_image_bytes("http://127.0.0.1/image.png")
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_bytes_rejects_hostname_resolving_to_unsafe_address(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(httpx, "AsyncClient", _DummyClient)
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        _getaddrinfo_stub({"internal.example": "10.0.0.5"}),
+    )
+    _DummyClient.responses_by_url = {
+        "https://internal.example/image.png": _DummyResponse(
+            b"image-bytes",
+            headers={"content-type": "image/png", "content-length": "11"},
+            request_url="https://internal.example/image.png",
+        )
+    }
+
+    with pytest.raises(ValueError, match="unsafe image URL"):
+        await fetch_image_bytes("https://internal.example/image.png")
 
 
 @pytest.mark.asyncio
@@ -193,6 +251,39 @@ async def test_fetch_image_bytes_rejects_redirect_chain_to_unsafe_host(
             b"image-bytes",
             headers={"content-type": "image/png", "content-length": "11"},
             request_url="http://127.0.0.1/private.png",
+        ),
+    }
+
+    with pytest.raises(ValueError, match="unsafe image URL"):
+        await fetch_image_bytes("https://example.com/start.png")
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_bytes_rejects_redirect_hostname_resolving_to_unsafe_address(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(httpx, "AsyncClient", _DummyClient)
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        _getaddrinfo_stub(
+            {
+                "example.com": "93.184.216.34",
+                "redirect.internal.example": "169.254.169.254",
+            }
+        ),
+    )
+    _DummyClient.responses_by_url = {
+        "https://example.com/start.png": _DummyResponse(
+            b"",
+            headers={"location": "https://redirect.internal.example/private.png"},
+            request_url="https://example.com/start.png",
+            status_code=302,
+        ),
+        "https://redirect.internal.example/private.png": _DummyResponse(
+            b"image-bytes",
+            headers={"content-type": "image/png", "content-length": "11"},
+            request_url="https://redirect.internal.example/private.png",
         ),
     }
 
