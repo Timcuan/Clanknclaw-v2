@@ -18,6 +18,19 @@ class DatabaseManager:
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
+    def _ensure_review_items_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(review_items)").fetchall()
+        }
+        for column_name, column_sql in (
+            ("created_at", "TEXT"),
+            ("locked_by", "TEXT"),
+            ("locked_at", "TEXT"),
+        ):
+            if column_name not in columns:
+                conn.execute(f"ALTER TABLE review_items ADD COLUMN {column_name} {column_sql}")
+
     def initialize(self) -> None:
         with self._connect() as conn:
             conn.executescript(
@@ -49,6 +62,7 @@ class DatabaseManager:
                 );
                 """
             )
+            self._ensure_review_items_columns(conn)
 
     def list_tables(self) -> list[str]:
         with self._connect() as conn:

@@ -35,3 +35,38 @@ def test_database_manager_enforces_foreign_keys(tmp_path):
 
     with pytest.raises(sqlite3.IntegrityError):
         db.save_decision("missing", 85, "priority_review", ["keyword_match"], "clanker")
+
+
+def test_database_manager_upgrades_legacy_review_items_schema(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE review_items (
+                id TEXT PRIMARY KEY,
+                candidate_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            """
+        )
+
+    db = DatabaseManager(db_path)
+    db.initialize()
+
+    columns = {
+        row[1]
+        for row in sqlite3.connect(db_path).execute("PRAGMA table_info(review_items)").fetchall()
+    }
+    assert {"created_at", "locked_by", "locked_at"}.issubset(columns)
+
+    monkeypatch.setattr("clankandclaw.database.manager._utc_now_iso", lambda: "2026-04-05T00:00:00Z")
+    db.create_review_item("review-1", "sig-1", "2099-01-01T00:00:00Z")
+
+    row = db.get_review_item("review-1")
+    assert row is not None
+    assert row["candidate_id"] == "sig-1"
+    assert row["status"] == "pending"
+    assert row["created_at"] == "2026-04-05T00:00:00Z"
+    assert row["locked_by"] is None
+    assert row["locked_at"] is None
