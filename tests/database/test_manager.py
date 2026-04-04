@@ -83,3 +83,60 @@ def test_database_manager_upgrades_legacy_review_items_schema(tmp_path, monkeypa
 
     with pytest.raises(sqlite3.IntegrityError):
         db.create_review_item("review-2", "missing", "2099-01-01T00:00:00Z")
+
+
+def test_database_manager_fails_cleanly_when_legacy_review_items_has_orphans(tmp_path):
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE signal_candidates (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                raw_text TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE candidate_decisions (
+                candidate_id TEXT PRIMARY KEY,
+                score INTEGER NOT NULL,
+                decision TEXT NOT NULL,
+                reason_codes TEXT NOT NULL,
+                recommended_platform TEXT NOT NULL,
+                FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE review_items (
+                id TEXT PRIMARY KEY,
+                candidate_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO review_items (id, candidate_id, status, expires_at)
+            VALUES ('review-1', 'missing-sig', 'pending', '2099-01-01T00:00:00Z');
+            """
+        )
+
+    db = DatabaseManager(db_path)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        db.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(review_items)").fetchall()]
+
+    assert "review_items" in tables
+    assert "review_items_legacy" not in tables
+    assert columns == ["id", "candidate_id", "status", "expires_at"]

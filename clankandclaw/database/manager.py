@@ -44,6 +44,24 @@ class DatabaseManager:
             row["name"]
             for row in conn.execute("PRAGMA table_info(review_items)").fetchall()
         }
+        orphan_candidate_ids = [
+            row["candidate_id"]
+            for row in conn.execute(
+                """
+                SELECT DISTINCT legacy.candidate_id
+                FROM review_items AS legacy
+                LEFT JOIN signal_candidates AS candidates
+                    ON candidates.id = legacy.candidate_id
+                WHERE candidates.id IS NULL
+                """
+            ).fetchall()
+        ]
+        if orphan_candidate_ids:
+            raise sqlite3.IntegrityError(
+                "Cannot rebuild review_items: missing signal_candidates for candidate_id(s): "
+                + ", ".join(sorted(orphan_candidate_ids))
+            )
+
         created_at_fallback = _utc_now_iso()
         select_parts = [
             "id",
@@ -55,30 +73,37 @@ class DatabaseManager:
             "locked_at" if "locked_at" in columns else "NULL AS locked_at",
         ]
 
-        conn.execute("ALTER TABLE review_items RENAME TO review_items_legacy")
-        conn.execute(
-            """
-            CREATE TABLE review_items (
-                id TEXT PRIMARY KEY,
-                candidate_id TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                locked_by TEXT,
-                locked_at TEXT,
-                FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
-            );
-            """
-        )
-        conn.execute(
-            f"""
-            INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at)
-            SELECT {", ".join(select_parts)}
-            FROM review_items_legacy
-            """,
-            (created_at_fallback,),
-        )
-        conn.execute("DROP TABLE review_items_legacy")
+        conn.execute("SAVEPOINT review_items_rebuild")
+        try:
+            conn.execute("ALTER TABLE review_items RENAME TO review_items_legacy")
+            conn.execute(
+                """
+                CREATE TABLE review_items (
+                    id TEXT PRIMARY KEY,
+                    candidate_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    locked_by TEXT,
+                    locked_at TEXT,
+                    FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
+                );
+                """
+            )
+            conn.execute(
+                f"""
+                INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at)
+                SELECT {", ".join(select_parts)}
+                FROM review_items_legacy
+                """,
+                (created_at_fallback,),
+            )
+            conn.execute("DROP TABLE review_items_legacy")
+            conn.execute("RELEASE SAVEPOINT review_items_rebuild")
+        except Exception:
+            conn.execute("ROLLBACK TO SAVEPOINT review_items_rebuild")
+            conn.execute("RELEASE SAVEPOINT review_items_rebuild")
+            raise
 
     def initialize(self) -> None:
         with self._connect() as conn:
