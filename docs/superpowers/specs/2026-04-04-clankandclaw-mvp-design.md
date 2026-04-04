@@ -6,7 +6,7 @@ Build the first working Clank&Claw MVP as a single Python service that detects p
 
 This MVP is platform-agnostic by design but implements only the Clanker deploy path first. The Bankr deployer is intentionally deferred to the next spec so the first end-to-end path can be stabilized before adding a second onchain integration.
 
-The system is optimized for speed, low operator friction, and future extensibility. It is not a trading bot. Its purpose is to catch deploy moments early and create tax-enabled token deployments with burner-wallet-oriented configuration.
+The system is optimized for speed, low operator friction, and future extensibility. It is not a trading bot. Its purpose is to catch deploy moments early and create tax-enabled token deployments with signer-wallet-oriented configuration.
 
 ## Scope
 
@@ -22,6 +22,7 @@ The system is optimized for speed, low operator friction, and future extensibili
 - Metadata preparation after approval
 - Image fetch and Pinata upload
 - Configurable tax and spoofing flags in deploy payload
+- Configurable separation between deployer signer wallet, token admin, and fee recipient
 - Clanker deploy execution
 - SQLite-backed persistence for candidates, review queue, and deploy history
 - Notifications for review, approval result, success, and failure
@@ -46,6 +47,7 @@ The system is optimized for speed, low operator friction, and future extensibili
 - High-confidence candidates become priority reviews, not auto-deploys
 - LLM usage is optional and sparse, only for extraction fallback
 - SQLite is the only persistence layer in this phase
+- Telegram approval uses global config defaults only in this phase
 
 ## Architecture
 
@@ -229,6 +231,7 @@ Fields:
 
 - `candidate_id`
 - `platform`
+- `signer_wallet`
 - `token_name`
 - `token_symbol`
 - `image_uri`
@@ -237,7 +240,8 @@ Fields:
 - `tax_recipient`
 - `token_admin_enabled`
 - `token_reward_enabled`
-- `burner_wallet`
+- `token_admin`
+- `fee_recipient`
 
 ### `DeployResult`
 
@@ -378,7 +382,9 @@ Expected configuration domains:
 - review expiration
 - tax basis points
 - tax recipient wallet
-- burner wallet
+- deployer signer wallet
+- token admin wallet
+- fee recipient wallet
 - deployer-specific contract settings
 
 The process should fail fast on startup if required deploy or notification secrets are missing.
@@ -491,6 +497,20 @@ The MVP is successful when all of the following are true:
 - the Clanker deploy path executes successfully
 - candidate and deploy history are queryable from SQLite
 - duplicate approvals and duplicate deploy attempts are blocked
+
+## Wallet Role Defaults
+
+The MVP must use explicit wallet role naming to avoid ambiguity.
+
+- `deployer signer wallet` is the private key that signs the deploy transaction
+- `token admin` is a separate configurable role
+- `fee recipient` is a separate configurable role
+
+Default operator behavior in this phase:
+
+- Telegram approval is binary only: approve or reject
+- approved deploys use the global config defaults for signer wallet, token admin, and fee recipient
+- per-candidate wallet overrides are deferred to a future spec
 
 ## Deferred Follow-Up Specs
 
