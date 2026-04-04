@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 from clankandclaw.models.token import SignalCandidate
@@ -9,14 +10,18 @@ class ScoreResult:
     reason_codes: list[str]
 
 
+def _contains_word(text: str, word: str) -> bool:
+    return re.search(rf"\b{re.escape(word)}\b", text) is not None
+
+
 def score_candidate(candidate: SignalCandidate) -> ScoreResult:
     score = 40
     reasons = ["base_score"]
     lowered = candidate.raw_text.lower()
-    if "deploy" in lowered:
+    if _contains_word(lowered, "deploy") or _contains_word(lowered, "launch"):
         score += 25
         reasons.append("deploy_keyword")
-    if "base" in lowered:
+    if _contains_word(lowered, "base"):
         score += 20
         reasons.append("base_context")
     if candidate.suggested_symbol:

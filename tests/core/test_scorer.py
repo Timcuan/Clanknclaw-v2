@@ -21,3 +21,13 @@ def build_candidate(raw_text: str) -> SignalCandidate:
 def test_score_candidate_marks_strong_signal_high():
     scored = score_candidate(build_candidate("deploy PEPE now on base"))
     assert scored.score >= 80
+
+
+def test_score_candidate_treats_launch_like_deploy():
+    scored = score_candidate(build_candidate("launch PEPE on base"))
+    assert scored.score >= 80
+
+
+def test_score_candidate_does_not_credit_base_substrings():
+    scored = score_candidate(build_candidate("based coinbase baseball"))
+    assert "base_context" not in scored.reason_codes
