@@ -1,5 +1,10 @@
+from pathlib import Path
+
+from clankandclaw.config import load_config
+
+
 def main() -> None:
-    raise SystemExit("bootstrap only")
+    load_config(Path("config.yaml"))
 
 
 if __name__ == "__main__":
