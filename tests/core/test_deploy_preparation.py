@@ -1,7 +1,6 @@
 """Tests for DeployPreparation."""
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -116,33 +115,6 @@ async def test_prepare_image_raises_when_no_image_url(db):
         await prep._prepare_image(candidate)
 
 
-# ── prepare metadata ──────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_prepare_metadata_includes_author_when_present(db):
-    prep, pinata, _ = make_preparation(db)
-    candidate = make_candidate()
-    candidate = candidate.model_copy(update={"author_handle": "alice"})
-
-    await prep._prepare_metadata("Moon", "MOON", candidate, "ipfs://QmImg")
-
-    call_kwargs = pinata.upload_json_metadata.call_args[0][0]
-    trait_types = [a["trait_type"] for a in call_kwargs["attributes"]]
-    assert "Author" in trait_types
-
-
-@pytest.mark.asyncio
-async def test_prepare_metadata_omits_author_when_absent(db):
-    prep, pinata, _ = make_preparation(db)
-    candidate = make_candidate()
-
-    await prep._prepare_metadata("Moon", "MOON", candidate, "ipfs://QmImg")
-
-    call_kwargs = pinata.upload_json_metadata.call_args[0][0]
-    trait_types = [a["trait_type"] for a in call_kwargs["attributes"]]
-    assert "Author" not in trait_types
-
-
 # ── get_candidate_by_id ───────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -188,7 +160,9 @@ async def test_get_candidate_handles_corrupt_metadata_json(db):
 # ── prepare_deploy_request (end-to-end) ───────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_prepare_deploy_request_returns_valid_deploy_request(db, monkeypatch):
+async def test_prepare_deploy_request_returns_valid_deploy_request_without_metadata_uri(
+    db, monkeypatch
+):
     async def fake_fetch(url: str) -> bytes:
         return b"fake-image-bytes"
 
@@ -205,8 +179,18 @@ async def test_prepare_deploy_request_returns_valid_deploy_request(db, monkeypat
     assert deploy_request.token_name == "Moon"
     assert deploy_request.token_symbol == "MOON"
     assert deploy_request.image_uri == "ipfs://QmImageHash"
-    assert deploy_request.metadata_uri == "ipfs://QmMetaHash"
     assert deploy_request.candidate_id == candidate.id
+    assert not hasattr(deploy_request, "metadata_uri")
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(reason="Step-specific deploy-preparation error messages are added later")
+async def test_prepare_deploy_request_uses_step_name_in_error_message(db):
+    prep, _, _ = make_preparation(db)
+    candidate = make_candidate(metadata={})
+
+    with pytest.raises(DeployPreparationError, match="image_prepare"):
+        await prep.prepare_deploy_request(candidate)
 
 
 @pytest.mark.asyncio
