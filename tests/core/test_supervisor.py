@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from clankandclaw.config import AppConfig, AppSection, DeploymentSection, WalletSection
+from clankandclaw.config import AppConfig, AppSection, DeploymentSection, TelegramSection, WalletSection
 from clankandclaw.core.supervisor import Supervisor
 from clankandclaw.database.manager import DatabaseManager
 
@@ -13,6 +13,7 @@ def test_config():
     return AppConfig(
         app=AppSection(log_level="INFO", review_expiry_seconds=900),
         deployment=DeploymentSection(platform="clanker", tax_bps=1000),
+        telegram=TelegramSection(bot_token="", chat_id=""),
         wallets=WalletSection(
             deployer_signer_private_key="0xtest",
             token_admin="0x0000000000000000000000000000000000000001",
