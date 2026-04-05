@@ -57,7 +57,9 @@ def test_build_review_message_includes_author_handle():
 
 def test_build_review_message_omits_optional_fields_when_absent():
     msg = build_review_message("sig-1", "review", 50, [])
+    assert "<b>Signals:</b> —" in msg
     assert "blockquote" not in msg
+    assert "<b>Author:</b>" not in msg
 
 
 def test_build_review_message_priority_emojis():

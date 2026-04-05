@@ -1,5 +1,4 @@
 """Tests for TelegramWorker."""
-
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -89,6 +88,34 @@ async def test_send_review_notification_creates_review_item(db):
         context_url=None,
         author_handle=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_send_review_notification_uses_candidate_row_without_extra_defaults(db, caplog):
+    db.save_candidate(
+        "x-2", "x", "tweet-2", "fp-2", "deploy token Star symbol STAR",
+        observed_at="2026-04-05T10:00:00Z",
+        metadata={
+            "context_url": "https://x.com/bob/status/2",
+            "author_handle": "bob",
+            "image_url": "https://example.com/img.png",
+        },
+    )
+
+    bot = make_mock_bot()
+    worker = make_worker(db)
+    with patch("clankandclaw.core.workers.telegram_worker.TelegramBot", return_value=bot):
+        await worker.start()
+
+    with caplog.at_level("INFO"):
+        await worker.send_review_notification("x-2", "priority_review", 88, ["kw"])
+
+    kwargs = bot.send_review_notification.await_args.kwargs
+    assert kwargs["raw_text"] == "deploy token Star symbol STAR"
+    assert kwargs["source"] == "x"
+    assert kwargs["context_url"] == "https://x.com/bob/status/2"
+    assert kwargs["author_handle"] == "bob"
+    assert any("telegram.review_notify_ms=" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio

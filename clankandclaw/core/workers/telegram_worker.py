@@ -1,8 +1,10 @@
 """Telegram worker for handling approval flow."""
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 from typing import Any
 
 from clankandclaw.core.review_queue import ReviewQueue
@@ -108,19 +110,18 @@ class TelegramWorker:
             return None
 
         try:
-            # Look up candidate for rich message content
+            started = perf_counter()
+            row = self.db.get_candidate(candidate_id)
             raw_text: str | None = None
             source: str | None = None
             context_url: str | None = None
             author_handle: str | None = None
 
-            row = self.db.get_candidate(candidate_id)
             if row:
                 raw_text = row["raw_text"]
                 source = row["source"]
-                import json as _json
                 try:
-                    meta = _json.loads(row["metadata_json"] or "{}")
+                    meta = json.loads(row["metadata_json"] or "{}")
                 except Exception:
                     meta = {}
                 context_url = meta.get("context_url")
@@ -149,7 +150,12 @@ class TelegramWorker:
 
             self.review_queue.create(review_id, candidate_id, expires_at)
             self.db.set_review_telegram_message_id(review_id, message_id)
-            logger.info(f"Created review item {review_id} for {candidate_id}, msg={message_id}")
+            logger.info(
+                "telegram.review_notify_ms=%d candidate=%s review_id=%s",
+                int((perf_counter() - started) * 1000),
+                candidate_id,
+                review_id,
+            )
 
             return review_id
 
