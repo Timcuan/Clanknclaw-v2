@@ -37,7 +37,6 @@ def make_candidate(
 def make_preparation(db: DatabaseManager) -> tuple[DeployPreparation, MagicMock, MagicMock]:
     pinata = MagicMock()
     pinata.upload_file_bytes = AsyncMock(return_value="QmImageHash")
-    pinata.upload_json_metadata = AsyncMock(return_value="QmMetaHash")
 
     deployer = MagicMock()
     deployer.preflight = AsyncMock(return_value=None)
@@ -85,7 +84,7 @@ async def test_extract_falls_back_to_regex(db):
 async def test_extract_raises_deploy_preparation_error_when_extraction_fails(db):
     prep, _, _ = make_preparation(db)
     candidate = make_candidate(raw_text="nothing useful here")
-    with pytest.raises(DeployPreparationError, match="Token extraction failed"):
+    with pytest.raises(DeployPreparationError, match="extract_identity"):
         await prep._extract_token_identity(candidate)
 
 
@@ -111,7 +110,7 @@ async def test_prepare_image_uploads_and_returns_ipfs_uri(db, monkeypatch):
 async def test_prepare_image_raises_when_no_image_url(db):
     prep, _, _ = make_preparation(db)
     candidate = make_candidate(metadata={})
-    with pytest.raises(DeployPreparationError, match="No image URL"):
+    with pytest.raises(DeployPreparationError, match="image_prepare"):
         await prep._prepare_image(candidate)
 
 
@@ -126,7 +125,13 @@ async def test_get_candidate_returns_none_for_missing_id(db):
 
 @pytest.mark.asyncio
 async def test_get_candidate_reconstructs_from_db(db):
-    metadata = {"image_url": "https://example.com/img.png", "context_url": "https://x.com/1", "author_handle": "bob"}
+    metadata = {
+        "image_url": "https://example.com/img.png",
+        "context_url": "https://x.com/1",
+        "author_handle": "bob",
+        "suggested_name": "Star",
+        "suggested_symbol": "STAR",
+    }
     db.save_candidate(
         "x-99", "x", "tweet-99", "fp-99",
         "deploy token Star symbol STAR",
@@ -140,6 +145,8 @@ async def test_get_candidate_reconstructs_from_db(db):
     assert candidate.id == "x-99"
     assert candidate.context_url == "https://x.com/1"
     assert candidate.author_handle == "bob"
+    assert candidate.suggested_name == "Star"
+    assert candidate.suggested_symbol == "STAR"
     assert candidate.metadata["image_url"] == "https://example.com/img.png"
 
 
@@ -190,6 +197,24 @@ async def test_prepare_deploy_request_wraps_step_name_in_error_message(db):
 
     with pytest.raises(DeployPreparationError, match="image_prepare"):
         await prep.prepare_deploy_request(candidate)
+
+
+@pytest.mark.asyncio
+async def test_prepare_deploy_request_logs_step_timings(db, monkeypatch, caplog):
+    async def fake_fetch(url: str) -> bytes:
+        return b"fake-image-bytes"
+
+    monkeypatch.setattr("clankandclaw.core.deploy_preparation.fetch_image_bytes", fake_fetch)
+
+    prep, _, _ = make_preparation(db)
+    candidate = make_candidate(metadata={"image_url": "https://example.com/img.png"})
+
+    with caplog.at_level("INFO"):
+        await prep.prepare_deploy_request(candidate)
+
+    assert any("deploy_prepare.extract_ms=" in record.message for record in caplog.records)
+    assert any("deploy_prepare.image_ms=" in record.message for record in caplog.records)
+    assert any("deploy_prepare.preflight_ms=" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
