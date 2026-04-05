@@ -19,7 +19,8 @@ import { readFileSync } from 'node:fs'
 import { createPublicClient, createWalletClient, http } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { base } from 'viem/chains'
-import { Clanker, POOL_POSITIONS, PoolPositions, getTickFromMarketCap } from 'clanker-sdk/v4'
+import { Clanker } from 'clanker-sdk/v4'
+import { POOL_POSITIONS, PoolPositions, getTickFromMarketCap } from 'clanker-sdk'
 
 function fail(errorCode, errorMessage) {
   process.stderr.write(JSON.stringify({ status: 'error', errorCode, errorMessage }) + '\n')
@@ -85,9 +86,8 @@ const deployParams = {
   tokenAdmin: deployConfig.tokenAdmin,
   chainId: base.id,
 
-  metadata: {
-    description: deployConfig.description || `${deployConfig.name} — deployed via Clank&Claw`,
-    ...(deployConfig.socialMediaUrls ? { socialMediaUrls: deployConfig.socialMediaUrls } : {}),
+  metadata: deployConfig.metadata || {
+    description: `${deployConfig.name} — deployed via Clank&Claw`,
   },
 
   context: deployConfig.context || {

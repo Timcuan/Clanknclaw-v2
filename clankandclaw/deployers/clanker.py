@@ -43,8 +43,6 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
         "image": deploy_request.image_uri,
         "metadata": {
             "description": f"Token deployed via Clank&Claw from candidate {deploy_request.candidate_id}",
-            "socialMediaUrls": [],
-            "auditUrls": [],
         },
         **({"tokenAdmin": deploy_request.token_admin} if deploy_request.token_admin_enabled else {}),
         "context": {
@@ -74,10 +72,6 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
                 }
             ]
         }} if deploy_request.token_reward_enabled else {}),
-        # No vault for MVP
-        "vault": None,
-        # No dev buy for MVP
-        "devBuy": None,
     }
     
     return config
