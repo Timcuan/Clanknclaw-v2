@@ -98,7 +98,6 @@ async def test_prepare_and_deploy_notifies_success(db, monkeypatch):
         "clankandclaw.core.deploy_preparation.fetch_image_bytes", fake_fetch
     )
     worker.preparation.pinata.upload_file_bytes = AsyncMock(return_value="QmImg")
-    worker.preparation.pinata.upload_json_metadata = AsyncMock(return_value="QmMeta")
     worker.preparation.deployer.preflight = AsyncMock(return_value=None)
 
     await worker.prepare_and_deploy("x-1")
@@ -149,7 +148,6 @@ async def test_prepare_and_deploy_notifies_failure_on_deploy_failure(db, monkeyp
         "clankandclaw.core.deploy_preparation.fetch_image_bytes", fake_fetch
     )
     worker.preparation.pinata.upload_file_bytes = AsyncMock(return_value="QmImg")
-    worker.preparation.pinata.upload_json_metadata = AsyncMock(return_value="QmMeta")
     worker.preparation.deployer.preflight = AsyncMock(return_value=None)
     worker.preparation.deployer.deploy = AsyncMock(
         return_value=make_deploy_result(status="deploy_failed")
@@ -158,6 +156,47 @@ async def test_prepare_and_deploy_notifies_failure_on_deploy_failure(db, monkeyp
     await worker.prepare_and_deploy("x-2")
 
     telegram.send_deploy_failure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_prepare_and_deploy_logs_hot_path_step_timings(db, monkeypatch, caplog):
+    db.save_candidate(
+        "x-3", "x", "tweet-3", "fp-3",
+        "deploy token Nova symbol NOVA",
+        observed_at="2026-04-05T10:00:00Z",
+        metadata={"image_url": "https://example.com/img.png"},
+    )
+    worker, _, _ = make_worker(db)
+    await worker.start()
+
+    async def fake_fetch(url):
+        return b"bytes"
+
+    monkeypatch.setattr(
+        "clankandclaw.core.deploy_preparation.fetch_image_bytes", fake_fetch
+    )
+    worker.preparation.pinata.upload_file_bytes = AsyncMock(return_value="QmImg")
+    worker.preparation.deployer.preflight = AsyncMock(return_value=None)
+
+    with caplog.at_level("INFO"):
+        await worker.prepare_and_deploy("x-3")
+
+    assert any("deploy_worker.lookup_ms=" in r.message for r in caplog.records)
+    assert any("deploy_worker.prepare_ms=" in r.message for r in caplog.records)
+    assert any("deploy_worker.deploy_ms=" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_prepare_and_deploy_uses_single_candidate_fetch(db):
+    worker, _, _ = make_worker(db)
+    await worker.start()
+    worker.preparation.get_candidate_by_id = AsyncMock(return_value=MagicMock())
+    worker.preparation.prepare_deploy_request = AsyncMock(return_value=MagicMock())
+    worker.deployer.deploy = AsyncMock(return_value=make_deploy_result())
+
+    await worker.prepare_and_deploy("x-4")
+
+    worker.preparation.get_candidate_by_id.assert_awaited_once_with("x-4")
 
 
 @pytest.mark.asyncio

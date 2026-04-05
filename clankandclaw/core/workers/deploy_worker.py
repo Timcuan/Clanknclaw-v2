@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 
 from clankandclaw.core.deploy_preparation import DeployPreparation, DeployPreparationError
@@ -62,25 +62,35 @@ class DeployWorker:
             logger.warning("Deploy worker not running")
             return
 
-        logger.info(f"Starting deploy process for {candidate_id}")
+        logger.info("Starting deploy process for %s", candidate_id)
 
         try:
-            # Step 1: Get candidate from database
-            # For MVP, we'll need to reconstruct the candidate
-            # In production, you'd store the full candidate or have a proper query
+            lookup_started = perf_counter()
             candidate = await self._get_candidate(candidate_id)
+            logger.info(
+                "deploy_worker.lookup_ms=%d candidate=%s",
+                int((perf_counter() - lookup_started) * 1000),
+                candidate_id,
+            )
             if not candidate:
-                raise DeployPreparationError(f"Candidate {candidate_id} not found")
+                raise DeployPreparationError(f"lookup_candidate: Candidate {candidate_id} not found")
 
-            # Step 2: Prepare deploy request
-            logger.info(f"Preparing deploy request for {candidate_id}")
+            prepare_started = perf_counter()
             deploy_request = await self.preparation.prepare_deploy_request(candidate)
+            logger.info(
+                "deploy_worker.prepare_ms=%d candidate=%s",
+                int((perf_counter() - prepare_started) * 1000),
+                candidate_id,
+            )
 
-            # Step 3: Execute deployment
-            logger.info(f"Executing deployment for {candidate_id}")
+            deploy_started = perf_counter()
             deploy_result = await self.deployer.deploy(deploy_request)
+            logger.info(
+                "deploy_worker.deploy_ms=%d candidate=%s",
+                int((perf_counter() - deploy_started) * 1000),
+                candidate_id,
+            )
 
-            # Step 4: Persist deployment result
             self.db.save_deployment_result(
                 result_id=str(uuid.uuid4()),
                 candidate_id=candidate_id,
@@ -93,12 +103,7 @@ class DeployWorker:
                 latency_ms=deploy_result.latency_ms,
             )
 
-            # Step 5: Send notification based on result
             if deploy_result.status == "deploy_success":
-                logger.info(
-                    f"Deploy successful for {candidate_id}: "
-                    f"tx={deploy_result.tx_hash}, contract={deploy_result.contract_address}"
-                )
                 if self._telegram_worker:
                     await self._telegram_worker.send_deploy_success(
                         candidate_id,
@@ -118,7 +123,7 @@ class DeployWorker:
                     )
 
         except DeployPreparationError as exc:
-            logger.error(f"Deploy preparation failed for {candidate_id}: {exc}")
+            logger.error("Deploy preparation failed for %s: %s", candidate_id, exc)
             if self._telegram_worker:
                 await self._telegram_worker.send_deploy_failure(
                     candidate_id,
@@ -126,7 +131,7 @@ class DeployWorker:
                     str(exc),
                 )
         except Exception as exc:
-            logger.error(f"Deploy failed for {candidate_id}: {exc}", exc_info=True)
+            logger.error("Deploy failed for %s: %s", candidate_id, exc, exc_info=True)
             if self._telegram_worker:
                 await self._telegram_worker.send_deploy_failure(
                     candidate_id,
