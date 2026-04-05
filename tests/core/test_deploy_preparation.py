@@ -184,8 +184,7 @@ async def test_prepare_deploy_request_returns_valid_deploy_request_without_metad
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(reason="Step-specific deploy-preparation error messages are added later")
-async def test_prepare_deploy_request_uses_step_name_in_error_message(db):
+async def test_prepare_deploy_request_wraps_step_name_in_error_message(db):
     prep, _, _ = make_preparation(db)
     candidate = make_candidate(metadata={})
 
