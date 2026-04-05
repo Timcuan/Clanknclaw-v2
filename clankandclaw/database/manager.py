@@ -209,6 +209,50 @@ class DatabaseManager:
                 (candidate_id, source, source_event_id, fingerprint, raw_text),
             )
 
+    def save_candidate_and_decision(
+        self,
+        candidate_id: str,
+        source: str,
+        source_event_id: str,
+        fingerprint: str,
+        raw_text: str,
+        score: int,
+        decision: str,
+        reason_codes: list[str],
+        recommended_platform: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO signal_candidates (id, source, source_event_id, fingerprint, raw_text)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        source = excluded.source,
+                        source_event_id = excluded.source_event_id,
+                        fingerprint = excluded.fingerprint,
+                        raw_text = excluded.raw_text
+                    """,
+                    (candidate_id, source, source_event_id, fingerprint, raw_text),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO candidate_decisions (candidate_id, score, decision, reason_codes, recommended_platform)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(candidate_id) DO UPDATE SET
+                        score = excluded.score,
+                        decision = excluded.decision,
+                        reason_codes = excluded.reason_codes,
+                        recommended_platform = excluded.recommended_platform
+                    """,
+                    (candidate_id, score, decision, ",".join(reason_codes), recommended_platform),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
     def save_decision(
         self,
         candidate_id: str,

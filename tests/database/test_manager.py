@@ -22,6 +22,77 @@ def test_database_manager_persists_candidate_and_decision(tmp_path):
     assert row["decision"] == "priority_review"
 
 
+def test_database_manager_persists_candidate_and_decision_atomically(tmp_path):
+    db_path = tmp_path / "state.db"
+    db = DatabaseManager(db_path)
+    db.initialize()
+
+    db.save_candidate_and_decision(
+        candidate_id="sig-1",
+        source="x",
+        source_event_id="tweet-1",
+        fingerprint="fp-1",
+        raw_text="deploy pepe",
+        score=85,
+        decision="priority_review",
+        reason_codes=["keyword_match"],
+        recommended_platform="clanker",
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        candidate_row = conn.execute(
+            "SELECT id, source, source_event_id, fingerprint, raw_text FROM signal_candidates WHERE id = ?",
+            ("sig-1",),
+        ).fetchone()
+        decision_row = conn.execute(
+            """
+            SELECT candidate_id, score, decision, reason_codes, recommended_platform
+            FROM candidate_decisions
+            WHERE candidate_id = ?
+            """,
+            ("sig-1",),
+        ).fetchone()
+
+    assert candidate_row == ("sig-1", "x", "tweet-1", "fp-1", "deploy pepe")
+    assert decision_row == ("sig-1", 85, "priority_review", "keyword_match", "clanker")
+
+
+def test_database_manager_save_candidate_and_decision_is_idempotent(tmp_path):
+    db_path = tmp_path / "state.db"
+    db = DatabaseManager(db_path)
+    db.initialize()
+
+    db.save_candidate_and_decision(
+        candidate_id="sig-1",
+        source="x",
+        source_event_id="tweet-1",
+        fingerprint="fp-1",
+        raw_text="deploy pepe",
+        score=85,
+        decision="priority_review",
+        reason_codes=["keyword_match"],
+        recommended_platform="clanker",
+    )
+    db.save_candidate_and_decision(
+        candidate_id="sig-1",
+        source="x",
+        source_event_id="tweet-1",
+        fingerprint="fp-1",
+        raw_text="deploy pepe",
+        score=85,
+        decision="priority_review",
+        reason_codes=["keyword_match"],
+        recommended_platform="clanker",
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        candidate_count = conn.execute("SELECT COUNT(*) FROM signal_candidates WHERE id = ?", ("sig-1",)).fetchone()[0]
+        decision_count = conn.execute("SELECT COUNT(*) FROM candidate_decisions WHERE candidate_id = ?", ("sig-1",)).fetchone()[0]
+
+    assert candidate_count == 1
+    assert decision_count == 1
+
+
 def test_database_manager_returns_none_when_decision_missing(tmp_path):
     db = DatabaseManager(tmp_path / "state.db")
     db.initialize()

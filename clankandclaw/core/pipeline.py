@@ -5,7 +5,6 @@ from clankandclaw.models.token import ScoredCandidate, SignalCandidate
 
 
 def process_candidate(db, candidate: SignalCandidate) -> ScoredCandidate:
-    db.save_candidate(candidate.id, candidate.source, candidate.source_event_id, candidate.fingerprint, candidate.raw_text)
     filter_decision = quick_filter(candidate)
     if not filter_decision.allowed:
         scored = ScoredCandidate(
@@ -16,7 +15,17 @@ def process_candidate(db, candidate: SignalCandidate) -> ScoredCandidate:
             recommended_platform="clanker",
             review_priority="review",
         )
-        db.save_decision(candidate.id, scored.score, scored.decision, scored.reason_codes, scored.recommended_platform)
+        db.save_candidate_and_decision(
+            candidate_id=candidate.id,
+            source=candidate.source,
+            source_event_id=candidate.source_event_id,
+            fingerprint=candidate.fingerprint,
+            raw_text=candidate.raw_text,
+            score=scored.score,
+            decision=scored.decision,
+            reason_codes=scored.reason_codes,
+            recommended_platform=scored.recommended_platform,
+        )
         return scored
     score = score_candidate(candidate)
     route = route_candidate(score.score)
@@ -25,8 +34,18 @@ def process_candidate(db, candidate: SignalCandidate) -> ScoredCandidate:
         score=score.score,
         decision=route.decision,
         reason_codes=score.reason_codes,
-        recommended_platform="clanker",
+        recommended_platform=route.recommended_platform,
         review_priority=route.review_priority,
     )
-    db.save_decision(candidate.id, scored.score, scored.decision, scored.reason_codes, scored.recommended_platform)
+    db.save_candidate_and_decision(
+        candidate_id=candidate.id,
+        source=candidate.source,
+        source_event_id=candidate.source_event_id,
+        fingerprint=candidate.fingerprint,
+        raw_text=candidate.raw_text,
+        score=scored.score,
+        decision=scored.decision,
+        reason_codes=scored.reason_codes,
+        recommended_platform=scored.recommended_platform,
+    )
     return scored
