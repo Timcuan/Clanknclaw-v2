@@ -30,14 +30,32 @@ def _normalize_observed_at(payload: dict[str, Any]) -> str:
 def normalize_gmgn_payload(payload: dict, context_url: str) -> SignalCandidate:
     raw_text = payload["text"]
     fingerprint = sha256(f"gmgn:{payload['id']}:{raw_text}".encode()).hexdigest()
+    author_handle = payload.get("author")
+    token_data = payload.get("token_data") or {}
+    image_url = (
+        token_data.get("image_uri")
+        or token_data.get("logo")
+        or token_data.get("image")
+        or token_data.get("logo_uri")
+        or None
+    )
+
+    metadata: dict = {"collector_mode": "remote_or_proxied"}
+    if context_url:
+        metadata["context_url"] = context_url
+    if author_handle:
+        metadata["author_handle"] = author_handle
+    if image_url:
+        metadata["image_url"] = image_url
+
     return SignalCandidate(
         id=f"gmgn-{payload['id']}",
         source="gmgn",
         source_event_id=str(payload["id"]),
         observed_at=_normalize_observed_at(payload),
         raw_text=raw_text,
-        author_handle=payload.get("author"),
+        author_handle=author_handle,
         context_url=context_url,
         fingerprint=fingerprint,
-        metadata={"collector_mode": "remote_or_proxied"},
+        metadata=metadata,
     )

@@ -30,14 +30,25 @@ def _normalize_observed_at(event: dict[str, Any]) -> str:
 def normalize_x_event(event: dict, context_url: str) -> SignalCandidate:
     raw_text = event["text"]
     fingerprint = sha256(f"x:{event['id']}:{raw_text}".encode()).hexdigest()
+    author_handle = event.get("user", {}).get("username")
+    metadata: dict = {"proxy_mode": "direct_or_configured"}
+    if context_url:
+        metadata["context_url"] = context_url
+    if author_handle:
+        metadata["author_handle"] = author_handle
+    # Capture tweet image if present (first media item)
+    media = event.get("media") or []
+    if media and isinstance(media, list) and media[0].get("url"):
+        metadata["image_url"] = media[0]["url"]
+
     return SignalCandidate(
         id=f"x-{event['id']}",
         source="x",
         source_event_id=str(event["id"]),
         observed_at=_normalize_observed_at(event),
         raw_text=raw_text,
-        author_handle=event.get("user", {}).get("username"),
+        author_handle=author_handle,
         context_url=context_url,
         fingerprint=fingerprint,
-        metadata={"proxy_mode": "direct_or_configured"},
+        metadata=metadata,
     )

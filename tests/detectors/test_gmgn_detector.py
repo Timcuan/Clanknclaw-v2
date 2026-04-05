@@ -18,9 +18,24 @@ def test_normalize_gmgn_payload_uses_source_timestamp_and_normalizes_fields():
     assert candidate.observed_at == "2026-04-04T12:34:56Z"
     assert candidate.context_url == "https://gmgn.ai/token/g1"
     assert candidate.author_handle == "gmgn"
-    assert candidate.metadata == {"collector_mode": "remote_or_proxied"}
+    assert candidate.metadata["collector_mode"] == "remote_or_proxied"
+    assert candidate.metadata["context_url"] == "https://gmgn.ai/token/g1"
+    assert candidate.metadata["author_handle"] == "gmgn"
     assert len(candidate.fingerprint) == 64
     int(candidate.fingerprint, 16)
+
+
+def test_normalize_gmgn_payload_extracts_image_url_from_token_data():
+    candidate = normalize_gmgn_payload(
+        {
+            "id": "g3",
+            "text": "launch Moon on Base",
+            "author": "gmgn",
+            "token_data": {"logo": "https://example.com/logo.png"},
+        },
+        "https://gmgn.ai/token/g3",
+    )
+    assert candidate.metadata["image_url"] == "https://example.com/logo.png"
 
 
 def test_normalize_gmgn_payload_falls_back_to_current_utc_time(monkeypatch):
