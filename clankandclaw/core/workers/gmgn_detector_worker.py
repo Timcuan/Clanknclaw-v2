@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
@@ -32,7 +33,7 @@ class GMGNDetectorWorker:
         self._task: asyncio.Task[None] | None = None
         self._telegram_worker: Any = None  # Will be set by supervisor
         self._last_poll_time: datetime | None = None
-        self._seen_tokens: set[str] = set()
+        self._seen_tokens: deque[str] = deque(maxlen=1000)
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         """Set the telegram worker for sending notifications."""
@@ -97,8 +98,8 @@ class GMGNDetectorWorker:
                 # Skip if we've already seen this token
                 if token_address in self._seen_tokens:
                     continue
-                
-                self._seen_tokens.add(token_address)
+
+                self._seen_tokens.append(token_address)
                 
                 # Build payload for normalization
                 payload = {
@@ -108,16 +109,11 @@ class GMGNDetectorWorker:
                     "token_data": token,
                 }
                 
-                context_url = f"https://gmgn.ai/sol/token/{token_address}"
+                context_url = f"https://gmgn.ai/base/token/{token_address}"
                 
                 await self.process_payload(payload, context_url)
             
             self._last_poll_time = datetime.now(timezone.utc)
-            
-            # Limit seen_tokens set size to prevent memory growth
-            if len(self._seen_tokens) > 1000:
-                # Keep only the most recent 500
-                self._seen_tokens = set(list(self._seen_tokens)[-500:])
                 
         except httpx.HTTPError as exc:
             logger.error(f"HTTP error polling GMGN: {exc}")

@@ -64,20 +64,21 @@ def load_config(path: Path) -> AppConfig:
     # Inject env-var overrides into deployment section
     if "deployment" not in raw:
         raw["deployment"] = {}
+    # Env vars take precedence over YAML for deployment settings
     if os.getenv("BASE_RPC_URL"):
-        raw["deployment"].setdefault("base_rpc_url", os.getenv("BASE_RPC_URL"))
+        raw["deployment"]["base_rpc_url"] = os.getenv("BASE_RPC_URL")
     if os.getenv("EXECUTOR_PATH"):
-        raw["deployment"].setdefault("executor_path", os.getenv("EXECUTOR_PATH"))
+        raw["deployment"]["executor_path"] = os.getenv("EXECUTOR_PATH")
     if os.getenv("NODE_SCRIPT_PATH"):
-        raw["deployment"].setdefault("node_script_path", os.getenv("NODE_SCRIPT_PATH"))
+        raw["deployment"]["node_script_path"] = os.getenv("NODE_SCRIPT_PATH")
 
-    # Inject Telegram env vars
+    # Inject Telegram env vars (env vars take precedence)
     if "telegram" not in raw:
         raw["telegram"] = {}
     if os.getenv("TELEGRAM_BOT_TOKEN"):
-        raw["telegram"].setdefault("bot_token", os.getenv("TELEGRAM_BOT_TOKEN"))
+        raw["telegram"]["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
     if os.getenv("TELEGRAM_CHAT_ID"):
-        raw["telegram"].setdefault("chat_id", os.getenv("TELEGRAM_CHAT_ID"))
+        raw["telegram"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID")
 
     wallets = {
         "deployer_signer_private_key": os.getenv("DEPLOYER_SIGNER_PRIVATE_KEY"),

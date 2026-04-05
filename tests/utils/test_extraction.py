@@ -34,5 +34,5 @@ def test_extract_token_identity_raises_when_regex_and_fallback_fail(
 
     monkeypatch.setattr(extraction, "call_token_identity_fallback", fake_llm_fallback)
 
-    with pytest.raises(ValueError, match="deterministic extraction failed"):
+    with pytest.raises(ValueError, match="token identity extraction failed"):
         extraction.extract_token_identity("launch something ambiguous")

@@ -326,15 +326,18 @@ class DatabaseManager:
             ).fetchone()
 
     def lock_review_item(self, review_id: str, locked_by: str) -> bool:
+        now = _utc_now_iso()
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT status FROM review_items WHERE id = ?",
+                "SELECT status, expires_at FROM review_items WHERE id = ?",
                 (review_id,),
             ).fetchone()
             if row is None or row["status"] != "pending":
                 return False
+            if row["expires_at"] < now:
+                return False
             cur = conn.execute(
-                "UPDATE review_items SET status = 'deploying', locked_by = ?, locked_at = ? WHERE id = ? AND status = 'pending'",
-                (locked_by, _utc_now_iso(), review_id),
+                "UPDATE review_items SET status = 'deploying', locked_by = ?, locked_at = ? WHERE id = ? AND status = 'pending' AND expires_at >= ?",
+                (locked_by, now, review_id, now),
             )
         return cur.rowcount == 1

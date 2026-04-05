@@ -20,9 +20,11 @@ def extract_token_identity(text: str) -> ExtractionResult:
     try:
         name, symbol = call_token_identity_fallback(text)
     except Exception as exc:
-        raise ValueError("deterministic extraction failed") from exc
+        raise ValueError(f"token identity extraction failed: {exc}") from exc
 
-    if not name or not symbol:
-        raise ValueError("deterministic extraction failed")
+    if not name:
+        raise ValueError("token identity extraction failed: name is empty")
+    if not symbol:
+        raise ValueError("token identity extraction failed: symbol is empty")
 
     return ExtractionResult(name, symbol, True)
