@@ -33,6 +33,7 @@ class DatabaseManager:
             "expires_at",
             "locked_by",
             "locked_at",
+            "telegram_message_id",
         ]
         if columns != expected_columns:
             return False
@@ -76,6 +77,7 @@ class DatabaseManager:
             "expires_at",
             "locked_by" if "locked_by" in columns else "NULL AS locked_by",
             "locked_at" if "locked_at" in columns else "NULL AS locked_at",
+            "telegram_message_id" if "telegram_message_id" in columns else "NULL AS telegram_message_id",
         ]
 
         conn.execute("SAVEPOINT review_items_rebuild")
@@ -91,13 +93,14 @@ class DatabaseManager:
                     expires_at TEXT NOT NULL,
                     locked_by TEXT,
                     locked_at TEXT,
+                    telegram_message_id INTEGER,
                     FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
                 );
                 """
             )
             conn.execute(
                 f"""
-                INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at)
+                INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at, telegram_message_id)
                 SELECT {", ".join(select_parts)}
                 FROM review_items_legacy
                 """,
@@ -195,12 +198,38 @@ class DatabaseManager:
                         expires_at TEXT NOT NULL,
                         locked_by TEXT,
                         locked_at TEXT,
+                        telegram_message_id INTEGER,
                         FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
                     );
                     """
                 )
+                # Migrate review_items missing telegram_message_id
+                ri_columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(review_items)").fetchall()
+                }
+                if "telegram_message_id" not in ri_columns and "review_items" in existing_tables and not legacy_review_items:
+                    conn.execute(
+                        "ALTER TABLE review_items ADD COLUMN telegram_message_id INTEGER"
+                    )
                 if legacy_review_items:
                     self._rebuild_review_items_table(conn)
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS deployment_results (
+                        id TEXT PRIMARY KEY,
+                        candidate_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        tx_hash TEXT,
+                        contract_address TEXT,
+                        error_code TEXT,
+                        error_message TEXT,
+                        latency_ms INTEGER NOT NULL DEFAULT 0,
+                        deployed_at TEXT NOT NULL,
+                        FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
+                    );
+                    """
+                )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -314,8 +343,15 @@ class DatabaseManager:
     def create_review_item(self, review_id: str, candidate_id: str, expires_at: str) -> None:
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at) VALUES (?, ?, 'pending', ?, ?, NULL, NULL)",
+                "INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at, telegram_message_id) VALUES (?, ?, 'pending', ?, ?, NULL, NULL, NULL)",
                 (review_id, candidate_id, _utc_now_iso(), expires_at),
+            )
+
+    def set_review_telegram_message_id(self, review_id: str, message_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE review_items SET telegram_message_id = ? WHERE id = ?",
+                (message_id, review_id),
             )
 
     def get_review_item(self, review_id: str) -> Optional[sqlite3.Row]:
@@ -341,3 +377,94 @@ class DatabaseManager:
                 (locked_by, now, review_id, now),
             )
         return cur.rowcount == 1
+
+    def reject_review_item(self, review_id: str, locked_by: str) -> bool:
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT status, expires_at FROM review_items WHERE id = ?",
+                (review_id,),
+            ).fetchone()
+            if row is None or row["status"] != "pending":
+                return False
+            cur = conn.execute(
+                "UPDATE review_items SET status = 'rejected', locked_by = ?, locked_at = ? WHERE id = ? AND status = 'pending'",
+                (locked_by, now, review_id),
+            )
+        return cur.rowcount == 1
+
+    def list_pending_reviews(self) -> list[sqlite3.Row]:
+        now = _utc_now_iso()
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT r.*, s.raw_text, s.source, s.metadata_json,
+                       d.score, d.reason_codes
+                FROM review_items r
+                JOIN signal_candidates s ON s.id = r.candidate_id
+                LEFT JOIN candidate_decisions d ON d.candidate_id = r.candidate_id
+                WHERE r.status = 'pending' AND r.expires_at >= ?
+                ORDER BY r.created_at DESC
+                """,
+                (now,),
+            ).fetchall()
+
+    def save_deployment_result(
+        self,
+        result_id: str,
+        candidate_id: str,
+        status: str,
+        deployed_at: str,
+        tx_hash: str | None = None,
+        contract_address: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        latency_ms: int = 0,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO deployment_results
+                    (id, candidate_id, status, tx_hash, contract_address, error_code, error_message, latency_ms, deployed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    status = excluded.status,
+                    tx_hash = excluded.tx_hash,
+                    contract_address = excluded.contract_address,
+                    error_code = excluded.error_code,
+                    error_message = excluded.error_message,
+                    latency_ms = excluded.latency_ms
+                """,
+                (result_id, candidate_id, status, tx_hash, contract_address, error_code, error_message, latency_ms, deployed_at),
+            )
+
+    def list_recent_deployments(self, limit: int = 10) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM deployment_results ORDER BY deployed_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+    def get_stats(self) -> dict:
+        with self._connect() as conn:
+            now = _utc_now_iso()
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM review_items WHERE status = 'pending' AND expires_at >= ?", (now,)
+            ).fetchone()[0]
+            total_candidates = conn.execute("SELECT COUNT(*) FROM signal_candidates").fetchone()[0]
+            deployed = conn.execute(
+                "SELECT COUNT(*) FROM deployment_results WHERE status = 'deploy_success'"
+            ).fetchone()[0]
+            failed = conn.execute(
+                "SELECT COUNT(*) FROM deployment_results WHERE status = 'deploy_failed'"
+            ).fetchone()[0]
+            rejected = conn.execute(
+                "SELECT COUNT(*) FROM review_items WHERE status = 'rejected'"
+            ).fetchone()[0]
+        return {
+            "pending_reviews": pending,
+            "total_candidates": total_candidates,
+            "deployed": deployed,
+            "deploy_failed": failed,
+            "rejected": rejected,
+        }

@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from clankandclaw.core.deploy_preparation import DeployPreparation, DeployPreparationError
@@ -78,7 +80,20 @@ class DeployWorker:
             logger.info(f"Executing deployment for {candidate_id}")
             deploy_result = await self.deployer.deploy(deploy_request)
 
-            # Step 4: Send notification based on result
+            # Step 4: Persist deployment result
+            self.db.save_deployment_result(
+                result_id=str(uuid.uuid4()),
+                candidate_id=candidate_id,
+                status=deploy_result.status,
+                deployed_at=deploy_result.completed_at,
+                tx_hash=deploy_result.tx_hash,
+                contract_address=deploy_result.contract_address,
+                error_code=deploy_result.error_code,
+                error_message=deploy_result.error_message,
+                latency_ms=deploy_result.latency_ms,
+            )
+
+            # Step 5: Send notification based on result
             if deploy_result.status == "deploy_success":
                 logger.info(
                     f"Deploy successful for {candidate_id}: "

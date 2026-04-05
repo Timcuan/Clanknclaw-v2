@@ -51,28 +51,21 @@ class Supervisor:
             logger.warning(f"Pinata client not configured: {exc}")
             pinata = None  # type: ignore
 
-        deployer = ClankerDeployer()
+        deployer = ClankerDeployer(
+            rpc_url=self.config.deployment.base_rpc_url or None,
+            executor_path=__import__("pathlib").Path(self.config.deployment.executor_path) if self.config.deployment.executor_path else None,
+            node_script_path=__import__("pathlib").Path(self.config.deployment.node_script_path) if self.config.deployment.node_script_path else None,
+        )
 
-        # Initialize workers
-        x_detector = XDetectorWorker(
-            self.db,
-            poll_interval=self.config.x_detector.poll_interval,
-            keywords=self.config.x_detector.keywords,
-            max_results=self.config.x_detector.max_results,
-        )
-        gmgn_detector = GMGNDetectorWorker(
-            self.db,
-            poll_interval=self.config.gmgn_detector.poll_interval,
-            api_url=self.config.gmgn_detector.api_url,
-            max_results=self.config.gmgn_detector.max_results,
-        )
+        # Initialize Telegram worker
         telegram = TelegramWorker(
             self.db,
             review_expiry_seconds=self.config.app.review_expiry_seconds,
             bot_token=self.config.telegram.bot_token or None,
             chat_id=self.config.telegram.chat_id or None,
         )
-        
+        self._workers["telegram"] = telegram
+
         # Initialize deploy worker if pinata is available
         if pinata:
             deploy = DeployWorker(
@@ -85,21 +78,35 @@ class Supervisor:
                 tax_bps=self.config.deployment.tax_bps,
             )
             self._workers["deploy"] = deploy
-        else:
-            logger.warning("Deploy worker disabled (Pinata not configured)")
-            deploy = None
-        
-        # Wire workers together
-        x_detector.set_telegram_worker(telegram)
-        gmgn_detector.set_telegram_worker(telegram)
-        
-        if deploy:
             deploy.set_telegram_worker(telegram)
             telegram.set_deploy_preparation(deploy)
-        
-        self._workers["x_detector"] = x_detector
-        self._workers["gmgn_detector"] = gmgn_detector
-        self._workers["telegram"] = telegram
+        else:
+            logger.warning("Deploy worker disabled (Pinata not configured)")
+
+        # Initialize detector workers (only if enabled)
+        if self.config.x_detector.enabled:
+            x_detector = XDetectorWorker(
+                self.db,
+                poll_interval=self.config.x_detector.poll_interval,
+                keywords=self.config.x_detector.keywords,
+                max_results=self.config.x_detector.max_results,
+            )
+            x_detector.set_telegram_worker(telegram)
+            self._workers["x_detector"] = x_detector
+        else:
+            logger.info("X detector disabled by config")
+
+        if self.config.gmgn_detector.enabled:
+            gmgn_detector = GMGNDetectorWorker(
+                self.db,
+                poll_interval=self.config.gmgn_detector.poll_interval,
+                api_url=self.config.gmgn_detector.api_url,
+                max_results=self.config.gmgn_detector.max_results,
+            )
+            gmgn_detector.set_telegram_worker(telegram)
+            self._workers["gmgn_detector"] = gmgn_detector
+        else:
+            logger.info("GMGN detector disabled by config")
 
         # Start all workers
         for name, worker in self._workers.items():

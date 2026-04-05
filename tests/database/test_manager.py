@@ -161,6 +161,7 @@ def test_database_manager_upgrades_legacy_review_items_schema(tmp_path, monkeypa
         "expires_at",
         "locked_by",
         "locked_at",
+        "telegram_message_id",
     ]
     assert any(row[2] == "signal_candidates" and row[3] == "candidate_id" and row[4] == "id" for row in foreign_keys)
     row = db.get_review_item("review-1")

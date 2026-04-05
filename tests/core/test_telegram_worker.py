@@ -27,8 +27,10 @@ def make_worker(db: DatabaseManager) -> TelegramWorker:
 def make_mock_bot() -> MagicMock:
     bot = MagicMock()
     bot.send_review_notification = AsyncMock(return_value=42)
+    bot.send_deploy_preparing = AsyncMock()
     bot.send_deploy_success = AsyncMock()
     bot.send_deploy_failure = AsyncMock()
+    bot.start_polling = AsyncMock()
     bot.stop = AsyncMock()
     return bot
 
@@ -80,7 +82,13 @@ async def test_send_review_notification_creates_review_item(db):
     assert row is not None
     assert row["candidate_id"] == "x-1"
     assert row["status"] == "pending"
-    bot.send_review_notification.assert_awaited_once_with("x-1", "priority_review", 85, ["kw"])
+    bot.send_review_notification.assert_awaited_once_with(
+        "x-1", "priority_review", 85, ["kw"],
+        raw_text="deploy token Moon symbol MOON",
+        source="x",
+        context_url=None,
+        author_handle=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -162,7 +170,7 @@ async def test_handle_approve_prevents_double_approval(db):
 # ── _handle_reject ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_handle_reject_locks_review_without_deploy(db):
+async def test_handle_reject_marks_rejected_without_deploy(db):
     bot = make_mock_bot()
     worker = make_worker(db)
     with patch("clankandclaw.core.workers.telegram_worker.TelegramBot", return_value=bot):
@@ -178,7 +186,7 @@ async def test_handle_reject_locks_review_without_deploy(db):
 
     deploy_prep.prepare_and_deploy.assert_not_awaited()
     row = db.get_review_item("review-x-1")
-    assert row["status"] == "deploying"  # locked but no deploy triggered
+    assert row["status"] == "rejected"
 
 
 # ── deploy result notifications ───────────────────────────────────────────────
