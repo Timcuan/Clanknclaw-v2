@@ -51,8 +51,6 @@ htmlcov/
 *.db-journal
 *.db-wal
 *.db-shm
-clankandclaw.db*
-!tmp-review-schema.db
 
 # Logs
 *.log
