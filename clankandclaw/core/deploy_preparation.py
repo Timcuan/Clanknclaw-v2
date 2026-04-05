@@ -194,7 +194,7 @@ class DeployPreparation:
             fingerprint=row["fingerprint"],
             author_handle=metadata.get("author_handle"),
             context_url=metadata.get("context_url"),
-            suggested_name=None,
-            suggested_symbol=None,
+            suggested_name=metadata.get("suggested_name"),
+            suggested_symbol=metadata.get("suggested_symbol"),
             metadata=metadata,
         )

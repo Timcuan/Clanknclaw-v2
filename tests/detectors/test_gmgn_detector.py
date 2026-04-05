@@ -38,6 +38,44 @@ def test_normalize_gmgn_payload_extracts_image_url_from_token_data():
     assert candidate.metadata["image_url"] == "https://example.com/logo.png"
 
 
+def test_normalize_gmgn_payload_extracts_suggested_name_symbol_from_token_data():
+    candidate = normalize_gmgn_payload(
+        {
+            "id": "g4",
+            "text": "New token launch on Base chain: Moon (MOON)",
+            "author": "gmgn",
+            "token_data": {"name": "Moon", "symbol": "MOON"},
+        },
+        "https://gmgn.ai/base/token/g4",
+    )
+    assert candidate.suggested_name == "Moon"
+    assert candidate.suggested_symbol == "MOON"
+    assert candidate.metadata["suggested_name"] == "Moon"
+    assert candidate.metadata["suggested_symbol"] == "MOON"
+
+
+def test_normalize_gmgn_payload_uppercases_symbol():
+    candidate = normalize_gmgn_payload(
+        {
+            "id": "g5",
+            "text": "launch",
+            "author": "gmgn",
+            "token_data": {"name": "Pepe", "symbol": "pepe"},
+        },
+        "https://gmgn.ai/base/token/g5",
+    )
+    assert candidate.suggested_symbol == "PEPE"
+
+
+def test_normalize_gmgn_payload_no_token_data_leaves_suggested_none():
+    candidate = normalize_gmgn_payload(
+        {"id": "g6", "text": "launch", "author": "gmgn"},
+        "https://gmgn.ai/base/token/g6",
+    )
+    assert candidate.suggested_name is None
+    assert candidate.suggested_symbol is None
+
+
 def test_normalize_gmgn_payload_falls_back_to_current_utc_time(monkeypatch):
     monkeypatch.setattr(gmgn_detector, "_utc_now_iso", lambda: "2026-04-04T01:02:03Z")
 

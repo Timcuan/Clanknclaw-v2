@@ -36,3 +36,24 @@ def test_extract_token_identity_raises_when_regex_and_fallback_fail(
 
     with pytest.raises(ValueError, match="token identity extraction failed"):
         extraction.extract_token_identity("launch something ambiguous")
+
+
+def test_extract_token_identity_cashtag_pattern():
+    result = extraction.extract_token_identity("launching $PEPE on Base network")
+    assert result.symbol == "PEPE"
+    assert result.name == "PEPE"
+    assert result.used_llm is False
+
+
+def test_extract_token_identity_parens_pattern():
+    result = extraction.extract_token_identity("New token launch on Base chain: Moon (MOON)")
+    assert result.name == "Moon"
+    assert result.symbol == "MOON"
+    assert result.used_llm is False
+
+
+def test_extract_token_identity_prefers_structured_over_cashtag():
+    # Pattern 1 (token X symbol Y) takes priority over $TICKER
+    result = extraction.extract_token_identity("deploy token Pepe symbol PEPE $OTHER")
+    assert result.name == "Pepe"
+    assert result.symbol == "PEPE"

@@ -39,6 +39,8 @@ def normalize_gmgn_payload(payload: dict, context_url: str) -> SignalCandidate:
         or token_data.get("logo_uri")
         or None
     )
+    suggested_name = (token_data.get("name") or "").strip()[:50] or None
+    suggested_symbol = (token_data.get("symbol") or "").strip()[:10].upper() or None
 
     metadata: dict = {"collector_mode": "remote_or_proxied"}
     if context_url:
@@ -47,6 +49,10 @@ def normalize_gmgn_payload(payload: dict, context_url: str) -> SignalCandidate:
         metadata["author_handle"] = author_handle
     if image_url:
         metadata["image_url"] = image_url
+    if suggested_name:
+        metadata["suggested_name"] = suggested_name
+    if suggested_symbol:
+        metadata["suggested_symbol"] = suggested_symbol
 
     return SignalCandidate(
         id=f"gmgn-{payload['id']}",
@@ -57,5 +63,7 @@ def normalize_gmgn_payload(payload: dict, context_url: str) -> SignalCandidate:
         author_handle=author_handle,
         context_url=context_url,
         fingerprint=fingerprint,
+        suggested_name=suggested_name,
+        suggested_symbol=suggested_symbol,
         metadata=metadata,
     )

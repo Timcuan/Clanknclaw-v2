@@ -126,7 +126,7 @@ class GMGNDetectorWorker:
         symbol = token.get("symbol", "???")
         
         # Try to extract any description or social links
-        description_parts = [f"New token launch: {name} ({symbol})"]
+        description_parts = [f"New token launch on Base chain: {name} ({symbol})"]
         
         if "twitter" in token:
             description_parts.append(f"Twitter: {token['twitter']}")
