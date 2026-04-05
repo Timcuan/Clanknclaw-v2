@@ -94,7 +94,6 @@ class DeployRequest(BaseModel):
     token_name: str
     token_symbol: str
     image_uri: str
-    metadata_uri: str
     tax_bps: int = Field(ge=0)
     tax_recipient: str
     token_admin_enabled: bool
