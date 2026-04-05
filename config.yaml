@@ -1,6 +1,24 @@
 app:
   log_level: INFO
   review_expiry_seconds: 900
+
+x_detector:
+  enabled: true
+  poll_interval: 30.0
+  keywords:
+    - deploy
+    - launch
+  max_results: 20
+
+gmgn_detector:
+  enabled: true
+  poll_interval: 60.0
+  api_url: "https://gmgn.ai/defi/quotation/v1/tokens/base/new"
+  max_results: 20
+
 deployment:
   platform: clanker
   tax_bps: 1000
+  base_rpc_url: "https://mainnet.base.org"
+  # executor_path: "/path/to/Clank n Claw - Executor"  # override via EXECUTOR_PATH env var
+  # node_script_path: "/path/to/scripts/clanker_deploy.mjs"  # override via NODE_SCRIPT_PATH env var

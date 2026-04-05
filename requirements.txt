@@ -1,4 +1,4 @@
-aiogram
+aiogram==3.4.1
 httpx
 pillow
 pydantic
@@ -6,4 +6,3 @@ pyyaml
 pytest
 pytest-asyncio
 twscrape
-web3

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -153,10 +154,25 @@ class DatabaseManager:
                         source TEXT NOT NULL,
                         source_event_id TEXT NOT NULL,
                         fingerprint TEXT NOT NULL,
-                        raw_text TEXT NOT NULL
+                        raw_text TEXT NOT NULL,
+                        observed_at TEXT NOT NULL DEFAULT '',
+                        metadata_json TEXT NOT NULL DEFAULT '{}'
                     );
                     """
                 )
+                # Migrate existing signal_candidates tables that are missing new columns
+                sc_columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(signal_candidates)").fetchall()
+                }
+                if "observed_at" not in sc_columns:
+                    conn.execute(
+                        "ALTER TABLE signal_candidates ADD COLUMN observed_at TEXT NOT NULL DEFAULT ''"
+                    )
+                if "metadata_json" not in sc_columns:
+                    conn.execute(
+                        "ALTER TABLE signal_candidates ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+                    )
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS candidate_decisions (
@@ -202,11 +218,18 @@ class DatabaseManager:
         source_event_id: str,
         fingerprint: str,
         raw_text: str,
+        observed_at: str = "",
+        metadata: dict | None = None,
     ) -> None:
+        metadata_json = json.dumps(metadata or {})
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO signal_candidates (id, source, source_event_id, fingerprint, raw_text) VALUES (?, ?, ?, ?, ?)",
-                (candidate_id, source, source_event_id, fingerprint, raw_text),
+                """
+                INSERT INTO signal_candidates
+                    (id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (candidate_id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json),
             )
 
     def save_candidate_and_decision(
@@ -220,21 +243,27 @@ class DatabaseManager:
         decision: str,
         reason_codes: list[str],
         recommended_platform: str,
+        observed_at: str = "",
+        metadata: dict | None = None,
     ) -> None:
+        metadata_json = json.dumps(metadata or {})
         with self._connect() as conn:
             conn.execute("BEGIN")
             try:
                 conn.execute(
                     """
-                    INSERT INTO signal_candidates (id, source, source_event_id, fingerprint, raw_text)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO signal_candidates
+                        (id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         source = excluded.source,
                         source_event_id = excluded.source_event_id,
                         fingerprint = excluded.fingerprint,
-                        raw_text = excluded.raw_text
+                        raw_text = excluded.raw_text,
+                        observed_at = excluded.observed_at,
+                        metadata_json = excluded.metadata_json
                     """,
-                    (candidate_id, source, source_event_id, fingerprint, raw_text),
+                    (candidate_id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json),
                 )
                 conn.execute(
                     """
@@ -271,6 +300,14 @@ class DatabaseManager:
         with self._connect() as conn:
             return conn.execute(
                 "SELECT * FROM candidate_decisions WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+
+    def get_candidate(self, candidate_id: str) -> Optional[sqlite3.Row]:
+        """Get candidate by ID."""
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM signal_candidates WHERE id = ?",
                 (candidate_id,),
             ).fetchone()
 

@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+_TX_HASH_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
 
 
 def _validate_iso_datetime(value: Any, field_name: str) -> str:
@@ -118,6 +119,15 @@ class DeployResult(BaseModel):
     error_code: str | None = None
     error_message: str | None = None
     completed_at: str
+
+    @field_validator("tx_hash", mode="before")
+    @classmethod
+    def validate_tx_hash(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not _TX_HASH_RE.fullmatch(value):
+            raise ValueError("tx_hash must be 0x followed by 64 hex characters")
+        return value
 
     @field_validator("contract_address", mode="before")
     @classmethod

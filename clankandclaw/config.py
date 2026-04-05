@@ -11,9 +11,26 @@ class AppSection(BaseModel):
     review_expiry_seconds: int = 900
 
 
+class XDetectorSection(BaseModel):
+    enabled: bool = True
+    poll_interval: float = 30.0
+    keywords: list[str] = Field(default_factory=lambda: ["deploy", "launch"])
+    max_results: int = 20
+
+
+class GMGNDetectorSection(BaseModel):
+    enabled: bool = True
+    poll_interval: float = 60.0
+    api_url: str = "https://gmgn.ai/defi/quotation/v1/tokens/base/new"
+    max_results: int = 20
+
+
 class DeploymentSection(BaseModel):
     platform: str = "clanker"
     tax_bps: int = 1000
+    base_rpc_url: str = "https://mainnet.base.org"
+    executor_path: str = ""  # Path to Clank n Claw - Executor directory
+    node_script_path: str = ""  # Override path to clanker_deploy.mjs
 
 
 class WalletSection(BaseModel):
@@ -24,6 +41,8 @@ class WalletSection(BaseModel):
 
 class AppConfig(BaseModel):
     app: AppSection = Field(default_factory=AppSection)
+    x_detector: XDetectorSection = Field(default_factory=XDetectorSection)
+    gmgn_detector: GMGNDetectorSection = Field(default_factory=GMGNDetectorSection)
     deployment: DeploymentSection = Field(default_factory=DeploymentSection)
     wallets: WalletSection
 
@@ -36,6 +55,16 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("YAML root must be a mapping")
     else:
         raw = dict(raw)
+    # Inject env-var overrides into deployment section
+    if "deployment" not in raw:
+        raw["deployment"] = {}
+    if os.getenv("BASE_RPC_URL"):
+        raw["deployment"].setdefault("base_rpc_url", os.getenv("BASE_RPC_URL"))
+    if os.getenv("EXECUTOR_PATH"):
+        raw["deployment"].setdefault("executor_path", os.getenv("EXECUTOR_PATH"))
+    if os.getenv("NODE_SCRIPT_PATH"):
+        raw["deployment"].setdefault("node_script_path", os.getenv("NODE_SCRIPT_PATH"))
+
     wallets = {
         "deployer_signer_private_key": os.getenv("DEPLOYER_SIGNER_PRIVATE_KEY"),
         "token_admin": os.getenv("TOKEN_ADMIN_ADDRESS"),

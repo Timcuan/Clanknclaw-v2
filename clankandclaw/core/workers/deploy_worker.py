@@ -1,0 +1,124 @@
+"""Deploy worker for handling deployment preparation and execution."""
+
+import asyncio
+import logging
+from typing import Any
+
+from clankandclaw.core.deploy_preparation import DeployPreparation, DeployPreparationError
+from clankandclaw.database.manager import DatabaseManager
+from clankandclaw.deployers.clanker import ClankerDeployer
+from clankandclaw.models.token import SignalCandidate
+from clankandclaw.utils.ipfs import PinataClient
+
+logger = logging.getLogger(__name__)
+
+
+class DeployWorker:
+    """Worker that handles deploy preparation and execution."""
+
+    def __init__(
+        self,
+        db: DatabaseManager,
+        pinata_client: PinataClient,
+        deployer: ClankerDeployer,
+        signer_wallet: str,
+        token_admin: str,
+        fee_recipient: str,
+        tax_bps: int = 1000,
+    ):
+        self.db = db
+        self.preparation = DeployPreparation(
+            db=db,
+            pinata_client=pinata_client,
+            deployer=deployer,
+            signer_wallet=signer_wallet,
+            token_admin=token_admin,
+            fee_recipient=fee_recipient,
+            tax_bps=tax_bps,
+        )
+        self.deployer = deployer
+        self._telegram_worker: Any = None  # Will be set by supervisor
+        self._running = False
+
+    def set_telegram_worker(self, telegram_worker: Any) -> None:
+        """Set the telegram worker for sending notifications."""
+        self._telegram_worker = telegram_worker
+
+    async def start(self) -> None:
+        """Start the deploy worker (no background task needed)."""
+        self._running = True
+        logger.info("Deploy worker started")
+
+    async def stop(self) -> None:
+        """Stop the deploy worker."""
+        self._running = False
+        logger.info("Deploy worker stopped")
+
+    async def prepare_and_deploy(self, candidate_id: str) -> None:
+        """Prepare and execute deployment for an approved candidate."""
+        if not self._running:
+            logger.warning("Deploy worker not running")
+            return
+
+        logger.info(f"Starting deploy process for {candidate_id}")
+
+        try:
+            # Step 1: Get candidate from database
+            # For MVP, we'll need to reconstruct the candidate
+            # In production, you'd store the full candidate or have a proper query
+            candidate = await self._get_candidate(candidate_id)
+            if not candidate:
+                raise DeployPreparationError(f"Candidate {candidate_id} not found")
+
+            # Step 2: Prepare deploy request
+            logger.info(f"Preparing deploy request for {candidate_id}")
+            deploy_request = await self.preparation.prepare_deploy_request(candidate)
+
+            # Step 3: Execute deployment
+            logger.info(f"Executing deployment for {candidate_id}")
+            deploy_result = await self.deployer.deploy(deploy_request)
+
+            # Step 4: Send notification based on result
+            if deploy_result.status == "deploy_success":
+                logger.info(
+                    f"Deploy successful for {candidate_id}: "
+                    f"tx={deploy_result.tx_hash}, contract={deploy_result.contract_address}"
+                )
+                if self._telegram_worker:
+                    await self._telegram_worker.send_deploy_success(
+                        candidate_id,
+                        deploy_result.tx_hash or "unknown",
+                        deploy_result.contract_address or "unknown",
+                    )
+            else:
+                logger.error(
+                    f"Deploy failed for {candidate_id}: "
+                    f"{deploy_result.error_code} - {deploy_result.error_message}"
+                )
+                if self._telegram_worker:
+                    await self._telegram_worker.send_deploy_failure(
+                        candidate_id,
+                        deploy_result.error_code or "unknown",
+                        deploy_result.error_message or "Unknown error",
+                    )
+
+        except DeployPreparationError as exc:
+            logger.error(f"Deploy preparation failed for {candidate_id}: {exc}")
+            if self._telegram_worker:
+                await self._telegram_worker.send_deploy_failure(
+                    candidate_id,
+                    "preparation_failed",
+                    str(exc),
+                )
+        except Exception as exc:
+            logger.error(f"Deploy failed for {candidate_id}: {exc}", exc_info=True)
+            if self._telegram_worker:
+                await self._telegram_worker.send_deploy_failure(
+                    candidate_id,
+                    "deploy_failed",
+                    str(exc),
+                )
+
+    async def _get_candidate(self, candidate_id: str) -> SignalCandidate | None:
+        """Get candidate from database."""
+        return await self.preparation.get_candidate_by_id(candidate_id)

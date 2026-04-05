@@ -25,6 +25,8 @@ def process_candidate(db, candidate: SignalCandidate) -> ScoredCandidate:
             decision=scored.decision,
             reason_codes=scored.reason_codes,
             recommended_platform=scored.recommended_platform,
+            observed_at=candidate.observed_at,
+            metadata=candidate.metadata,
         )
         return scored
     score = score_candidate(candidate)
@@ -47,5 +49,7 @@ def process_candidate(db, candidate: SignalCandidate) -> ScoredCandidate:
         decision=scored.decision,
         reason_codes=scored.reason_codes,
         recommended_platform=scored.recommended_platform,
+        observed_at=candidate.observed_at,
+        metadata=candidate.metadata,
     )
     return scored
