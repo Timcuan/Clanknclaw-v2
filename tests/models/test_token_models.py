@@ -20,7 +20,6 @@ def _valid_deploy_request_data() -> dict[str, object]:
         "token_name": "Pepe",
         "token_symbol": "PEPE",
         "image_uri": "ipfs://image",
-        "metadata_uri": "ipfs://meta",
         "tax_bps": 1000,
         "tax_recipient": "0x0000000000000000000000000000000000000004",
         "token_admin_enabled": True,
