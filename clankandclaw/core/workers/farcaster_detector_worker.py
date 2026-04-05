@@ -1,0 +1,202 @@
+"""Farcaster detector worker for polling and processing Farcaster signals."""
+
+import asyncio
+import logging
+from collections import deque
+from datetime import datetime, timezone
+from time import perf_counter
+from typing import Any
+
+import httpx
+
+from clankandclaw.core.detectors.farcaster_detector import normalize_farcaster_event
+from clankandclaw.core.pipeline import process_candidate
+from clankandclaw.database.manager import DatabaseManager
+
+logger = logging.getLogger(__name__)
+
+
+class FarcasterDetectorWorker:
+    def __init__(
+        self,
+        db: DatabaseManager,
+        *,
+        poll_interval: float = 35.0,
+        api_url: str = "https://api.neynar.com/v2/farcaster/cast/search/",
+        api_key: str | None = None,
+        max_results: int = 20,
+        target_handles: list[str] | None = None,
+        query_terms: list[str] | None = None,
+        request_timeout_seconds: float = 20.0,
+        max_process_concurrency: int = 8,
+    ):
+        self.db = db
+        self.poll_interval = poll_interval
+        self.api_url = api_url
+        self.api_key = api_key or ""
+        self.max_results = max_results
+        self.target_handles = [h.lower().lstrip("@") for h in (target_handles or ["bankr", "clanker"])]
+        self.query_terms = query_terms or ["deploy", "launch", "contract", "ca", "token"]
+        self.request_timeout_seconds = request_timeout_seconds
+        self.max_process_concurrency = max(1, max_process_concurrency)
+        self._running = False
+        self._task: asyncio.Task[None] | None = None
+        self._telegram_worker: Any = None
+        self._last_poll_time: datetime | None = None
+        self._seen_cast_ids: deque[str] = deque(maxlen=5000)
+        self._billing_blocked = False
+        self._http_client: httpx.AsyncClient | None = None
+        self._process_semaphore = asyncio.Semaphore(self.max_process_concurrency)
+
+    def set_telegram_worker(self, telegram_worker: Any) -> None:
+        self._telegram_worker = telegram_worker
+
+    async def start(self) -> None:
+        if self._running:
+            logger.warning("Farcaster detector worker already running")
+            return
+        if not self.api_key:
+            logger.warning("Farcaster detector started without NEYNAR_API_KEY; polling may fail")
+        self._running = True
+        self._last_poll_time = datetime.now(timezone.utc)
+        self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_seconds))
+        self._task = asyncio.create_task(self._run())
+        logger.info("Farcaster detector worker started")
+
+    async def stop(self) -> None:
+        if not self._running:
+            return
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
+        logger.info("Farcaster detector worker stopped")
+
+    async def _run(self) -> None:
+        while self._running:
+            try:
+                await self._poll_and_process()
+            except Exception as exc:
+                logger.error("Error in Farcaster detector worker: %s", exc, exc_info=True)
+            await asyncio.sleep(self.poll_interval)
+
+    def _build_queries(self) -> list[str]:
+        term_expr = " OR ".join(sorted(set(self.query_terms)))
+        queries = [f"{handle} ({term_expr})" for handle in self.target_handles]
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for query in queries:
+            if query in seen:
+                continue
+            seen.add(query)
+            deduped.append(query)
+        return deduped
+
+    async def _poll_and_process(self) -> None:
+        started = perf_counter()
+        headers = {"accept": "application/json"}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        if self._billing_blocked:
+            logger.warning("Farcaster detector polling paused: Neynar cast search requires paid plan")
+            return
+
+        client = self._http_client or httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_seconds))
+        processed_count = 0
+        for query in self._build_queries():
+                params = {"q": query, "limit": self.max_results}
+                try:
+                    response = await self._request_with_retry(client, headers, params)
+                    if response.status_code == 402:
+                        self._billing_blocked = True
+                        logger.error("Neynar API returned 402 PaymentRequired; disable farcaster_detector or upgrade plan")
+                        return
+                    response.raise_for_status()
+                except httpx.HTTPError as exc:
+                    logger.error("HTTP error polling Farcaster query '%s': %s", query, exc)
+                    continue
+
+                payload = response.json()
+                casts = payload.get("result", {}).get("casts", payload.get("casts", []))
+                logger.info("Fetched %s Farcaster casts for query '%s'", len(casts), query)
+                process_tasks: list[asyncio.Task[None]] = []
+                for cast in casts:
+                    cast_id = str(cast.get("hash") or cast.get("id") or "")
+                    if not cast_id or cast_id in self._seen_cast_ids:
+                        continue
+                    self._seen_cast_ids.append(cast_id)
+
+                    author = cast.get("author") or {}
+                    text = str(cast.get("text") or "")
+                    reactions = cast.get("reactions") or {}
+                    replies = cast.get("replies") or {}
+                    mentions = cast.get("mentioned_profiles") or cast.get("mentions") or []
+                    mentioned_handles = []
+                    for mention in mentions:
+                        if isinstance(mention, dict):
+                            username = mention.get("username")
+                            if username:
+                                mentioned_handles.append(str(username))
+
+                    event = {
+                        "id": cast_id,
+                        "text": text,
+                        "author": {"username": author.get("username")},
+                        "created_at": cast.get("timestamp"),
+                        "mentioned_handles": mentioned_handles,
+                        "like_count": int(reactions.get("likes_count") or 0),
+                        "recast_count": int(reactions.get("recasts_count") or 0),
+                        "reply_count": int(replies.get("count") or 0),
+                    }
+                    context_url = str(cast.get("permalink") or f"https://warpcast.com/~/conversations/{cast_id}")
+                    process_tasks.append(asyncio.create_task(self._process_event_with_semaphore(event, context_url)))
+                if process_tasks:
+                    await asyncio.gather(*process_tasks)
+                    processed_count += len(process_tasks)
+
+        self._last_poll_time = datetime.now(timezone.utc)
+        logger.info("farcaster.loop_ms=%d processed=%d", int((perf_counter() - started) * 1000), processed_count)
+
+    async def _request_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        params: dict[str, Any],
+    ) -> httpx.Response:
+        for attempt in range(3):
+            response = await client.get(self.api_url, headers=headers, params=params)
+            if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+                await asyncio.sleep(0.35 * (attempt + 1))
+                continue
+            return response
+        return response
+
+    async def process_event(self, event: dict[str, Any], context_url: str) -> None:
+        try:
+            candidate = normalize_farcaster_event(event, context_url)
+            scored = await asyncio.to_thread(process_candidate, self.db, candidate)
+            if scored.decision in ("review", "priority_review"):
+                logger.info("Candidate %s scored %s -> %s", candidate.id, scored.score, scored.decision)
+                if self._telegram_worker:
+                    await self._telegram_worker.send_review_notification(
+                        candidate.id,
+                        scored.review_priority,
+                        scored.score,
+                        scored.reason_codes,
+                    )
+                else:
+                    logger.warning("Telegram worker not set, cannot send notification")
+            else:
+                logger.debug("Candidate %s skipped: %s", candidate.id, scored.reason_codes)
+        except Exception as exc:
+            logger.error("Error processing Farcaster event: %s", exc, exc_info=True)
+
+    async def _process_event_with_semaphore(self, event: dict[str, Any], context_url: str) -> None:
+        async with self._process_semaphore:
+            await self.process_event(event, context_url)

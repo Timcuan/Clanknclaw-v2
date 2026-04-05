@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any
@@ -33,10 +34,15 @@ class TelegramWorker:
         self._task: asyncio.Task[None] | None = None
         self._bot: TelegramBot | None = None
         self._deploy_preparation: Any = None  # Will be set by supervisor
+        self._rewards_claimer: Any = None
 
     def set_deploy_preparation(self, deploy_preparation: Any) -> None:
         """Set the deploy preparation handler."""
         self._deploy_preparation = deploy_preparation
+
+    def set_rewards_claimer(self, rewards_claimer: Any) -> None:
+        """Set the optional rewards claimer."""
+        self._rewards_claimer = rewards_claimer
 
     async def start(self) -> None:
         """Start the Telegram worker."""
@@ -54,6 +60,7 @@ class TelegramWorker:
             # Set callback handlers
             self._bot.on_approve = self._handle_approve
             self._bot.on_reject = self._handle_reject
+            self._bot.on_claim_fees = self._handle_claim_fees
 
             self._running = True
             self._task = asyncio.create_task(self._run())
@@ -229,3 +236,19 @@ class TelegramWorker:
         if not self._bot:
             return
         await self._bot.send_deploy_failure(candidate_id, error_code, error_message)
+
+    async def _handle_claim_fees(self, token_address: str) -> Any:
+        """Handle manual claim fees request from Telegram command."""
+        if not self._rewards_claimer:
+            raise ValueError("Rewards claimer is not configured")
+        result = await self._rewards_claimer.claim(token_address)
+        self.db.save_reward_claim_result(
+            result_id=str(uuid.uuid4()),
+            token_address=token_address,
+            status=result.status,
+            tx_hash=result.tx_hash,
+            error_code=result.error_code,
+            error_message=result.error_message,
+            claimed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return result

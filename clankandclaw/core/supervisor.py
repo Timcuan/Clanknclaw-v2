@@ -7,11 +7,13 @@ from typing import Any
 
 from clankandclaw.config import AppConfig
 from clankandclaw.core.workers.deploy_worker import DeployWorker
-from clankandclaw.core.workers.gmgn_detector_worker import GMGNDetectorWorker
+from clankandclaw.core.workers.farcaster_detector_worker import FarcasterDetectorWorker
+from clankandclaw.core.workers.gecko_detector_worker import GeckoDetectorWorker
 from clankandclaw.core.workers.telegram_worker import TelegramWorker
 from clankandclaw.core.workers.x_detector_worker import XDetectorWorker
 from clankandclaw.database.manager import DatabaseManager
 from clankandclaw.deployers.clanker import ClankerDeployer
+from clankandclaw.rewards.claimer import ClankerRewardsClaimer
 from clankandclaw.utils.ipfs import PinataClient
 
 logger = logging.getLogger(__name__)
@@ -53,8 +55,12 @@ class Supervisor:
 
         deployer = ClankerDeployer(
             rpc_url=self.config.deployment.base_rpc_url or None,
-            executor_path=__import__("pathlib").Path(self.config.deployment.executor_path) if self.config.deployment.executor_path else None,
+            node_modules_path=__import__("pathlib").Path(self.config.deployment.clanker_node_modules_path) if self.config.deployment.clanker_node_modules_path else None,
             node_script_path=__import__("pathlib").Path(self.config.deployment.node_script_path) if self.config.deployment.node_script_path else None,
+        )
+        rewards_claimer = ClankerRewardsClaimer(
+            rpc_url=self.config.deployment.base_rpc_url,
+            private_key=self.config.wallets.deployer_signer_private_key,
         )
 
         # Initialize Telegram worker
@@ -65,6 +71,7 @@ class Supervisor:
             chat_id=self.config.telegram.chat_id or None,
         )
         self._workers["telegram"] = telegram
+        telegram.set_rewards_claimer(rewards_claimer)
 
         # Initialize deploy worker if pinata is available
         if pinata:
@@ -76,6 +83,10 @@ class Supervisor:
                 token_admin=self.config.wallets.token_admin,
                 fee_recipient=self.config.wallets.fee_recipient,
                 tax_bps=self.config.deployment.tax_bps,
+                clanker_fee_bps=self.config.deployment.clanker_fee_bps,
+                paired_fee_bps=self.config.deployment.paired_fee_bps,
+                token_admin_enabled=self.config.deployment.token_admin_enabled,
+                token_reward_enabled=self.config.deployment.token_reward_enabled,
             )
             self._workers["deploy"] = deploy
             deploy.set_telegram_worker(telegram)
@@ -90,23 +101,53 @@ class Supervisor:
                 poll_interval=self.config.x_detector.poll_interval,
                 keywords=self.config.x_detector.keywords,
                 max_results=self.config.x_detector.max_results,
+                target_handles=self.config.x_detector.target_handles,
+                query_terms=self.config.x_detector.query_terms,
+                max_process_concurrency=self.config.x_detector.max_process_concurrency,
             )
             x_detector.set_telegram_worker(telegram)
             self._workers["x_detector"] = x_detector
         else:
             logger.info("X detector disabled by config")
 
-        if self.config.gmgn_detector.enabled:
-            gmgn_detector = GMGNDetectorWorker(
+        if self.config.farcaster_detector.enabled:
+            farcaster_detector = FarcasterDetectorWorker(
                 self.db,
-                poll_interval=self.config.gmgn_detector.poll_interval,
-                api_url=self.config.gmgn_detector.api_url,
-                max_results=self.config.gmgn_detector.max_results,
+                poll_interval=self.config.farcaster_detector.poll_interval,
+                api_url=self.config.farcaster_detector.api_url,
+                api_key=self.config.farcaster_detector.api_key,
+                max_results=self.config.farcaster_detector.max_results,
+                target_handles=self.config.farcaster_detector.target_handles,
+                query_terms=self.config.farcaster_detector.query_terms,
+                request_timeout_seconds=self.config.farcaster_detector.request_timeout_seconds,
+                max_process_concurrency=self.config.farcaster_detector.max_process_concurrency,
             )
-            gmgn_detector.set_telegram_worker(telegram)
-            self._workers["gmgn_detector"] = gmgn_detector
+            farcaster_detector.set_telegram_worker(telegram)
+            self._workers["farcaster_detector"] = farcaster_detector
         else:
-            logger.info("GMGN detector disabled by config")
+            logger.info("Farcaster detector disabled by config")
+
+        if self.config.gecko_detector.enabled:
+            gecko_detector = GeckoDetectorWorker(
+                self.db,
+                poll_interval=self.config.gecko_detector.poll_interval,
+                api_base_url=self.config.gecko_detector.api_base_url,
+                networks=self.config.gecko_detector.networks,
+                max_results=self.config.gecko_detector.max_results,
+                max_pool_age_minutes=self.config.gecko_detector.max_pool_age_minutes,
+                min_volume_m5_usd=self.config.gecko_detector.min_volume_m5_usd,
+                min_volume_m15_usd=self.config.gecko_detector.min_volume_m15_usd,
+                min_tx_count_m5=self.config.gecko_detector.min_tx_count_m5,
+                min_liquidity_usd=self.config.gecko_detector.min_liquidity_usd,
+                max_requests_per_minute=self.config.gecko_detector.max_requests_per_minute,
+                request_timeout_seconds=self.config.gecko_detector.request_timeout_seconds,
+                base_target_sources=self.config.gecko_detector.base_target_sources,
+                max_process_concurrency=self.config.gecko_detector.max_process_concurrency,
+            )
+            gecko_detector.set_telegram_worker(telegram)
+            self._workers["gecko_detector"] = gecko_detector
+        else:
+            logger.info("Gecko detector disabled by config")
 
         # Start all workers
         for name, worker in self._workers.items():

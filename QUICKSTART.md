@@ -43,7 +43,12 @@ TELEGRAM_BOT_TOKEN=...             # From @BotFather
 TELEGRAM_CHAT_ID=...               # Your chat ID (use @userinfobot)
 PINATA_JWT=...                     # From Pinata dashboard
 BASE_RPC_URL=https://mainnet.base.org
-CLANKER_CONTRACT_ADDRESS=0x...     # Get from Clanker team
+```
+
+Install Node.js dependencies once:
+
+```bash
+npm install
 ```
 
 ## Step 3: Configure Detectors (Optional)
@@ -54,8 +59,11 @@ Edit `config.yaml` to enable/disable detectors:
 x_detector:
   enabled: false  # Set to true if you have X accounts configured
 
-gmgn_detector:
-  enabled: true   # Enabled by default
+gecko_detector:
+  enabled: true
+  poll_interval: 25.0
+  networks: ["base", "eth", "solana", "bsc"]
+  max_requests_per_minute: 40
 ```
 
 ## Step 4: Setup X Polling (Optional)
@@ -88,9 +96,9 @@ You should see:
 INFO:clankandclaw.database.manager:Database initialized
 INFO:clankandclaw.core.supervisor:Starting supervisor
 INFO:clankandclaw.core.workers.x_detector_worker:X detector worker started
-INFO:clankandclaw.core.workers.gmgn_detector_worker:GMGN detector worker started
+INFO:clankandclaw.core.workers.gecko_detector_worker:Gecko detector worker started
 INFO:clankandclaw.core.workers.telegram_worker:Telegram worker started
-INFO:clankandclaw.core.supervisor:Supervisor started with workers: ['x_detector', 'gmgn_detector', 'telegram', 'deploy']
+INFO:clankandclaw.core.supervisor:Supervisor started with workers: ['x_detector', 'gecko_detector', 'telegram', 'deploy']
 ```
 
 ## Step 6: Test Telegram Bot
@@ -105,9 +113,9 @@ INFO:clankandclaw.core.supervisor:Supervisor started with workers: ['x_detector'
 Watch the logs for activity:
 ```bash
 # In the terminal where the service is running, you'll see:
-INFO:clankandclaw.core.workers.gmgn_detector_worker:Found 5 new tokens from GMGN
-INFO:clankandclaw.core.workers.gmgn_detector_worker:Candidate gmgn-0x... scored 75 -> review
-INFO:clankandclaw.telegram.bot:Sent review notification for gmgn-0x...
+INFO:clankandclaw.core.workers.gecko_detector_worker:Fetched 20 new pools from GeckoTerminal network=base
+INFO:clankandclaw.core.workers.gecko_detector_worker:Candidate gecko-base:0x... scored 82 -> priority_review
+INFO:clankandclaw.telegram.bot:Sent review notification for gecko-base:0x...
 ```
 
 Check your Telegram for review notifications!
@@ -152,8 +160,8 @@ curl https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 ### No signals detected
 
 ```bash
-# Check GMGN API
-curl "https://gmgn.ai/defi/quotation/v1/tokens/base/new?limit=5"
+# Check GeckoTerminal API
+curl "https://api.geckoterminal.com/api/v2/networks/base/new_pools?page=1"
 
 # Check X polling (if enabled)
 twscrape accounts
@@ -169,8 +177,8 @@ twscrape search "deploy token" --limit 5
 # Check RPC connection
 python -c "from web3 import Web3; w3 = Web3(Web3.HTTPProvider('https://mainnet.base.org')); print(w3.is_connected())"
 
-# Check contract address
-cat .env | grep CLANKER_CONTRACT_ADDRESS
+# Check signer env
+cat .env | grep DEPLOYER_SIGNER_PRIVATE_KEY
 ```
 
 ## Next Steps
@@ -193,7 +201,7 @@ If you encounter issues:
 Before deploying to production:
 
 - [ ] Configure X accounts with twscrape (if using X polling)
-- [ ] Get Clanker contract ABI and integrate
+- [ ] Run `npm install` in this repo (for clanker-sdk + viem)
 - [ ] Test on testnet first
 - [ ] Set up monitoring and alerting
 - [ ] Configure backup strategy
@@ -225,8 +233,8 @@ curl https://api.telegram.org/bot<TOKEN>/getMe
 # Test X search (if configured)
 twscrape search "deploy token" --limit 5
 
-# Test GMGN API
-curl "https://gmgn.ai/defi/quotation/v1/tokens/base/new?limit=5"
+# Test GeckoTerminal API
+curl "https://api.geckoterminal.com/api/v2/networks/base/new_pools?page=1"
 ```
 
 Happy deploying! 🚀

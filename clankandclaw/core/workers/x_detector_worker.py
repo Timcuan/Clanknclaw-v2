@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+from collections import deque
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 
 from clankandclaw.core.detectors.x_detector import normalize_x_event
@@ -21,16 +23,24 @@ class XDetectorWorker:
         poll_interval: float = 30.0,
         keywords: list[str] | None = None,
         max_results: int = 20,
+        target_handles: list[str] | None = None,
+        query_terms: list[str] | None = None,
+        max_process_concurrency: int = 8,
     ):
         self.db = db
         self.poll_interval = poll_interval
         self.keywords = keywords or ["deploy", "launch"]
         self.max_results = max_results
+        self.target_handles = [h.lower().lstrip("@") for h in (target_handles or ["bankrbot", "clankerdeploy"])]
+        self.query_terms = query_terms or ["deploy", "launch", "contract", "ca", "token"]
+        self.max_process_concurrency = max(1, max_process_concurrency)
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._telegram_worker: Any = None  # Will be set by supervisor
         self._api: Any = None  # twscrape API instance
         self._last_poll_time: datetime | None = None
+        self._seen_tweet_ids: deque[str] = deque(maxlen=5000)
+        self._process_semaphore = asyncio.Semaphore(self.max_process_concurrency)
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         """Set the telegram worker for sending notifications."""
@@ -90,50 +100,125 @@ class XDetectorWorker:
             return
 
         try:
-            # Search for tweets with deploy keywords
-            for keyword in self.keywords:
-                logger.debug(f"Searching X for keyword: {keyword}")
+            started = perf_counter()
+            processed_count = 0
+            queries = self._build_queries()
+            for query in queries:
+                logger.debug("Searching X with query: %s", query)
                 
                 try:
-                    # Use twscrape to search for recent tweets
                     tweets = []
                     async for tweet in self._api.search(
-                        f"{keyword} token",
+                        query,
                         limit=self.max_results,
+                        kv={"product": "Latest"},
                     ):
                         tweets.append(tweet)
                     
-                    logger.info(f"Found {len(tweets)} tweets for keyword '{keyword}'")
-                    
-                    # Process each tweet
+                    logger.info("Found %s tweets for query '%s'", len(tweets), query)
+                    process_tasks: list[asyncio.Task[None]] = []
                     for tweet in tweets:
-                        # Convert tweet to dict format expected by normalize_x_event
+                        tweet_id = str(getattr(tweet, "id", ""))
+                        if not tweet_id or tweet_id in self._seen_tweet_ids:
+                            continue
+                        self._seen_tweet_ids.append(tweet_id)
+
                         event = {
-                            "id": str(tweet.id),
-                            "text": tweet.rawContent,
+                            "id": tweet_id,
+                            "text": getattr(tweet, "rawContent", "") or "",
                             "user": {
-                                "username": tweet.user.username if tweet.user else "unknown",
+                                "username": getattr(getattr(tweet, "user", None), "username", "unknown"),
                             },
-                            "created_at": tweet.date.isoformat() if tweet.date else None,
+                            "created_at": getattr(tweet, "date", None).isoformat() if getattr(tweet, "date", None) else None,
+                            "like_count": int(getattr(tweet, "likeCount", 0) or 0),
+                            "retweet_count": int(getattr(tweet, "retweetCount", 0) or 0),
+                            "reply_count": int(getattr(tweet, "replyCount", 0) or 0),
+                            "quote_count": int(getattr(tweet, "quoteCount", 0) or 0),
+                            "view_count": int(getattr(tweet, "viewCount", 0) or 0),
+                            "conversation_id": str(getattr(tweet, "conversationId", "") or ""),
+                            "in_reply_to_tweet_id": str(getattr(tweet, "inReplyToTweetId", "") or ""),
+                            "mentioned_users": [
+                                {"username": getattr(u, "username", "")}
+                                for u in (getattr(tweet, "mentionedUsers", None) or [])
+                                if getattr(u, "username", "")
+                            ],
+                            "media": [{"url": url} for url in self._extract_media_urls(tweet)],
                         }
                         
                         context_url = f"https://x.com/{event['user']['username']}/status/{tweet.id}"
                         
-                        await self.process_event(event, context_url)
+                        process_tasks.append(
+                            asyncio.create_task(self._process_event_with_semaphore(event, context_url))
+                        )
+                    if process_tasks:
+                        await asyncio.gather(*process_tasks)
+                        processed_count += len(process_tasks)
                         
                 except Exception as exc:
-                    logger.error(f"Error searching for keyword '{keyword}': {exc}", exc_info=True)
+                    logger.error("Error searching X query '%s': %s", query, exc, exc_info=True)
                     
             self._last_poll_time = datetime.now(timezone.utc)
+            logger.info("x.loop_ms=%d processed=%d queries=%d", int((perf_counter() - started) * 1000), processed_count, len(queries))
             
         except Exception as exc:
             logger.error(f"Error in X polling: {exc}", exc_info=True)
+
+    def _build_queries(self) -> list[str]:
+        term_expr = " OR ".join(sorted(set(self.query_terms + self.keywords)))
+        queries: list[str] = []
+        for handle in self.target_handles:
+            queries.append(f"to:{handle} ({term_expr})")
+            queries.append(f"from:{handle} ({term_expr})")
+            queries.append(f"@{handle} ({term_expr})")
+        # Keep one generic query for broader context discovery.
+        queries.append(f"({' OR '.join(self.keywords)}) token")
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for query in queries:
+            if query in seen:
+                continue
+            seen.add(query)
+            deduped.append(query)
+        return deduped
+
+    def _extract_media_urls(self, tweet: Any) -> list[str]:
+        urls: list[str] = []
+        media = getattr(tweet, "media", None)
+        if media is None:
+            return []
+
+        def _push_url(value: Any) -> None:
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                urls.append(value)
+
+        for attr in ("url", "fullUrl", "previewUrl", "imageUrl", "mediaUrl"):
+            _push_url(getattr(media, attr, None))
+
+        for group in ("photos", "videos", "animated", "items"):
+            items = getattr(media, group, None)
+            if not items:
+                continue
+            for item in items:
+                for attr in ("url", "fullUrl", "previewUrl", "imageUrl", "mediaUrl"):
+                    _push_url(getattr(item, attr, None))
+                    if isinstance(item, dict):
+                        _push_url(item.get(attr))
+
+        # De-dupe preserving order.
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for url in urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            deduped.append(url)
+        return deduped
 
     async def process_event(self, event: dict[str, Any], context_url: str) -> None:
         """Process a single X event through the pipeline."""
         try:
             candidate = normalize_x_event(event, context_url)
-            scored = process_candidate(self.db, candidate)
+            scored = await asyncio.to_thread(process_candidate, self.db, candidate)
             
             if scored.decision in ("review", "priority_review"):
                 logger.info(
@@ -155,3 +240,7 @@ class XDetectorWorker:
                 
         except Exception as exc:
             logger.error(f"Error processing X event: {exc}", exc_info=True)
+
+    async def _process_event_with_semaphore(self, event: dict[str, Any], context_url: str) -> None:
+        async with self._process_semaphore:
+            await self.process_event(event, context_url)

@@ -14,16 +14,23 @@ from clankandclaw.models.token import DeployRequest, DeployResult
 
 logger = logging.getLogger(__name__)
 
-DeployExecutor = Callable[[dict[str, Any], DeployRequest], Awaitable[DeployResult]]
+DeployCallable = Callable[[dict[str, Any], DeployRequest], Awaitable[DeployResult]]
 
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _IPFS_URI_RE = re.compile(r"^ipfs://[a-zA-Z0-9]+")
+_TOKEN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,49}$")
+_TOKEN_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,10}$")
+_ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 # Default script path (relative to project root)
 _DEFAULT_SCRIPT_PATH = Path(__file__).parent.parent.parent / "scripts" / "clanker_deploy.mjs"
 
-# Default Executor path (sibling directory)
-_DEFAULT_EXECUTOR_PATH = Path(__file__).parent.parent.parent.parent / "Clank n Claw - Executor"
+# Default Node modules path (project-local)
+_DEFAULT_NODE_MODULES_PATH = Path(__file__).parent.parent.parent / "node_modules"
+_HARDCODED_PAIRED_TOKEN = "0x4200000000000000000000000000000000000006"  # WETH on Base
+_HARDCODED_STARTING_MARKET_CAP_ETH = 10.0
+_ADMIN_INTERFACE_SPLIT_BPS = 10   # 0.1%
+_REWARD_RECIPIENT_SPLIT_BPS = 9990  # 99.9%
 
 
 def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
@@ -37,37 +44,58 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
     The Clanker SDK v4 is a TypeScript SDK that uses viem for blockchain interactions.
     This function builds the configuration object that can be passed to the SDK.
     """
+    description = deploy_request.metadata_description or (
+        f"{deploy_request.token_name} ({deploy_request.token_symbol}) on Base."
+    )
+
+    context: dict[str, Any] = {
+        "interface": "Clank&Claw",
+        "platform": deploy_request.source or "automated",
+        "messageId": deploy_request.source_event_id or deploy_request.candidate_id,
+        "id": deploy_request.candidate_id,
+    }
+    if deploy_request.author_handle:
+        context["authorHandle"] = deploy_request.author_handle
+    if deploy_request.context_url:
+        context["contextUrl"] = deploy_request.context_url
+    if deploy_request.raw_context_excerpt:
+        context["excerpt"] = deploy_request.raw_context_excerpt
+
+    metadata: dict[str, Any] = {"description": description}
+    if deploy_request.context_url:
+        metadata["external_url"] = deploy_request.context_url
+
     config = {
         "name": deploy_request.token_name,
         "symbol": deploy_request.token_symbol,
         "image": deploy_request.image_uri,
-        "metadata": {
-            "description": f"Token deployed via Clank&Claw from candidate {deploy_request.candidate_id}",
-        },
+        "metadata": metadata,
         **({"tokenAdmin": deploy_request.token_admin} if deploy_request.token_admin_enabled else {}),
-        "context": {
-            "interface": "Clank&Claw",
-            "platform": "automated",
-            "messageId": deploy_request.candidate_id,
-            "id": deploy_request.candidate_id,
-        },
+        "context": context,
         # Pool: pairedToken is passed through; tick/positions computed by Node.js script
         "pool": {
-            "pairedToken": "0x4200000000000000000000000000000000000006",  # WETH on Base
+            "pairedToken": _HARDCODED_PAIRED_TOKEN,
         },
+        "startingMarketCapEth": _HARDCODED_STARTING_MARKET_CAP_ETH,
         # Fee configuration - static 1% fees
         "fees": {
             "type": "static",
-            "clankerFee": deploy_request.tax_bps,  # In bps (1000 = 10%)
-            "pairedFee": deploy_request.tax_bps,
+            "clankerFee": deploy_request.clanker_fee_bps if deploy_request.clanker_fee_bps is not None else deploy_request.tax_bps,
+            "pairedFee": deploy_request.paired_fee_bps if deploy_request.paired_fee_bps is not None else deploy_request.tax_bps,
         },
         # Rewards configuration (omitted when disabled)
         **({"rewards": {
             "recipients": [
                 {
+                    "recipient": deploy_request.token_admin,
+                    "admin": deploy_request.token_admin,
+                    "bps": _ADMIN_INTERFACE_SPLIT_BPS,  # 0.1% spoof/admin interface
+                    "token": "Both",  # Receive fees in both tokens
+                },
+                {
                     "recipient": deploy_request.fee_recipient,
                     "admin": deploy_request.token_admin,
-                    "bps": 10000,  # 100% to creator
+                    "bps": _REWARD_RECIPIENT_SPLIT_BPS,  # 99.9% to reward recipient
                     "token": "Both",  # Receive fees in both tokens
                 }
             ]
@@ -124,11 +152,31 @@ def parse_sdk_output(
         )
 
     if data.get("status") == "success":
+        tx_hash = data.get("txHash")
+        contract_address = data.get("contractAddress")
+        if not isinstance(tx_hash, str) or not re.fullmatch(r"0x[a-fA-F0-9]{64}", tx_hash):
+            return DeployResult(
+                deploy_request_id=deploy_request_id,
+                status="deploy_failed",
+                latency_ms=0,
+                error_code="invalid_sdk_output",
+                error_message="SDK success response missing valid txHash",
+                completed_at=completed_at,
+            )
+        if not isinstance(contract_address, str) or not _EVM_ADDRESS_RE.fullmatch(contract_address):
+            return DeployResult(
+                deploy_request_id=deploy_request_id,
+                status="deploy_failed",
+                latency_ms=0,
+                error_code="invalid_sdk_output",
+                error_message="SDK success response missing valid contractAddress",
+                completed_at=completed_at,
+            )
         return DeployResult(
             deploy_request_id=deploy_request_id,
             status="deploy_success",
-            tx_hash=data.get("txHash"),
-            contract_address=data.get("contractAddress"),
+            tx_hash=tx_hash,
+            contract_address=contract_address,
             latency_ms=0,
             completed_at=completed_at,
         )
@@ -147,24 +195,24 @@ class ClankerDeployer:
     """
     Clanker v4.0.0 SDK deployer.
 
-    Calls scripts/clanker_deploy.mjs via subprocess, using the Executor project's
-    node_modules for clanker-sdk and viem dependencies.
+    Calls scripts/clanker_deploy.mjs via subprocess, using this project's
+    local node_modules for clanker-sdk and viem dependencies.
     """
 
     def __init__(
         self,
-        execute: DeployExecutor | None = None,
+        execute: DeployCallable | None = None,
         rpc_url: str | None = None,
         node_script_path: Path | None = None,
-        executor_path: Path | None = None,
+        node_modules_path: Path | None = None,
     ) -> None:
         self._execute = execute
         self.rpc_url = rpc_url or os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
         self._node_script_path = node_script_path or Path(
             os.getenv("NODE_SCRIPT_PATH", str(_DEFAULT_SCRIPT_PATH))
         )
-        self._executor_path = executor_path or Path(
-            os.getenv("EXECUTOR_PATH", str(_DEFAULT_EXECUTOR_PATH))
+        self._node_modules_path = node_modules_path or Path(
+            os.getenv("CLANKER_NODE_MODULES_PATH", str(_DEFAULT_NODE_MODULES_PATH))
         )
         self._sdk_available = self._check_sdk_availability()
 
@@ -194,19 +242,49 @@ class ClankerDeployer:
 
         if not name or len(name) > 50:
             raise ValueError("token_name must be 1–50 characters")
+        if not _TOKEN_NAME_RE.fullmatch(name):
+            raise ValueError("token_name contains unsupported characters")
 
         if not symbol or len(symbol) > 10:
             raise ValueError("token_symbol must be 1–10 characters")
 
-        if symbol != symbol.upper():
-            raise ValueError("token_symbol must be uppercase")
+        if not _TOKEN_SYMBOL_RE.fullmatch(symbol):
+            raise ValueError("token_symbol must contain only A-Z0-9 and be 2-10 chars")
 
         if deploy_request.token_admin_enabled:
             if not _EVM_ADDRESS_RE.fullmatch(deploy_request.token_admin):
                 raise ValueError("token_admin must be a valid EVM address")
+            if deploy_request.token_admin.lower() == _ZERO_ADDRESS:
+                raise ValueError("token_admin must not be zero address")
+        if deploy_request.token_reward_enabled and not deploy_request.token_admin_enabled:
+            raise ValueError("token_reward_enabled requires token_admin_enabled=true")
+        if not _EVM_ADDRESS_RE.fullmatch(deploy_request.tax_recipient):
+            raise ValueError("tax_recipient must be a valid EVM address")
+        if deploy_request.tax_recipient.lower() == _ZERO_ADDRESS:
+            raise ValueError("tax_recipient must not be zero address")
+        if not _EVM_ADDRESS_RE.fullmatch(deploy_request.fee_recipient):
+            raise ValueError("fee_recipient must be a valid EVM address")
+        if deploy_request.fee_recipient.lower() == _ZERO_ADDRESS:
+            raise ValueError("fee_recipient must not be zero address")
+
+        clanker_fee = deploy_request.clanker_fee_bps if deploy_request.clanker_fee_bps is not None else deploy_request.tax_bps
+        paired_fee = deploy_request.paired_fee_bps if deploy_request.paired_fee_bps is not None else deploy_request.tax_bps
+        if not 0 <= clanker_fee <= 10000:
+            raise ValueError("clanker_fee_bps must be between 0 and 10000")
+        if not 0 <= paired_fee <= 10000:
+            raise ValueError("paired_fee_bps must be between 0 and 10000")
+        if deploy_request.token_reward_enabled:
+            if _ADMIN_INTERFACE_SPLIT_BPS + _REWARD_RECIPIENT_SPLIT_BPS != 10000:
+                raise ValueError("internal reward split misconfigured: bps must sum to 10000")
 
         if not _IPFS_URI_RE.match(deploy_request.image_uri):
             raise ValueError("image_uri must be a valid IPFS URI (ipfs://...)")
+        if deploy_request.metadata_description is not None:
+            desc = deploy_request.metadata_description.strip()
+            if len(desc) < 8 or len(desc) > 280:
+                raise ValueError("metadata_description must be 8-280 characters")
+        if deploy_request.context_url and not deploy_request.context_url.startswith(("https://", "http://")):
+            raise ValueError("context_url must be an http(s) URL")
 
         if not 0 <= deploy_request.tax_bps <= 10000:
             raise ValueError("tax_bps must be between 0 and 10000")
@@ -267,7 +345,7 @@ class ClankerDeployer:
         Execute deployment via the Node.js wrapper script.
 
         Writes config to a temp JSON file, spawns the Node.js script as a subprocess
-        with NODE_PATH pointing to the Executor's node_modules, parses the JSON output.
+        with NODE_PATH pointing to local node_modules, parses the JSON output.
         The temp file is always cleaned up in the finally block.
         """
         script_path = self._node_script_path.resolve()
@@ -281,9 +359,16 @@ class ClankerDeployer:
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
 
-        node_modules = (self._executor_path / "node_modules").resolve()
+        node_modules = self._node_modules_path.resolve()
         if not node_modules.exists():
-            logger.warning(f"Executor node_modules not found at {node_modules}")
+            return DeployResult(
+                deploy_request_id=deploy_request.candidate_id,
+                status="deploy_failed",
+                latency_ms=0,
+                error_code="sdk_not_installed",
+                error_message=f"Node modules not found at {node_modules}. Run `npm install`.",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
 
         tmp_file: str | None = None
         try:

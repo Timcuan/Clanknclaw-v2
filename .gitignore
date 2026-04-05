@@ -75,6 +75,9 @@ tmp/
 temp/
 *.tmp
 
+# Node.js
+node_modules/
+
 # Jupyter Notebooks
 .ipynb_checkpoints
 

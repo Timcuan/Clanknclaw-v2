@@ -27,13 +27,13 @@ def _normalize_observed_at(payload: dict[str, Any]) -> str:
     return _utc_now_iso()
 
 
-def normalize_gmgn_payload(payload: dict, context_url: str) -> SignalCandidate:
+def normalize_gecko_payload(payload: dict, context_url: str) -> SignalCandidate:
     raw_text = payload["text"]
-    fingerprint = sha256(f"gmgn:{payload['id']}:{raw_text}".encode()).hexdigest()
+    fingerprint = sha256(f"gecko:{payload['id']}:{raw_text}".encode()).hexdigest()
     author_handle = payload.get("author")
     token_data = payload.get("token_data") or {}
     image_url = (
-        token_data.get("image_uri")
+        token_data.get("image_url")
         or token_data.get("logo")
         or token_data.get("image")
         or token_data.get("logo_uri")
@@ -42,7 +42,7 @@ def normalize_gmgn_payload(payload: dict, context_url: str) -> SignalCandidate:
     suggested_name = (token_data.get("name") or "").strip()[:50] or None
     suggested_symbol = (token_data.get("symbol") or "").strip()[:10].upper() or None
 
-    metadata: dict = {"collector_mode": "remote_or_proxied"}
+    metadata: dict[str, Any] = {"collector_mode": "direct_geckoterminal"}
     if context_url:
         metadata["context_url"] = context_url
     if author_handle:
@@ -53,10 +53,25 @@ def normalize_gmgn_payload(payload: dict, context_url: str) -> SignalCandidate:
         metadata["suggested_name"] = suggested_name
     if suggested_symbol:
         metadata["suggested_symbol"] = suggested_symbol
+    for key in (
+        "network",
+        "dex",
+        "volume",
+        "transactions",
+        "liquidity_usd",
+        "pool_created_at",
+        "spike_ratio",
+        "hot_score",
+        "source_match_score",
+        "source_tags_matched",
+    ):
+        value = payload.get(key)
+        if value is not None:
+            metadata[key] = value
 
     return SignalCandidate(
-        id=f"gmgn-{payload['id']}",
-        source="gmgn",
+        id=f"gecko-{payload['id']}",
+        source="gecko",
         source_event_id=str(payload["id"]),
         observed_at=_normalize_observed_at(payload),
         raw_text=raw_text,

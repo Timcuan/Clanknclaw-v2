@@ -9,18 +9,47 @@ x_detector:
     - deploy
     - launch
   max_results: 20
+  target_handles: ["bankrbot", "clankerdeploy"]
+  query_terms: ["deploy", "launch", "contract", "ca", "token"]
+  max_process_concurrency: 8
 
-gmgn_detector:
+farcaster_detector:
   enabled: true
-  poll_interval: 60.0
-  api_url: "https://gmgn.ai/defi/quotation/v1/tokens/base/new"
+  poll_interval: 35.0
+  api_url: "https://api.neynar.com/v2/farcaster/cast/search/"
+  api_key: ""  # prefer env: NEYNAR_API_KEY
   max_results: 20
+  target_handles: ["bankr", "clanker"]
+  query_terms: ["deploy", "launch", "contract", "ca", "token"]
+  request_timeout_seconds: 20.0
+  max_process_concurrency: 8
+
+gecko_detector:
+  enabled: true
+  poll_interval: 25.0
+  api_base_url: "https://api.geckoterminal.com/api/v2"
+  networks: ["base", "eth", "solana", "bsc"]
+  max_results: 20
+  max_pool_age_minutes: 120
+  min_volume_m5_usd: 3000
+  min_volume_m15_usd: 8000
+  min_tx_count_m5: 12
+  min_liquidity_usd: 12000
+  max_requests_per_minute: 40
+  request_timeout_seconds: 20.0
+  base_target_sources: ["bankr", "doppler", "zora", "virtual", "uniswapv4", "clanker"]
+  max_process_concurrency: 10
 
 deployment:
   platform: clanker
   tax_bps: 1000
+  # Optional fee split overrides (if omitted, tax_bps is used for both)
+  # clanker_fee_bps: 1000
+  # paired_fee_bps: 1000
+  token_admin_enabled: true
+  token_reward_enabled: true
   base_rpc_url: "https://mainnet.base.org"
-  # executor_path: "/path/to/Clank n Claw - Executor"  # override via EXECUTOR_PATH env var
+  # clanker_node_modules_path: "/path/to/node_modules"  # override via CLANKER_NODE_MODULES_PATH
   # node_script_path: "/path/to/scripts/clanker_deploy.mjs"  # override via NODE_SCRIPT_PATH env var
 
 # Telegram credentials (prefer env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)

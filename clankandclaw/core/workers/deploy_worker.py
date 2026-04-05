@@ -27,6 +27,10 @@ class DeployWorker:
         token_admin: str,
         fee_recipient: str,
         tax_bps: int = 1000,
+        clanker_fee_bps: int | None = None,
+        paired_fee_bps: int | None = None,
+        token_admin_enabled: bool = True,
+        token_reward_enabled: bool = True,
     ):
         self.db = db
         self.preparation = DeployPreparation(
@@ -37,6 +41,10 @@ class DeployWorker:
             token_admin=token_admin,
             fee_recipient=fee_recipient,
             tax_bps=tax_bps,
+            clanker_fee_bps=clanker_fee_bps,
+            paired_fee_bps=paired_fee_bps,
+            token_admin_enabled=token_admin_enabled,
+            token_reward_enabled=token_reward_enabled,
         )
         self.deployer = deployer
         self._telegram_worker: Any = None  # Will be set by supervisor

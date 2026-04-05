@@ -4,7 +4,8 @@
 
 Clank&Claw MVP implementation is **100% COMPLETE** for the core pipeline and Clanker v4 SDK integration. All systems implemented, integrated, and tested.
 
-**Test Status:** ✅ 76/76 tests passing (100%), 1 skipped (requires live aiogram bot token)
+**Test Status:** ✅ 155 tests passing, 1 skipped (requires live aiogram bot token)
+**Current Test Status:** ✅ 177 tests passing, 2 skipped
 
 ---
 
@@ -25,6 +26,10 @@ All models with comprehensive validation including `tx_hash` format check (`0x` 
 **Files:** `clankandclaw/database/manager.py`
 
 SQLite schema with `observed_at` and `metadata_json` columns (auto-migrated via `ALTER TABLE ADD COLUMN`).
+Performance/runtime hardening for 24/7:
+- WAL mode + `busy_timeout`
+- query indexes for review/deploy hot paths
+- retry handling for transient `database is locked`
 
 **Tests:** 8 tests - All passing ✅
 
@@ -42,9 +47,9 @@ Complete filter → score → route pipeline with `observed_at` and `metadata` p
 
 ### 4. Detectors (100%) ✅
 
-**Files:** `clankandclaw/core/detectors/{x_detector,gmgn_detector}.py`
+**Files:** `clankandclaw/core/detectors/{x_detector,farcaster_detector,gecko_detector}.py`
 
-Normalization logic for X events and GMGN token launches.
+Normalization logic for X events, Farcaster casts, and GeckoTerminal hot new-pool signals.
 
 **Tests:** 4 tests - All passing ✅
 
@@ -56,12 +61,15 @@ Normalization logic for X events and GMGN token launches.
 
 - **Python side:** `ClankerDeployer` with preflight validation, temp-file subprocess bridge, 120s timeout, always-returns `DeployResult`
 - **Node.js side:** `scripts/clanker_deploy.mjs` uses `clanker-sdk/v4` with `POOL_POSITIONS` + `getTickFromMarketCap` for pool config; reads config from temp JSON, reads private key from `DEPLOYER_SIGNER_PRIVATE_KEY` env var only
-- Private key never written to disk; NODE_PATH points at Executor's `node_modules`
+- Private key never written to disk; NODE_PATH points at configured local `node_modules`
+- Reward split hardened: 10 bps to token admin (interface spoof target), 9990 bps to fee recipient
+- Liquidity pool + dev buy hardened: paired token WETH Base + 10 ETH start mcap + dev buy 0 (hardcoded)
+- Alchemy RPC priority supported via `ALCHEMY_BASE_RPC_URL` / `ALCHEMY_RPC`
 
-**Tests:** 13 tests - All passing ✅
+**Tests:** expanded coverage - All passing ✅
 - Config structure (tokenAdmin/rewards conditional omission)
 - `parse_sdk_output` (success, error JSON, malformed JSON, non-zero exit)
-- `deploy()` error paths (sdk_not_available, invalid_config, custom executor)
+- `deploy()` error paths (sdk_not_available, invalid_config, custom execution hook)
 
 ---
 
@@ -70,6 +78,9 @@ Normalization logic for X events and GMGN token launches.
 **Files:** `clankandclaw/utils/{extraction,image_fetcher,ipfs,llm}.py`
 
 All utilities production-ready with SSRF protection.
+- Pinata smart dedupe cache (CID reuse by content hash)
+- Generic upload support (`upload_any`) with MIME auto-detection
+- CID normalization supports both raw CID and `ipfs://` format
 
 **Tests:** 16 tests - All passing ✅
 
@@ -80,6 +91,7 @@ All utilities production-ready with SSRF protection.
 **Files:** `clankandclaw/telegram/bot.py`
 
 Full aiogram bot with commands and approve/reject callbacks. `AIOGRAM_AVAILABLE` guard in all entry points.
+- Includes `/claimfees <token_address>` manual reward-claim command
 
 **Tests:** 2 tests - 1 passing, 1 skipped (requires aiogram bot token) ✅
 
@@ -90,7 +102,7 @@ Full aiogram bot with commands and approve/reject callbacks. `AIOGRAM_AVAILABLE`
 **Files:** `clankandclaw/config.py`
 
 - `TelegramSection` (bot_token, chat_id) — injected from `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` env vars
-- `DeploymentSection` — includes `base_rpc_url`, `executor_path`, `node_script_path`
+- `DeploymentSection` — includes `base_rpc_url`, `clanker_node_modules_path`, `node_script_path`
 - Wallet addresses validated at startup
 
 **Tests:** 6 tests - All passing ✅
@@ -99,9 +111,13 @@ Full aiogram bot with commands and approve/reject callbacks. `AIOGRAM_AVAILABLE`
 
 ### 9. Async Workers (100%) ✅
 
-**Files:** `clankandclaw/core/workers/{x_detector,gmgn_detector,telegram,deploy}_worker.py`
+**Files:** `clankandclaw/core/workers/{x_detector,farcaster_detector,gecko_detector,telegram,deploy}_worker.py`
 
 All workers with start/stop lifecycle. `TelegramWorker` accepts `bot_token`/`chat_id` from config.
+Throughput optimizations:
+- bounded worker concurrency (`max_process_concurrency`)
+- sync pipeline calls offloaded via `asyncio.to_thread`
+- HTTP client reuse + retry/backoff for transient `429/5xx`
 
 **Tests:** Covered by supervisor tests ✅
 
@@ -112,6 +128,10 @@ All workers with start/stop lifecycle. `TelegramWorker` accepts `bot_token`/`cha
 **Files:** `clankandclaw/core/deploy_preparation.py`
 
 Candidate reconstruction from DB (with `observed_at` and `metadata`), image fetch → IPFS, metadata → IPFS, preflight.
+Image handling optimizations:
+- ranked multi-candidate image selection
+- social avatar/banner de-prioritization
+- deterministic placeholder fallback when no contextual image is valid
 
 **Tests:** Covered by integration flow ✅
 
@@ -146,12 +166,20 @@ Production async entrypoint with config load and supervisor startup.
 - ✅ `.env.example` — full env var template
 - ✅ `.gitignore` — git ignore rules
 
+### 14. Rewards Claim Integration (100%) ✅
+
+**Files:** `clankandclaw/rewards/claimer.py`, `clankandclaw/core/workers/telegram_worker.py`, `clankandclaw/database/manager.py`
+
+- Added `ClankerRewardsClaimer` (CLI-backed claim flow)
+- Manual operator claim via Telegram `/claimfees`
+- Claim result persistence in `reward_claim_results`
+
 ---
 
 ## End-to-End Flow
 
 ```
-1. Signal Detection          ✅ (X polling via twscrape, GMGN polling via httpx)
+1. Signal Detection          ✅ (X via twscrape, Farcaster via Neynar, GeckoTerminal via httpx)
         ↓
 2. Pipeline Processing       ✅ (filter → score → route)
         ↓
@@ -178,7 +206,23 @@ Before running in production, configure:
 - [ ] `TELEGRAM_BOT_TOKEN` — from @BotFather
 - [ ] `TELEGRAM_CHAT_ID` — operator chat ID
 - [ ] `PINATA_JWT` — for IPFS uploads
-- [ ] `BASE_RPC_URL` — Base mainnet RPC (default: `https://mainnet.base.org`)
-- [ ] `EXECUTOR_PATH` — path to `Clank n Claw - Executor` directory (for `node_modules`)
+- [ ] `ALCHEMY_BASE_RPC_URL` — preferred Base mainnet RPC
+- [ ] (optional fallback) `BASE_RPC_URL` — Base mainnet RPC
+- [ ] `npm install` executed in this project (or set `CLANKER_NODE_MODULES_PATH`)
 - [ ] X accounts for twscrape: `twscrape add_accounts`
+- [ ] `NEYNAR_API_KEY` if `farcaster_detector.enabled=true`
 - [ ] Fund deployer wallet with ETH for gas
+
+### Gecko Detector Tuning (Current) ✅
+
+- Networks: `base`, `eth`, `solana`, `bsc`
+- Source: `https://api.geckoterminal.com/api/v2/networks/<network>/new_pools?page=1`
+- Hot gate:
+  - `min_volume_m5_usd`
+  - `min_volume_m15_usd`
+  - `min_tx_count_m5`
+  - `min_liquidity_usd`
+  - `max_pool_age_minutes`
+- Anti-block:
+  - bounded `max_results` per network
+  - request pacing via `max_requests_per_minute`

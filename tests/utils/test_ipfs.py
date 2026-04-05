@@ -53,11 +53,12 @@ class _DummyClient:
 @pytest.mark.asyncio
 async def test_pinata_client_upload_file_bytes_posts_multipart_request(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ):
     monkeypatch.setattr(httpx, "AsyncClient", _DummyClient)
     _DummyClient.response = _DummyResponse({"IpfsHash": "QmFile"})
 
-    client = PinataClient(jwt="pinata-jwt")
+    client = PinataClient(jwt="pinata-jwt", cache_path=str(tmp_path / "pinata-cache.json"))
 
     ipfs_hash = await client.upload_file_bytes(
         filename="image.png",
@@ -78,11 +79,12 @@ async def test_pinata_client_upload_file_bytes_posts_multipart_request(
 @pytest.mark.asyncio
 async def test_pinata_client_upload_json_metadata_posts_json_request(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ):
     monkeypatch.setattr(httpx, "AsyncClient", _DummyClient)
     _DummyClient.response = _DummyResponse({"IpfsHash": "QmJson"})
 
-    client = PinataClient(jwt="pinata-jwt")
+    client = PinataClient(jwt="pinata-jwt", cache_path=str(tmp_path / "pinata-cache.json"))
 
     ipfs_hash = await client.upload_json_metadata({"name": "Pepe", "symbol": "PEPE"})
 
@@ -94,3 +96,30 @@ async def test_pinata_client_upload_json_metadata_posts_json_request(
             "json": {"name": "Pepe", "symbol": "PEPE"},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_pinata_client_normalizes_ipfs_prefix_and_caches_json(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setattr(httpx, "AsyncClient", _DummyClient)
+    _DummyClient.response = _DummyResponse({"IpfsHash": "ipfs://QmJson"})
+
+    client = PinataClient(jwt="pinata-jwt", cache_path=str(tmp_path / "pinata-cache.json"))
+    first = await client.upload_json_metadata({"name": "Pepe"})
+    second = await client.upload_json_metadata({"name": "Pepe"})
+
+    assert first == "QmJson"
+    assert second == "QmJson"
+    # second call should be cache hit; only one network post
+    assert len(_DummyClient.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_pinata_client_upload_any_uses_mime_guess(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setattr(httpx, "AsyncClient", _DummyClient)
+    _DummyClient.response = _DummyResponse({"IpfsHash": "QmAny"})
+
+    client = PinataClient(jwt="pinata-jwt", cache_path=str(tmp_path / "pinata-cache.json"))
+    ipfs_hash = await client.upload_any("logo.webp", b"webp-bytes")
+
+    assert ipfs_hash == "QmAny"
+    assert _DummyClient.calls[0]["files"]["file"][2] == "image/webp"

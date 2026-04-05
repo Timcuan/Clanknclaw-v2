@@ -6,7 +6,8 @@ Automated token deployment system that detects promising Base token deploy signa
 
 Single async Python service with:
 - **X Detector**: Polls X/Twitter for deploy signals
-- **GMGN Detector**: Polls GMGN for new token launches
+- **Farcaster Detector**: Polls Farcaster casts (Bankr/Clanker mentions)
+- **Gecko Detector**: Polls GeckoTerminal new pools (Base/ETH/Solana/BSC)
 - **Pipeline**: Filters, scores, and routes candidates
 - **Telegram Bot**: Operator approval interface
 - **Clanker Deployer**: Executes approved deploys
@@ -60,12 +61,34 @@ x_detector:
     - deploy
     - launch
   max_results: 20              # Max results per poll
+  target_handles: ["bankrbot", "clankerdeploy"]  # Mention/focus handles
+  query_terms: ["deploy", "launch", "contract", "ca", "token"]
+  max_process_concurrency: 8
 
-gmgn_detector:
-  enabled: true                # Enable GMGN polling
-  poll_interval: 60.0          # Polling interval in seconds
-  api_url: "https://gmgn.ai/defi/quotation/v1/tokens/base/new"
-  max_results: 20              # Max results per poll
+farcaster_detector:
+  enabled: true
+  poll_interval: 35.0
+  api_url: "https://api.neynar.com/v2/farcaster/cast/search/"
+  api_key: ""                 # prefer env: NEYNAR_API_KEY
+  max_results: 20
+  target_handles: ["bankr", "clanker"]
+  query_terms: ["deploy", "launch", "contract", "ca", "token"]
+  max_process_concurrency: 8
+
+gecko_detector:
+  enabled: true                # Enable GeckoTerminal polling
+  poll_interval: 25.0          # Polling interval in seconds
+  api_base_url: "https://api.geckoterminal.com/api/v2"
+  networks: ["base", "eth", "solana", "bsc"]
+  max_results: 20              # Max pools per network per poll
+  max_pool_age_minutes: 120
+  min_volume_m5_usd: 3000
+  min_volume_m15_usd: 8000
+  min_tx_count_m5: 12
+  min_liquidity_usd: 12000
+  max_requests_per_minute: 40  # Safety guard against API block
+  base_target_sources: ["bankr", "doppler", "zora", "virtual", "uniswapv4", "clanker"]
+  max_process_concurrency: 10
 
 deployment:
   platform: clanker            # Deploy platform (only clanker in MVP)
@@ -84,10 +107,11 @@ See `.env.example` for all available environment variables.
 - `TELEGRAM_CHAT_ID`: Telegram chat ID for notifications
 - `PINATA_JWT`: Pinata JWT for IPFS uploads
 - `BASE_RPC_URL`: Base RPC endpoint (e.g., https://mainnet.base.org)
-- `CLANKER_CONTRACT_ADDRESS`: Clanker contract address
+- Node.js runtime deps installed in this repo (`npm install`)
 
 **Optional:**
 - X/Twitter accounts configured via twscrape (see below)
+- `NEYNAR_API_KEY` for Farcaster detector
 
 ### X/Twitter Polling Setup
 
@@ -175,10 +199,12 @@ clankandclaw/
 │   ├── review_queue.py       # Review locking
 │   ├── detectors/
 │   │   ├── x_detector.py     # X signal normalization
-│   │   └── gmgn_detector.py  # GMGN signal normalization
+│   │   ├── farcaster_detector.py # Farcaster signal normalization
+│   │   └── gecko_detector.py # Gecko signal normalization
 │   └── workers/
 │       ├── x_detector_worker.py      # X polling worker
-│       ├── gmgn_detector_worker.py   # GMGN polling worker
+│       ├── farcaster_detector_worker.py  # Farcaster polling worker
+│       ├── gecko_detector_worker.py  # Gecko polling worker
 │       └── telegram_worker.py        # Telegram bot worker
 ├── deployers/
 │   ├── base.py               # Deployer protocol
@@ -219,7 +245,7 @@ The image fetcher includes comprehensive SSRF protection:
 - Core models and validation
 - SQLite persistence with migrations and foreign keys
 - Filter, scorer, and router logic
-- Detector normalization (X and GMGN)
+- Detector normalization (X and GeckoTerminal)
 - Clanker payload builder with web3 framework
 - Image fetcher with SSRF protection
 - IPFS upload client (Pinata)
@@ -227,21 +253,32 @@ The image fetcher includes comprehensive SSRF protection:
 - Async worker framework with lifecycle management
 - Supervisor with graceful shutdown and signal handling
 - X polling with twscrape integration
-- GMGN polling with httpx
+- Farcaster polling integration (Neynar)
+- GeckoTerminal polling with httpx
+- Loop throughput optimizations:
+  - bounded concurrency per detector
+  - non-blocking pipeline execution via `asyncio.to_thread`
+  - HTTP client reuse + retry/backoff for transient errors
+- SQLite runtime optimizations:
+  - WAL + busy timeout
+  - hot-path indexes for queue/deploy queries
+  - retry on transient `database is locked`
 - Deploy preparation pipeline (extraction, image fetch, IPFS upload)
+- Context-aware image selection:
+  - ranked multi-candidate image selection
+  - social avatar/banner de-prioritization
+  - placeholder image fallback to avoid wrong-image deploy
 - Candidate database queries and reconstruction
 - Review queue with locking
 - Approval callback handlers
 - Deploy result notifications
-- Comprehensive test suite (67 tests passing)
+- Comprehensive test suite (177 tests passing)
 
 ### Production Configuration Needed ⚠️
 
 - X account setup for twscrape (30-60 min)
-- Clanker contract ABI integration (60-90 min)
 - Production testing and monitoring (30-60 min)
-
-**Estimated time to production: 2-4 hours**
+- Operational hardening (systemd, alerts, backups)
 
 ### Future Enhancements 🔮
 

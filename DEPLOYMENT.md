@@ -91,7 +91,12 @@ TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
 PINATA_JWT=...
 BASE_RPC_URL=https://mainnet.base.org
-CLANKER_CONTRACT_ADDRESS=0x...
+```
+
+Install Node.js dependencies:
+
+```bash
+npm install
 ```
 
 Review and adjust `config.yaml`:
@@ -139,25 +144,22 @@ x_detector:
   enabled: false
 ```
 
-### 5. Clanker Contract Configuration
+### 5. Clanker SDK Configuration
 
-Get the Clanker contract address and ABI:
+Clanker deploy uses a Node.js bridge script (`scripts/clanker_deploy.mjs`) with `clanker-sdk`:
 
 ```bash
-# Set contract address in .env
-CLANKER_CONTRACT_ADDRESS=0x...  # Get from Clanker team
+# Verify Node.js runtime
+node --version
 
-# For production deployment, you'll need to:
-# 1. Get the contract ABI from Clanker
-# 2. Add ABI loading in clankandclaw/deployers/clanker.py
-# 3. Implement actual contract call (currently uses mock)
+# Ensure SDK dependencies are installed
+npm install
 ```
 
 **Current Status:**
-- Web3 framework is ready
-- Transaction building is implemented
-- Contract ABI needs to be loaded
-- See `clankandclaw/deployers/clanker.py` for implementation
+- Python deployer invokes Node.js bridge script
+- SDK handles deploy + transaction confirmation
+- No manual ABI wiring needed
 
 ### 6. Database Initialization
 
@@ -226,8 +228,8 @@ sudo journalctl -u clankandclaw | grep "worker started"
 # Test X polling (if enabled)
 sudo journalctl -u clankandclaw | grep "X detector"
 
-# Test GMGN polling
-sudo journalctl -u clankandclaw | grep "GMGN detector"
+# Test Gecko polling
+sudo journalctl -u clankandclaw | grep "Gecko detector"
 
 # Test Telegram bot
 # Send /start to your bot and check for response
@@ -440,20 +442,20 @@ twscrape login_accounts
 # Edit config.yaml and set x_detector.enabled: false
 ```
 
-### GMGN Polling Issues
+### Gecko Polling Issues
 
 ```bash
-# Test GMGN API manually
-curl "https://gmgn.ai/defi/quotation/v1/tokens/base/new?limit=5"
+# Test Gecko API manually
+curl "https://api.geckoterminal.com/api/v2/networks/base/new_pools?page=1"
 
-# Check logs for GMGN detector errors
-sudo journalctl -u clankandclaw | grep "GMGN detector"
+# Check logs for Gecko detector errors
+sudo journalctl -u clankandclaw | grep "Gecko detector"
 
-# Verify API URL in config.yaml
-cat config.yaml | grep -A 5 "gmgn_detector"
+# Verify detector settings in config.yaml
+cat config.yaml | grep -A 12 "gecko_detector"
 
-# Disable GMGN polling if needed
-# Edit config.yaml and set gmgn_detector.enabled: false
+# Disable Gecko polling if needed
+# Edit config.yaml and set gecko_detector.enabled: false
 ```
 
 ### Web3 Deployment Issues
@@ -474,8 +476,8 @@ python -c "from web3 import Web3; w3 = Web3(Web3.HTTPProvider('https://mainnet.b
 # Check logs for deployment errors
 sudo journalctl -u clankandclaw | grep -i "deploy"
 
-# Verify contract address is set
-cat .env | grep CLANKER_CONTRACT_ADDRESS
+# Verify signer key is set
+cat .env | grep DEPLOYER_SIGNER_PRIVATE_KEY
 ```
 
 ## Security
@@ -517,8 +519,8 @@ Edit `clankandclaw/core/workers/*.py`:
 # X detector (default: 30s)
 XDetectorWorker(db, poll_interval=30.0)
 
-# GMGN detector (default: 60s)
-GMGNDetectorWorker(db, poll_interval=60.0)
+# Gecko detector (default: 25s)
+GeckoDetectorWorker(db, poll_interval=25.0)
 ```
 
 ### Database Optimization
@@ -535,9 +537,9 @@ sqlite3 /opt/clankandclaw/app/clankandclaw.db "ANALYZE;"
 
 For higher throughput:
 
-1. **Separate GMGN Collector**
-   - Run GMGN collector on separate host with residential proxy
-   - Forward normalized events to main executor via HTTP/queue
+1. **Separate Gecko Collector**
+   - Run Gecko collector on separate host/instance if you need stricter egress isolation
+   - Forward normalized events to main Clank&Claw service via HTTP/queue
 
 2. **Database Migration**
    - Migrate from SQLite to PostgreSQL for better concurrency

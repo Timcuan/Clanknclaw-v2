@@ -16,20 +16,49 @@ class XDetectorSection(BaseModel):
     poll_interval: float = 30.0
     keywords: list[str] = Field(default_factory=lambda: ["deploy", "launch"])
     max_results: int = 20
+    target_handles: list[str] = Field(default_factory=lambda: ["bankrbot", "clankerdeploy"])
+    query_terms: list[str] = Field(default_factory=lambda: ["deploy", "launch", "contract", "ca", "token"])
+    max_process_concurrency: int = 8
 
 
-class GMGNDetectorSection(BaseModel):
+class FarcasterDetectorSection(BaseModel):
     enabled: bool = True
-    poll_interval: float = 60.0
-    api_url: str = "https://gmgn.ai/defi/quotation/v1/tokens/base/new"
+    poll_interval: float = 35.0
+    api_url: str = "https://api.neynar.com/v2/farcaster/cast/search/"
+    api_key: str = ""
     max_results: int = 20
+    target_handles: list[str] = Field(default_factory=lambda: ["bankr", "clanker"])
+    query_terms: list[str] = Field(default_factory=lambda: ["deploy", "launch", "contract", "ca", "token"])
+    request_timeout_seconds: float = 20.0
+    max_process_concurrency: int = 8
+
+
+class GeckoDetectorSection(BaseModel):
+    enabled: bool = True
+    poll_interval: float = 25.0
+    api_base_url: str = "https://api.geckoterminal.com/api/v2"
+    networks: list[str] = Field(default_factory=lambda: ["base", "eth", "solana", "bsc"])
+    max_results: int = 20
+    max_pool_age_minutes: int = 120
+    min_volume_m5_usd: float = 3000.0
+    min_volume_m15_usd: float = 8000.0
+    min_tx_count_m5: int = 12
+    min_liquidity_usd: float = 12000.0
+    max_requests_per_minute: int = 40
+    request_timeout_seconds: float = 20.0
+    base_target_sources: list[str] = Field(default_factory=lambda: ["bankr", "doppler", "zora", "virtual", "uniswapv4", "clanker"])
+    max_process_concurrency: int = 10
 
 
 class DeploymentSection(BaseModel):
     platform: str = "clanker"
     tax_bps: int = 1000
+    clanker_fee_bps: int | None = None
+    paired_fee_bps: int | None = None
+    token_admin_enabled: bool = True
+    token_reward_enabled: bool = True
     base_rpc_url: str = "https://mainnet.base.org"
-    executor_path: str = ""  # Path to Clank n Claw - Executor directory
+    clanker_node_modules_path: str = ""  # Optional override path to node_modules
     node_script_path: str = ""  # Override path to clanker_deploy.mjs
 
 
@@ -47,7 +76,8 @@ class WalletSection(BaseModel):
 class AppConfig(BaseModel):
     app: AppSection = Field(default_factory=AppSection)
     x_detector: XDetectorSection = Field(default_factory=XDetectorSection)
-    gmgn_detector: GMGNDetectorSection = Field(default_factory=GMGNDetectorSection)
+    farcaster_detector: FarcasterDetectorSection = Field(default_factory=FarcasterDetectorSection)
+    gecko_detector: GeckoDetectorSection = Field(default_factory=GeckoDetectorSection)
     deployment: DeploymentSection = Field(default_factory=DeploymentSection)
     telegram: TelegramSection = Field(default_factory=TelegramSection)
     wallets: WalletSection
@@ -61,14 +91,30 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("YAML root must be a mapping")
     else:
         raw = dict(raw)
+    # Backward compatibility: migrate gmgn_detector block to gecko_detector if needed.
+    if "gecko_detector" not in raw and "gmgn_detector" in raw:
+        raw["gecko_detector"] = raw["gmgn_detector"]
     # Inject env-var overrides into deployment section
     if "deployment" not in raw:
         raw["deployment"] = {}
     # Env vars take precedence over YAML for deployment settings
-    if os.getenv("BASE_RPC_URL"):
+    # Prefer dedicated Alchemy endpoint when available
+    if os.getenv("ALCHEMY_BASE_RPC_URL"):
+        raw["deployment"]["base_rpc_url"] = os.getenv("ALCHEMY_BASE_RPC_URL")
+    elif os.getenv("ALCHEMY_RPC"):
+        raw["deployment"]["base_rpc_url"] = os.getenv("ALCHEMY_RPC")
+    elif os.getenv("BASE_RPC_URL"):
         raw["deployment"]["base_rpc_url"] = os.getenv("BASE_RPC_URL")
-    if os.getenv("EXECUTOR_PATH"):
-        raw["deployment"]["executor_path"] = os.getenv("EXECUTOR_PATH")
+    if os.getenv("CLANKER_FEE_BPS"):
+        raw["deployment"]["clanker_fee_bps"] = int(os.getenv("CLANKER_FEE_BPS", "0"))
+    if os.getenv("PAIRED_FEE_BPS"):
+        raw["deployment"]["paired_fee_bps"] = int(os.getenv("PAIRED_FEE_BPS", "0"))
+    if os.getenv("TOKEN_ADMIN_ENABLED"):
+        raw["deployment"]["token_admin_enabled"] = os.getenv("TOKEN_ADMIN_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+    if os.getenv("TOKEN_REWARD_ENABLED"):
+        raw["deployment"]["token_reward_enabled"] = os.getenv("TOKEN_REWARD_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+    if os.getenv("CLANKER_NODE_MODULES_PATH"):
+        raw["deployment"]["clanker_node_modules_path"] = os.getenv("CLANKER_NODE_MODULES_PATH")
     if os.getenv("NODE_SCRIPT_PATH"):
         raw["deployment"]["node_script_path"] = os.getenv("NODE_SCRIPT_PATH")
 
@@ -79,6 +125,11 @@ def load_config(path: Path) -> AppConfig:
         raw["telegram"]["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
     if os.getenv("TELEGRAM_CHAT_ID"):
         raw["telegram"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID")
+
+    if "farcaster_detector" not in raw:
+        raw["farcaster_detector"] = {}
+    if os.getenv("NEYNAR_API_KEY"):
+        raw["farcaster_detector"]["api_key"] = os.getenv("NEYNAR_API_KEY")
 
     wallets = {
         "deployer_signer_private_key": os.getenv("DEPLOYER_SIGNER_PRIVATE_KEY"),

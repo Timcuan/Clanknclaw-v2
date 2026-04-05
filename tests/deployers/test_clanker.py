@@ -22,6 +22,12 @@ def make_deploy_request(
         token_reward_enabled=token_reward_enabled,
         token_admin="0x0000000000000000000000000000000000000001",
         fee_recipient="0x0000000000000000000000000000000000000002",
+        source="x",
+        source_event_id="tweet-1",
+        context_url="https://x.com/alice/status/1",
+        author_handle="alice",
+        metadata_description="Pepe (PEPE) is a Base community token derived from a social signal.",
+        raw_context_excerpt="meme narrative catching attention",
     )
 
 
@@ -42,7 +48,16 @@ def test_build_clanker_payload_keeps_wallet_roles_separate():
     payload = build_clanker_payload(make_deploy_request())
 
     assert payload["tokenAdmin"] == "0x0000000000000000000000000000000000000001"
-    assert payload["rewards"]["recipients"][0]["recipient"] == "0x0000000000000000000000000000000000000002"
+    assert payload["rewards"]["recipients"][0]["recipient"] == "0x0000000000000000000000000000000000000001"
+    assert payload["rewards"]["recipients"][0]["bps"] == 10
+    assert payload["rewards"]["recipients"][1]["recipient"] == "0x0000000000000000000000000000000000000002"
+    assert payload["rewards"]["recipients"][1]["bps"] == 9990
+
+
+def test_build_clanker_payload_reward_split_sums_to_100_percent():
+    payload = build_clanker_payload(make_deploy_request())
+    total = sum(item["bps"] for item in payload["rewards"]["recipients"])
+    assert total == 10000
 
 
 def test_build_clanker_payload_omits_token_admin_when_disabled():
@@ -61,6 +76,7 @@ def test_build_clanker_payload_metadata_shape():
     payload = build_clanker_payload(make_deploy_request())
 
     assert "description" in payload["metadata"]
+    assert "external_url" in payload["metadata"]
     assert "auditUrls" not in payload["metadata"]
     assert "vault" not in payload
     assert "devBuy" not in payload
@@ -71,6 +87,20 @@ def test_build_clanker_payload_has_required_sdk_fields():
 
     for field in ("name", "symbol", "image", "tokenAdmin", "context", "pool", "fees"):
         assert field in payload, f"Missing required field: {field}"
+    assert payload["context"]["platform"] == "x"
+    assert payload["context"]["authorHandle"] == "alice"
+
+
+def test_build_clanker_payload_uses_hardcoded_pool_and_configurable_fee_split():
+    req = make_deploy_request()
+    req.clanker_fee_bps = 900
+    req.paired_fee_bps = 1100
+
+    payload = build_clanker_payload(req)
+    assert payload["pool"]["pairedToken"] == "0x4200000000000000000000000000000000000006"
+    assert payload["startingMarketCapEth"] == 10.0
+    assert payload["fees"]["clankerFee"] == 900
+    assert payload["fees"]["pairedFee"] == 1100
 
 
 # --- parse_sdk_output ---
@@ -108,6 +138,14 @@ def test_parse_sdk_output_malformed_json():
 
     assert result.status == "deploy_failed"
     assert result.error_code == "parse_error"
+
+
+def test_parse_sdk_output_success_requires_tx_hash_and_contract():
+    import json
+    stdout = json.dumps({"status": "success", "txHash": "not-a-tx", "contractAddress": "0x123"})
+    result = parse_sdk_output(stdout, "", 0, "sig-1")
+    assert result.status == "deploy_failed"
+    assert result.error_code == "invalid_sdk_output"
 
 
 def test_parse_sdk_output_sdk_not_installed():
@@ -159,12 +197,68 @@ async def test_deploy_returns_failed_on_preflight_error():
 
 
 @pytest.mark.asyncio
-async def test_deploy_uses_custom_executor():
-    """deploy() calls the injected executor and returns its result."""
+async def test_preflight_rejects_invalid_symbol_characters():
+    bad_request = make_deploy_request()
+    bad_request.token_symbol = "PE-PE"
+    deployer = ClankerDeployer()
+
+    result = await deployer.deploy(bad_request)
+    assert result.status == "deploy_failed"
+    assert result.error_code == "invalid_config"
+    assert "A-Z0-9" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_preflight_rejects_invalid_name_characters():
+    bad_request = make_deploy_request()
+    bad_request.token_name = "<Pepe>"
+    deployer = ClankerDeployer()
+
+    result = await deployer.deploy(bad_request)
+    assert result.status == "deploy_failed"
+    assert result.error_code == "invalid_config"
+    assert "unsupported characters" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_preflight_rejects_reward_enabled_without_admin():
+    bad_request = make_deploy_request(token_admin_enabled=False, token_reward_enabled=True)
+    deployer = ClankerDeployer()
+    result = await deployer.deploy(bad_request)
+    assert result.status == "deploy_failed"
+    assert result.error_code == "invalid_config"
+    assert "requires token_admin_enabled" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_preflight_rejects_zero_fee_recipient():
+    bad_request = make_deploy_request()
+    bad_request.fee_recipient = "0x0000000000000000000000000000000000000000"
+    deployer = ClankerDeployer()
+    result = await deployer.deploy(bad_request)
+    assert result.status == "deploy_failed"
+    assert result.error_code == "invalid_config"
+    assert "must not be zero address" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_execute_with_sdk_fails_fast_when_node_modules_missing(tmp_path):
+    deployer = ClankerDeployer(node_modules_path=tmp_path / "missing_node_modules")
+    deploy_request = make_deploy_request()
+    config = await deployer.prepare(deploy_request)
+
+    result = await deployer._execute_with_sdk(deploy_request, config)
+    assert result.status == "deploy_failed"
+    assert result.error_code == "sdk_not_installed"
+
+
+@pytest.mark.asyncio
+async def test_deploy_uses_custom_execute_hook():
+    """deploy() calls the injected execute hook and returns its result."""
     from clankandclaw.models.token import DeployResult
     from datetime import datetime, timezone
 
-    async def fake_executor(config, req):
+    async def custom_execute(config, req):
         return DeployResult(
             deploy_request_id=req.candidate_id,
             status="deploy_success",
@@ -174,7 +268,7 @@ async def test_deploy_uses_custom_executor():
             completed_at=datetime.now(timezone.utc).isoformat(),
         )
 
-    deployer = ClankerDeployer(execute=fake_executor)
+    deployer = ClankerDeployer(execute=custom_execute)
     result = await deployer.deploy(make_deploy_request())
 
     assert result.status == "deploy_success"

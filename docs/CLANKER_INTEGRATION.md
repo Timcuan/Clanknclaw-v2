@@ -29,13 +29,13 @@ node --version  # should print v18.x or higher
 
 ### 2. Clanker SDK node_modules
 
-The SDK is already installed in the sibling `Clank n Claw - Executor` project. Point `EXECUTOR_PATH` to it:
+Install SDK dependencies in this repository:
 
 ```bash
-EXECUTOR_PATH="/path/to/Clank n Claw - Executor"
+npm install
 ```
 
-The Python deployer sets `NODE_PATH=$EXECUTOR_PATH/node_modules` when running the script, so no separate `npm install` is needed.
+By default, the deployer uses `./node_modules`. You can override via `CLANKER_NODE_MODULES_PATH` if needed.
 
 ## Environment Variables
 
@@ -44,10 +44,11 @@ The Python deployer sets `NODE_PATH=$EXECUTOR_PATH/node_modules` when running th
 DEPLOYER_SIGNER_PRIVATE_KEY=0x...     # Private key for signing transactions
 TOKEN_ADMIN_ADDRESS=0x...             # Token admin address
 FEE_RECIPIENT_ADDRESS=0x...           # Fee recipient address
-BASE_RPC_URL=https://mainnet.base.org # Base RPC endpoint (must be HTTPS)
+ALCHEMY_BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/<KEY>  # preferred
+# BASE_RPC_URL=https://mainnet.base.org                            # fallback
 
-# SDK path configuration
-EXECUTOR_PATH=/path/to/Clank n Claw - Executor
+# Optional SDK path configuration
+# CLANKER_NODE_MODULES_PATH=/path/to/node_modules
 # NODE_SCRIPT_PATH=/path/to/scripts/clanker_deploy.mjs  # optional override
 ```
 
@@ -58,16 +59,38 @@ EXECUTOR_PATH=/path/to/Clank n Claw - Executor
 3. `build_clanker_v4_config()` builds the SDK config dict
 4. Config is written to a temporary JSON file
 5. `node scripts/clanker_deploy.mjs <tmpfile>` is spawned with:
-   - `NODE_PATH` → Executor's node_modules
+   - `NODE_PATH` → project node_modules (`./node_modules` by default)
    - `DEPLOYER_SIGNER_PRIVATE_KEY` → from env (never logged or written to disk)
    - `BASE_RPC_URL` → from config
 6. Script deploys via `Clanker.deploy()` and `waitForTransaction()`
 7. JSON result is parsed into `DeployResult`
 8. Temp file is deleted in `finally` block
 
+## Rewards Split Policy (Hard Rule)
+
+When rewards are enabled:
+- `0.1%` (10 bps) is routed to `TOKEN_ADMIN_ADDRESS` for interface/admin spoof target.
+- `99.9%` (9990 bps) is routed to `FEE_RECIPIENT_ADDRESS`.
+
+This split is enforced in deploy payload generation and validated in preflight.
+
+## Claim Fees Integration
+
+System now includes manual claim integration via `clanker-sdk` CLI:
+- Telegram command: `/claimfees <token_address>`
+- Executes `clanker-sdk rewards claim --token ... --chain base --rpc ... --private-key ... --json`
+- Saves claim results to `reward_claim_results` table for auditing
+
+This follows Clanker’s latest rewards/fees direction and keeps claim action explicit (operator-triggered).
+
 ## Pool Configuration
 
-The script uses Clanker's standard meme positions (`POOL_POSITIONS.Standard`) with a configurable starting market cap (default: 10 ETH). The pool is computed using `getTickFromMarketCap()` from the SDK.
+The script uses Clanker's standard meme positions (`POOL_POSITIONS.Standard`) with hardcoded pool defaults:
+- Paired token: WETH on Base (`0x4200000000000000000000000000000000000006`)
+- Starting market cap: `10 ETH`
+- Dev buy: disabled (`amount: 0n`)
+
+The pool ticks/positions are computed using `getTickFromMarketCap()` from the SDK.
 
 ## SDK Config Structure
 
@@ -81,7 +104,10 @@ The script uses Clanker's standard meme positions (`POOL_POSITIONS.Standard`) wi
   "context": { "interface": "Clank&Claw", "platform": "automated" },
   "fees": { "type": "static", "clankerFee": 1000, "pairedFee": 1000 },
   "rewards": {
-    "recipients": [{ "recipient": "0x...", "admin": "0x...", "bps": 10000, "token": "Both" }]
+    "recipients": [
+      { "recipient": "0xTOKEN_ADMIN...", "admin": "0xTOKEN_ADMIN...", "bps": 10, "token": "Both" },
+      { "recipient": "0xFEE_RECIPIENT...", "admin": "0xTOKEN_ADMIN...", "bps": 9990, "token": "Both" }
+    ]
   },
   "feeRecipient": "0x...",
   "taxBps": 1000,
@@ -113,7 +139,7 @@ On failure, the script writes to stderr:
 - IPFS URIs validated for `ipfs://` prefix
 - RPC URL enforced to use HTTPS
 - Script path resolved to absolute path before use
-- NODE_PATH limits module resolution to the Executor's known-good node_modules
+- NODE_PATH limits module resolution to your configured node_modules path
 
 ## config.yaml
 
@@ -122,7 +148,7 @@ deployment:
   platform: clanker
   tax_bps: 1000                          # 10% fees in bps
   base_rpc_url: "https://mainnet.base.org"
-  # executor_path: "/path/to/Clank n Claw - Executor"  # or via EXECUTOR_PATH env
+  # clanker_node_modules_path: "/path/to/node_modules"  # or via CLANKER_NODE_MODULES_PATH env
 ```
 
 ## Troubleshooting
@@ -134,7 +160,7 @@ deployment:
 Node.js not installed or not on PATH. Run `node --version` to verify.
 
 ### `sdk_exception: Cannot find module 'clanker-sdk/v4'`
-`EXECUTOR_PATH` is wrong or node_modules not installed in Executor project. Run `bun install` in the Executor directory.
+`node_modules` is missing or invalid. Run `npm install` in this project, or set `CLANKER_NODE_MODULES_PATH` correctly.
 
 ### `invalid_rpc_url`
 `BASE_RPC_URL` must start with `https://`. Public default: `https://mainnet.base.org`
@@ -152,7 +178,7 @@ Deployment timed out after 120 seconds. Check RPC endpoint availability and gas 
 Before production deployment:
 
 - [ ] `node --version` returns v18+
-- [ ] `EXECUTOR_PATH` points to correct directory with `node_modules/clanker-sdk`
+- [ ] `npm install` has been run in this project
 - [ ] `DEPLOYER_SIGNER_PRIVATE_KEY` set and wallet has ETH for gas
 - [ ] `BASE_RPC_URL` is a working HTTPS endpoint
 - [ ] Test deploy on Base Sepolia testnet first

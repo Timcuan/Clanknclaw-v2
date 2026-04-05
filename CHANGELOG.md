@@ -9,8 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### TODO
 - X account configuration for twscrape
-- Clanker contract ABI integration
+- Node.js runtime setup (`npm install`) on target host
 - Production testing and monitoring
+
+### Added
+- Detector runtime throughput controls:
+  - `max_process_concurrency` for X/Farcaster/Gecko workers
+  - loop latency telemetry (`x.loop_ms`, `farcaster.loop_ms`, `gecko.loop_ms`)
+- SQLite performance hardening for 24/7 workload:
+  - WAL mode + busy timeout + hot-path indexes
+  - retry handling for transient `database is locked`
+- Context-aware token image selection:
+  - ranked image candidates from metadata and source text
+  - profile/avatar/banner de-prioritization for social sources
+  - deterministic placeholder image fallback (including SVG fallback when PIL unavailable)
+- Farcaster detector worker integrated into main pipeline (Neynar cast search)
+- Farcaster smart extraction and scoring for Bankr/Clanker mention signals
+- X detector mention-centric query mode (`to:/from:/@`) for `@bankrbot` and `@clankerdeploy`
+- Smart X extraction from tweet content:
+  - target mentions
+  - contract candidates (EVM/Solana format)
+  - symbol (`$TICKER`) and chain hints
+  - engagement metadata (like/reply/retweet/quote)
+- GeckoTerminal multi-network detector (Base/ETH/Solana/BSC) using `new_pools`
+- Hot-pool gate tuned for fast momentum capture:
+  - volume m5/m15 thresholds
+  - tx count m5 threshold
+  - liquidity threshold
+  - pool freshness (max age minutes)
+- Per-request rate limiter in detector worker (`max_requests_per_minute`) to reduce API block risk on 24/7 VPS
+- Gecko-normalized candidate metadata for scoring: network, dex, volume, transactions, liquidity, hot score
+- Clanker reward split policy hardening:
+  - 10 bps (0.1%) to token admin interface target
+  - 9990 bps (99.9%) to fee recipient reward wallet
+- Natural metadata/context enrichment from source signals (author/context URL/excerpt)
+- Alchemy RPC priority support (`ALCHEMY_BASE_RPC_URL`, `ALCHEMY_RPC`)
+- Pinata smart dedupe cache (content-hash -> CID reuse)
+- Generic IPFS upload support for arbitrary file types with MIME auto-detection
+- Clanker claim-fees integration via Telegram command `/claimfees <token_address>`
+- Reward claim audit logging in `reward_claim_results`
+
+### Changed
+- Deploy preparation image stage now prefers contextual token image candidates over single raw image_url
+- X worker now captures richer media URL candidates for downstream image selection
+- X filter/scoring upgraded to prioritize target-mention intent and engagement bursts
+- Replaced GMGN ingestion path with GeckoTerminal ingestion path in supervisor/config/runtime
+- Pipeline quick filter now handles Gecko hot-pool signals directly (not keyword-only)
+- Scoring engine now weights Gecko momentum metrics for faster priority review routing
+- Liquidity pool remains hardcoded for safety:
+  - paired token WETH Base
+  - starting market cap 10 ETH
+  - dev buy fixed to 0
+
+### Fixed
+- Prevented image/context mismatch by rejecting weak social avatar/banner image candidates
+- Reduced event-loop blocking under burst load by offloading sync pipeline calls to worker threads
+- Mitigated over-polling risk with request pacing and bounded poll scope per network
+- Prevented misconfiguration risk for reward recipient delivery with strict preflight checks
+- Added fail-fast guardrails for invalid SDK success output and missing node modules
 
 ## [0.4.0] - 2026-04-05
 
@@ -27,12 +83,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Deduplication logic to prevent reprocessing
   - Token description building from metadata
   - Configurable poll interval and API URL
-- **Web3 Deployment Framework** ✅
-  - web3.py integration for onchain execution
-  - Transaction building and signing
+- **Clanker SDK Deployment Bridge** ✅
+  - Python → Node.js subprocess bridge for `clanker-sdk/v4`
   - RPC endpoint configuration
-  - Graceful fallback when web3 unavailable
-  - Ready for contract ABI integration
+  - Deterministic output parsing into `DeployResult`
+  - Graceful fallback when Node.js unavailable
 - **Candidate Database Queries** ✅
   - get_candidate() method for retrieving candidates by ID
   - Candidate reconstruction from database
@@ -41,12 +96,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - X detector configuration (enabled, poll_interval, keywords, max_results)
   - GMGN detector configuration (enabled, poll_interval, api_url, max_results)
   - BASE_RPC_URL environment variable
-  - CLANKER_CONTRACT_ADDRESS environment variable
+  - CLANKER_NODE_MODULES_PATH environment variable (optional)
 
 ### Changed
 - X detector worker now uses twscrape for actual polling
 - GMGN detector worker now uses httpx for API polling
-- Clanker deployer now has web3 execution framework
+- Clanker deployer now uses Clanker SDK bridge execution
 - Deploy worker uses database queries instead of mock data
 - Supervisor passes detector configurations from config
 - Updated .env.example with new environment variables
@@ -146,21 +201,21 @@ This release completes the polling implementations and deployment framework:
   - API polling
   - Token launch detection
   - Deduplication
-- ✅ Web3 deployment framework
-  - Transaction building
+- ✅ Clanker SDK deployment bridge
+  - Python ↔ Node.js integration
   - RPC integration
-  - Ready for contract ABI
+  - Structured result parsing
 - ✅ Candidate database queries
   - Full retrieval by ID
   - Reconstruction for deploy
 
 **Test Status:**
-- ✅ 67 tests passing
+- ✅ Full test suite passing in current branch
 - ⏭️ 1 test skipped (requires aiogram)
 
 **What's Next:**
 - ⚠️  X account configuration (30-60 min)
-- ⚠️  Clanker contract ABI (60-90 min)
+- ⚠️  Node.js dependency setup on deployment host
 - ⚠️  Production testing (30-60 min)
 
 The MVP is now 95-98% complete! All core functionality is implemented. Only production configuration remains.

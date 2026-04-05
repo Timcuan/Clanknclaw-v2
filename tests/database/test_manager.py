@@ -211,3 +211,53 @@ def test_database_manager_fails_cleanly_when_legacy_review_items_has_orphans(tmp
     assert "signal_candidates" not in tables
     assert "candidate_decisions" not in tables
     assert columns == ["id", "candidate_id", "status", "expires_at"]
+
+
+def test_get_latest_deployment_for_candidate_returns_most_recent(tmp_path):
+    db = DatabaseManager(tmp_path / "state.db")
+    db.initialize()
+    db.save_candidate("sig-1", "x", "tweet-1", "fp-1", "deploy pepe")
+    db.save_deployment_result(
+        result_id="dep-1",
+        candidate_id="sig-1",
+        status="deploy_failed",
+        error_code="err",
+        error_message="first",
+        deployed_at="2026-04-05T10:00:00Z",
+    )
+    db.save_deployment_result(
+        result_id="dep-2",
+        candidate_id="sig-1",
+        status="deploy_success",
+        tx_hash="0x" + "a" * 64,
+        contract_address="0x" + "b" * 40,
+        deployed_at="2026-04-05T11:00:00Z",
+    )
+
+    row = db.get_latest_deployment_for_candidate("sig-1")
+    assert row is not None
+    assert row["id"] == "dep-2"
+    assert row["status"] == "deploy_success"
+
+
+def test_save_reward_claim_result_persists_row(tmp_path):
+    db = DatabaseManager(tmp_path / "state.db")
+    db.initialize()
+
+    db.save_reward_claim_result(
+        result_id="claim-1",
+        token_address="0x" + "a" * 40,
+        status="claim_success",
+        tx_hash="0x" + "b" * 64,
+        error_code=None,
+        error_message=None,
+        claimed_at="2026-04-05T11:00:00Z",
+    )
+
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        row = conn.execute(
+            "SELECT id, token_address, status, tx_hash FROM reward_claim_results WHERE id = ?",
+            ("claim-1",),
+        ).fetchone()
+
+    assert row == ("claim-1", "0x" + "a" * 40, "claim_success", "0x" + "b" * 64)

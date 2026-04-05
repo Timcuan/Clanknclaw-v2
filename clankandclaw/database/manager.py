@@ -2,6 +2,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from time import sleep
 from typing import Optional
 
 
@@ -14,10 +15,24 @@ class DatabaseManager:
         self.path = Path(path)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 10000")
+        conn.execute("PRAGMA temp_store = MEMORY")
         return conn
+
+    def _with_retry(self, fn):
+        attempts = 3
+        for attempt in range(attempts):
+            try:
+                return fn()
+            except sqlite3.OperationalError as exc:
+                if "database is locked" not in str(exc).lower() or attempt == attempts - 1:
+                    raise
+                sleep(0.05 * (attempt + 1))
 
     def _existing_tables(self, conn: sqlite3.Connection) -> set[str]:
         rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -230,6 +245,24 @@ class DatabaseManager:
                     );
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS reward_claim_results (
+                        id TEXT PRIMARY KEY,
+                        token_address TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        tx_hash TEXT,
+                        error_code TEXT,
+                        error_message TEXT,
+                        claimed_at TEXT NOT NULL
+                    );
+                    """
+                )
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_review_items_status_expires ON review_items(status, expires_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_review_items_created_at ON review_items(created_at DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_candidates_observed_at ON signal_candidates(observed_at DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_deployment_results_deployed_at ON deployment_results(deployed_at DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_deployment_results_candidate ON deployment_results(candidate_id)")
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -276,40 +309,42 @@ class DatabaseManager:
         metadata: dict | None = None,
     ) -> None:
         metadata_json = json.dumps(metadata or {})
-        with self._connect() as conn:
-            conn.execute("BEGIN")
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO signal_candidates
-                        (id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        source = excluded.source,
-                        source_event_id = excluded.source_event_id,
-                        fingerprint = excluded.fingerprint,
-                        raw_text = excluded.raw_text,
-                        observed_at = excluded.observed_at,
-                        metadata_json = excluded.metadata_json
-                    """,
-                    (candidate_id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO candidate_decisions (candidate_id, score, decision, reason_codes, recommended_platform)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(candidate_id) DO UPDATE SET
-                        score = excluded.score,
-                        decision = excluded.decision,
-                        reason_codes = excluded.reason_codes,
-                        recommended_platform = excluded.recommended_platform
-                    """,
-                    (candidate_id, score, decision, ",".join(reason_codes), recommended_platform),
-                )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        def _op():
+            with self._connect() as conn:
+                conn.execute("BEGIN")
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO signal_candidates
+                            (id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            source = excluded.source,
+                            source_event_id = excluded.source_event_id,
+                            fingerprint = excluded.fingerprint,
+                            raw_text = excluded.raw_text,
+                            observed_at = excluded.observed_at,
+                            metadata_json = excluded.metadata_json
+                        """,
+                        (candidate_id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO candidate_decisions (candidate_id, score, decision, reason_codes, recommended_platform)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(candidate_id) DO UPDATE SET
+                            score = excluded.score,
+                            decision = excluded.decision,
+                            reason_codes = excluded.reason_codes,
+                            recommended_platform = excluded.recommended_platform
+                        """,
+                        (candidate_id, score, decision, ",".join(reason_codes), recommended_platform),
+                    )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+        self._with_retry(_op)
 
     def save_decision(
         self,
@@ -444,6 +479,44 @@ class DatabaseManager:
                 "SELECT * FROM deployment_results ORDER BY deployed_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
+
+    def get_latest_deployment_for_candidate(self, candidate_id: str) -> Optional[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM deployment_results
+                WHERE candidate_id = ?
+                ORDER BY deployed_at DESC
+                LIMIT 1
+                """,
+                (candidate_id,),
+            ).fetchone()
+
+    def save_reward_claim_result(
+        self,
+        result_id: str,
+        token_address: str,
+        status: str,
+        claimed_at: str,
+        tx_hash: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO reward_claim_results
+                    (id, token_address, status, tx_hash, error_code, error_message, claimed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    status = excluded.status,
+                    tx_hash = excluded.tx_hash,
+                    error_code = excluded.error_code,
+                    error_message = excluded.error_message,
+                    claimed_at = excluded.claimed_at
+                """,
+                (result_id, token_address, status, tx_hash, error_code, error_message, claimed_at),
+            )
 
     def get_stats(self) -> dict:
         with self._connect() as conn:

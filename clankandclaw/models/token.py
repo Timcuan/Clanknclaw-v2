@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _TX_HASH_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
+_PRIVATE_KEY_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
 
 
 def _validate_iso_datetime(value: Any, field_name: str) -> str:
@@ -33,11 +34,19 @@ def _validate_evm_address(value: Any, field_name: str) -> str:
     return value
 
 
+def _validate_wallet_reference(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a valid EVM address or private key")
+    if _EVM_ADDRESS_RE.fullmatch(value) or _PRIVATE_KEY_RE.fullmatch(value):
+        return value
+    raise ValueError(f"{field_name} must be a valid EVM address or private key")
+
+
 class SignalCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    source: Literal["x", "gmgn"]
+    source: Literal["x", "farcaster", "gecko", "gmgn"]
     source_event_id: str
     observed_at: str
     raw_text: str
@@ -100,8 +109,21 @@ class DeployRequest(BaseModel):
     token_reward_enabled: bool
     token_admin: str
     fee_recipient: str
+    clanker_fee_bps: int | None = Field(default=None, ge=0, le=10000)
+    paired_fee_bps: int | None = Field(default=None, ge=0, le=10000)
+    source: Literal["x", "farcaster", "gecko", "gmgn"] | None = None
+    source_event_id: str | None = None
+    context_url: str | None = None
+    author_handle: str | None = None
+    metadata_description: str | None = None
+    raw_context_excerpt: str | None = None
 
-    @field_validator("signer_wallet", "tax_recipient", "token_admin", "fee_recipient", mode="before")
+    @field_validator("signer_wallet", mode="before")
+    @classmethod
+    def validate_signer_wallet(cls, value: Any, info) -> str:
+        return _validate_wallet_reference(value, info.field_name)
+
+    @field_validator("tax_recipient", "token_admin", "fee_recipient", mode="before")
     @classmethod
     def validate_addresses(cls, value: Any, info) -> str:
         return _validate_evm_address(value, info.field_name)

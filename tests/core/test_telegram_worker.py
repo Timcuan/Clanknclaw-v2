@@ -6,6 +6,7 @@ import pytest
 
 from clankandclaw.core.workers.telegram_worker import TelegramWorker
 from clankandclaw.database.manager import DatabaseManager
+from clankandclaw.rewards.claimer import ClaimFeesResult
 
 
 @pytest.fixture
@@ -246,3 +247,27 @@ async def test_send_notifications_noop_when_bot_absent(db):
     # No bot — should not raise
     await worker.send_deploy_success("x-1", "0x" + "a" * 64, "0x" + "b" * 40)
     await worker.send_deploy_failure("x-1", "err", "msg")
+
+
+@pytest.mark.asyncio
+async def test_handle_claim_fees_persists_result(db):
+    worker = make_worker(db)
+    claimer = MagicMock()
+    claimer.claim = AsyncMock(
+        return_value=ClaimFeesResult(
+            status="claim_success",
+            tx_hash="0x" + "a" * 64,
+        )
+    )
+    worker.set_rewards_claimer(claimer)
+
+    result = await worker._handle_claim_fees("0x" + "b" * 40)
+    assert result.status == "claim_success"
+
+    import sqlite3
+
+    with sqlite3.connect(db.path) as conn:
+        row = conn.execute(
+            "SELECT token_address, status, tx_hash FROM reward_claim_results ORDER BY claimed_at DESC LIMIT 1"
+        ).fetchone()
+    assert row == ("0x" + "b" * 40, "claim_success", "0x" + "a" * 64)

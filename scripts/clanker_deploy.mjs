@@ -27,6 +27,14 @@ function fail(errorCode, errorMessage) {
   process.exit(1)
 }
 
+function isAddress(value) {
+  return typeof value === 'string' && /^0x[a-fA-F0-9]{40}$/.test(value)
+}
+
+function isIpfsUri(value) {
+  return typeof value === 'string' && /^ipfs:\/\/[a-zA-Z0-9]/.test(value)
+}
+
 // Read config file path from CLI arg
 const configPath = process.argv[2]
 if (!configPath) {
@@ -38,6 +46,48 @@ try {
   deployConfig = JSON.parse(readFileSync(configPath, 'utf-8'))
 } catch (err) {
   fail('config_read_error', `Failed to read config file: ${String(err)}`)
+}
+
+if (!deployConfig || typeof deployConfig !== 'object') {
+  fail('invalid_config', 'Deploy config must be a JSON object')
+}
+if (typeof deployConfig.name !== 'string' || deployConfig.name.length < 2 || deployConfig.name.length > 50) {
+  fail('invalid_config', 'name must be 2-50 characters')
+}
+if (!/^[A-Z0-9]{2,10}$/.test(String(deployConfig.symbol || ''))) {
+  fail('invalid_config', 'symbol must be 2-10 uppercase alphanumeric characters')
+}
+if (!isIpfsUri(deployConfig.image)) {
+  fail('invalid_config', 'image must be a valid ipfs:// URI')
+}
+if (deployConfig.tokenAdmin && !isAddress(deployConfig.tokenAdmin)) {
+  fail('invalid_config', 'tokenAdmin must be a valid EVM address')
+}
+if (deployConfig.rewards?.recipients?.length) {
+  for (const recipient of deployConfig.rewards.recipients) {
+    if (!isAddress(recipient.recipient) || !isAddress(recipient.admin)) {
+      fail('invalid_config', 'rewards recipients/admin must be valid EVM addresses')
+    }
+  }
+}
+if (deployConfig.fees) {
+  const clankerFee = Number(deployConfig.fees.clankerFee)
+  const pairedFee = Number(deployConfig.fees.pairedFee)
+  if (!Number.isFinite(clankerFee) || clankerFee < 0 || clankerFee > 10000) {
+    fail('invalid_config', 'fees.clankerFee must be between 0 and 10000')
+  }
+  if (!Number.isFinite(pairedFee) || pairedFee < 0 || pairedFee > 10000) {
+    fail('invalid_config', 'fees.pairedFee must be between 0 and 10000')
+  }
+}
+if (deployConfig.pool?.pairedToken && !isAddress(deployConfig.pool.pairedToken)) {
+  fail('invalid_config', 'pool.pairedToken must be a valid EVM address')
+}
+if (deployConfig.startingMarketCapEth !== undefined) {
+  const mcap = Number(deployConfig.startingMarketCapEth)
+  if (!Number.isFinite(mcap) || mcap <= 0) {
+    fail('invalid_config', 'startingMarketCapEth must be > 0')
+  }
 }
 
 // Validate required env vars

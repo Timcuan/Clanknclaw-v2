@@ -31,11 +31,41 @@ def test_normalize_x_event_captures_media_image_url():
             "id": "3",
             "text": "deploy Moon token MOON",
             "user": {"username": "bob"},
-            "media": [{"url": "https://pbs.twimg.com/media/example.jpg"}],
+            "media": [
+                {"url": "https://pbs.twimg.com/media/example.jpg"},
+                {"url": "https://pbs.twimg.com/media/example2.jpg"},
+            ],
         },
         "https://x.example/3",
     )
     assert candidate.metadata["image_url"] == "https://pbs.twimg.com/media/example.jpg"
+    assert candidate.metadata["image_candidates"] == [
+        "https://pbs.twimg.com/media/example.jpg",
+        "https://pbs.twimg.com/media/example2.jpg",
+    ]
+
+
+def test_normalize_x_event_extracts_mentions_contract_and_symbol():
+    candidate = normalize_x_event(
+        {
+            "id": "4",
+            "text": "@bankrbot deploy $MOON CA 0x1234567890abcdef1234567890abcdef12345678 on base",
+            "user": {"username": "carol"},
+            "mentioned_users": [{"username": "bankrbot"}],
+            "like_count": 9,
+            "retweet_count": 2,
+            "reply_count": 3,
+            "quote_count": 1,
+        },
+        "https://x.example/4",
+    )
+    assert candidate.suggested_symbol == "MOON"
+    assert candidate.metadata["x_target_mention"] is True
+    assert candidate.metadata["has_contract"] is True
+    assert "bankrbot" in candidate.metadata["target_mentions"]
+    assert "0x1234567890abcdef1234567890abcdef12345678" in candidate.metadata["evm_contracts"]
+    assert "base" in candidate.metadata["chain_hints"]
+    assert candidate.metadata["x_engagement_score"] > 0
 
 
 def test_normalize_x_event_falls_back_to_current_utc_time(monkeypatch):

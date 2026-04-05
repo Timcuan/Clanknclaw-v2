@@ -63,6 +63,13 @@ def test_deploy_request_separates_wallet_roles():
     assert deploy_request.signer_wallet.endswith("0003")
 
 
+def test_deploy_request_accepts_private_key_as_signer_wallet_reference():
+    data = _valid_deploy_request_data()
+    data["signer_wallet"] = "0x" + "1" * 64
+    deploy_request = DeployRequest(**data)
+    assert deploy_request.signer_wallet == "0x" + "1" * 64
+
+
 def test_model_rejects_extra_fields():
     with pytest.raises(ValidationError):
         SignalCandidate(

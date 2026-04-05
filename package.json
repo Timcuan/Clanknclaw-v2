@@ -1,0 +1,11 @@
+{
+  "name": "clankandclaw-clanker-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local Node.js runtime dependencies for Clank&Claw Clanker deploy bridge",
+  "type": "module",
+  "dependencies": {
+    "clanker-sdk": "^4.0.0",
+    "viem": "^2.23.7"
+  }
+}
