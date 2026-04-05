@@ -22,3 +22,8 @@ deployment:
   base_rpc_url: "https://mainnet.base.org"
   # executor_path: "/path/to/Clank n Claw - Executor"  # override via EXECUTOR_PATH env var
   # node_script_path: "/path/to/scripts/clanker_deploy.mjs"  # override via NODE_SCRIPT_PATH env var
+
+# Telegram credentials (prefer env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+telegram:
+  bot_token: ""
+  chat_id: ""

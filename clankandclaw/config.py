@@ -33,6 +33,11 @@ class DeploymentSection(BaseModel):
     node_script_path: str = ""  # Override path to clanker_deploy.mjs
 
 
+class TelegramSection(BaseModel):
+    bot_token: str = ""
+    chat_id: str = ""
+
+
 class WalletSection(BaseModel):
     deployer_signer_private_key: str
     token_admin: str
@@ -44,6 +49,7 @@ class AppConfig(BaseModel):
     x_detector: XDetectorSection = Field(default_factory=XDetectorSection)
     gmgn_detector: GMGNDetectorSection = Field(default_factory=GMGNDetectorSection)
     deployment: DeploymentSection = Field(default_factory=DeploymentSection)
+    telegram: TelegramSection = Field(default_factory=TelegramSection)
     wallets: WalletSection
 
 
@@ -64,6 +70,14 @@ def load_config(path: Path) -> AppConfig:
         raw["deployment"].setdefault("executor_path", os.getenv("EXECUTOR_PATH"))
     if os.getenv("NODE_SCRIPT_PATH"):
         raw["deployment"].setdefault("node_script_path", os.getenv("NODE_SCRIPT_PATH"))
+
+    # Inject Telegram env vars
+    if "telegram" not in raw:
+        raw["telegram"] = {}
+    if os.getenv("TELEGRAM_BOT_TOKEN"):
+        raw["telegram"].setdefault("bot_token", os.getenv("TELEGRAM_BOT_TOKEN"))
+    if os.getenv("TELEGRAM_CHAT_ID"):
+        raw["telegram"].setdefault("chat_id", os.getenv("TELEGRAM_CHAT_ID"))
 
     wallets = {
         "deployer_signer_private_key": os.getenv("DEPLOYER_SIGNER_PRIVATE_KEY"),

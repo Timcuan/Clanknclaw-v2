@@ -69,6 +69,8 @@ class Supervisor:
         telegram = TelegramWorker(
             self.db,
             review_expiry_seconds=self.config.app.review_expiry_seconds,
+            bot_token=self.config.telegram.bot_token or None,
+            chat_id=self.config.telegram.chat_id or None,
         )
         
         # Initialize deploy worker if pinata is available

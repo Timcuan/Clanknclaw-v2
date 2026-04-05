@@ -19,9 +19,13 @@ class TelegramWorker:
         self,
         db: DatabaseManager,
         review_expiry_seconds: int = 900,
+        bot_token: str | None = None,
+        chat_id: str | None = None,
     ):
         self.db = db
         self.review_expiry_seconds = review_expiry_seconds
+        self._bot_token = bot_token
+        self._chat_id = chat_id
         self.review_queue = ReviewQueue(db)
         self._running = False
         self._task: asyncio.Task[None] | None = None
@@ -39,8 +43,8 @@ class TelegramWorker:
             return
 
         try:
-            # Initialize bot
-            self._bot = TelegramBot()
+            # Initialize bot with config values (falls back to env vars if None)
+            self._bot = TelegramBot(token=self._bot_token or None, chat_id=self._chat_id or None)
             
             # Set callback handlers
             self._bot.on_approve = self._handle_approve
