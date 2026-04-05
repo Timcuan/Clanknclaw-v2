@@ -58,6 +58,22 @@ def test_build_clanker_payload_omits_rewards_when_disabled():
     assert "rewards" not in payload
 
 
+def test_build_clanker_payload_metadata_shape():
+    payload = build_clanker_payload(make_deploy_request())
+
+    assert "description" in payload["metadata"]
+    assert "auditUrls" not in payload["metadata"]
+    assert "vault" not in payload
+    assert "devBuy" not in payload
+
+
+def test_build_clanker_payload_has_required_sdk_fields():
+    payload = build_clanker_payload(make_deploy_request())
+
+    for field in ("name", "symbol", "image", "tokenAdmin", "context", "pool", "fees"):
+        assert field in payload, f"Missing required field: {field}"
+
+
 # --- parse_sdk_output ---
 
 def test_parse_sdk_output_success():
