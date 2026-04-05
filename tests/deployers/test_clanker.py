@@ -95,6 +95,14 @@ def test_parse_sdk_output_malformed_json():
     assert result.error_code == "parse_error"
 
 
+def test_parse_sdk_output_sdk_not_installed():
+    stderr = "node:internal/modules/esm/resolve:265\nERR_MODULE_NOT_FOUND: Cannot find package 'clanker-sdk'"
+    result = parse_sdk_output("", stderr, 1, "sig-1")
+
+    assert result.status == "deploy_failed"
+    assert result.error_code == "sdk_not_installed"
+
+
 def test_parse_sdk_output_never_raises():
     """parse_sdk_output must not raise for any input combination."""
     for stdout, stderr, code in [

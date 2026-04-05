@@ -103,7 +103,11 @@ def parse_sdk_output(
             error_code = data.get("errorCode", error_code)
             error_message = data.get("errorMessage", error_message)
         except Exception:
-            pass
+            # Detect Node.js module-not-found errors for clanker-sdk / viem
+            if ("ERR_MODULE_NOT_FOUND" in stderr or "Cannot find package" in stderr) and (
+                "clanker-sdk" in stderr or "viem" in stderr
+            ):
+                error_code = "sdk_not_installed"
         return DeployResult(
             deploy_request_id=deploy_request_id,
             status="deploy_failed",
