@@ -47,8 +47,8 @@ The system is designed for always-on operation: bounded concurrency, timeout-dri
 | Stealth transport | Rotating browser-like UA/header profiles + bounded jitter |
 | Decisioning | Filter, scorer, router, and locked review queue |
 | Execution | Clanker SDK v4.2.16 logic via Node bridge (`scripts/clanker_deploy.mjs`) |
-| Operator plane | Telegram review cards (10% Tax / b07 Vanity) + runtime commands |
-| Persistence | SQLite lifecycle tracking + retention cleanup + runtime settings |
+| Operator plane | Telegram "Mission Control" (10% Tax / b07 Vanity) + "Golden 8" commands |
+| Persistence | SQLite lifecycle tracking + metadata protection + runtime settings |
 | Reliability | Loop/candidate/deploy timeouts, bounded queues, retry-on-lock |
 | Safety | Idempotent deploy flow, cross-source symbol dedup, SSRF-safe image fetch |
 
@@ -131,36 +131,32 @@ Optional Telegram thread overrides (explicit static routing):
 - `TELEGRAM_THREAD_OPS_ID`
 - `TELEGRAM_THREAD_ALERT_ID`
 
-## Telegram operations
+## Telegram Operations
 
-Pairing and forum thread provisioning:
+`ClanknClaw v2` uses a high-precision **Mission Control** interface designed for operator safety and chat-flow speed.
 
-- `/pair` binds authorized chat to the current chat (persisted in `runtime_settings` as `telegram.chat_id`)
-- In forum supergroups, `/pair` attempts to auto-create and bind topics:
+### The "Golden 8" Slash Menu
+Access core functionality directly from the Telegram slash menu:
+
+- `/status` — **Main Dashboard**: Real-time health, system state, and navigation hub.
+- `/queue` — **Review Queue**: Access all pending deployment signals.
+- `/wallets` — **Signer Settings**: View and rotate deployment/admin wallets.
+- `/manualdeploy` — **Wizard**: Interactive token launch terminal (Metadata Trap).
+- `/pair` — **Binding**: Link the bot to a specific chat or forum thread.
+- `/autothread` — **Provisioning**: Auto-generate specialized forum topics.
+- `/panic` — **Safety Switch**: Instantly force all systems into "Review Mode."
+- `/help` — **Operator Manual**: Detailed command reference.
+
+### Mission Control UI Features
+- **Lean Contextual Navigation**: Secondary actions use single-button "Home" keyboards to prevent "Keyboard Spam" in chat history.
+- **Smart Metadata Guard**: Database-level protection prevents background discovery loops from overwriting high-quality, AI-enriched metadata.
+- **Wizard Isolation**: Strict FSM (Finite State Machine) clearing ensures zero "Ghost Data" leakage between manual deployments.
+
+### Forum Supergroup Support
+- `/pair` attempts to auto-create and bind specialized topics:
   - `cnc-review`, `cnc-deploy`, `cnc-claim`, `cnc-ops`, `cnc-alert`
-- `/autothread` retries topic provisioning and binding when permissions were fixed later
-- On service startup, bot auto-attempts provisioning again for paired forum chats
-- Required Telegram permission for auto-create: bot admin with `Manage Topics`
-
-Runtime controls:
-
-- `/control`
-- `/setmode <review|auto>`
-- `/setbot <on|off>`
-- `/setdeployer <clanker|bankr|both>`
-
-Wallet controls:
-
-- `/wallets`
-- `/setsigner <address|private_key|default>`
-- `/setadmin <address|default>`
-- `/setreward <address|default>`
-
-Manual deploy commands:
-
-- `/manualdeploy`
-- `/deploynow <platform> <name> <symbol> <image_or_cid|auto> [description]`
-- `/deployca <platform> <candidate_id>`
+- `/autothread` retries topic provisioning if rights were previously missing.
+- Bot admin permission for auto-create: `Manage Topics`.
 
 ## Verification and ops
 

@@ -88,7 +88,7 @@ class DatabaseManager:
         self.path = Path(path)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=10.0, cached_statements=256)
+        conn = sqlite3.connect(self.path, timeout=10.0, cached_statements=256, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
@@ -430,7 +430,12 @@ class DatabaseManager:
                             fingerprint = excluded.fingerprint,
                             raw_text = excluded.raw_text,
                             observed_at = excluded.observed_at,
-                            metadata_json = excluded.metadata_json
+                            metadata_json = CASE
+                                WHEN signal_candidates.metadata_json LIKE '%"ai_enriched":true%' 
+                                 AND excluded.metadata_json NOT LIKE '%"ai_enriched":true%' 
+                                THEN signal_candidates.metadata_json
+                                ELSE excluded.metadata_json
+                            END
                         """,
                         (candidate_id, source, source_event_id, fingerprint, raw_text_compact, observed_at, metadata_json),
                     )

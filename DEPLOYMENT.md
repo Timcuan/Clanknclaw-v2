@@ -387,39 +387,51 @@ Add:
 
 ## Updates
 
-### Application Update
+### Service Maintenance & Hardening
+
+The v2.1+ update introduces several production guardrails that should be monitored during operation:
+
+1. **Mission Control UI Integrity**:
+   - The bot uses a "Single Source of Truth" pattern. If the UI feels out of sync, run `/status` to refresh the main dashboard.
+   - For "Keyboard Spam" issues, verify that `_build_back_home_keyboard` is being used in custom handlers.
+
+2. **Smart Metadata Protection**:
+   - Background scans will no longer overwrite AI-enriched data in `signal_candidates`.
+   - To manually force an update of a candidate's metadata from discovery hints (ignoring the protection), you must manually clear the `suggested_name` and `suggested_symbol` fields in SQLite.
+
+3. **Wizard Isolation**:
+   - The `/manualdeploy` wizard is stateful. If an operator gets "stuck" in a deployment flow, running `/cancel` or starting a fresh `/manualdeploy` will reset all state and prevent data bleed.
+
+### Application Update Workflow
+
+To update your production instance with the latest UI and integrity fixes:
+
+```bash
+# 1. Enter the application directory
+cd /opt/clankandclaw/app
+
+# 2. Run the deployment sync script (new)
+./scripts/vps_sync.sh
+
+# 3. Verify the new commands
+# In Telegram, run /status to see the Mission Control dashboard.
+```
+
+If `vps_sync.sh` is not yet available, use the manual path:
 
 ```bash
 # Stop service
 sudo systemctl stop clankandclaw
 
-# Switch to application user
-sudo -u clankandclaw -i
-cd /opt/clankandclaw/app
-
-# Backup database
-cp clankandclaw.db clankandclaw.db.backup
-
-# Pull updates
+# Pull code
 git pull
 
-# Update dependencies
-source venv/bin/activate
-pip install -r requirements.txt
+# Update env if needed
+# pip install -r requirements.txt
 
-# Run migrations (if any)
-python -m clankandclaw.main
-# Press Ctrl+C after seeing "Database initialized"
-
-# Exit application user
-exit
-
-# Start service
-sudo systemctl start clankandclaw
-
-# Verify
-sudo systemctl status clankandclaw
-sudo journalctl -u clankandclaw -f
+# Reload daemon and restart
+sudo systemctl daemon-reload
+sudo systemctl restart clankandclaw
 ```
 
 ## Troubleshooting

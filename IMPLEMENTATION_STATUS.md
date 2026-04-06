@@ -2,11 +2,11 @@
 
 ## Overview
 
-Clank&Claw MVP implementation is **100% COMPLETE** for the core pipeline, Clanker v4 SDK integration, AI-assisted enrichment, and autonomous deployment controls. All systems implemented, integrated, syntax-verified, and hardened for 24/7 production operation.
+Clank&Claw MVP implementation is **100% COMPLETE** for the core pipeline, Clanker v4 SDK integration, AI-assisted enrichment, and autonomous deployment controls. **Hardened v2.1** introduces Mission Control UI and absolute Data Integrity safeguards.
 
-**Current Version:** `0.6.0` (2026-04-06)
+**Current Version:** `0.7.0` (2026-04-06)
 **Architecture:** Hybrid Intelligence (Heuristic-first + Multi-tier LLM Flash fallback)
-**AI Policy:** Gemini Flash-only (`gemini-1.5-flash-latest` → `gemini-1.5-flash-8b` → Local Heuristic)
+**UI Pattern:** Mission Control (Lean Contextual Navigation)
 
 ---
 
@@ -347,6 +347,39 @@ Centralized formatting helpers shared between `bot.py` (interactive handlers) an
 
 ---
 
+### 20. Mission Control & Data Integrity (100%) ✅
+
+> Added 2026-04-06. Hardened for "No-Typo" production deployment.
+
+**Files:** `clankandclaw/database/manager.py`, `clankandclaw/telegram/bot.py`, `clankandclaw/telegram/ui.py`, `clankandclaw/telegram/wizard.py`
+
+| Layer | Hardening Feature | Benefit |
+|-------|-------------------|---------|
+| **Database** | Smart Metadata Guard | Prevents discovery loops from overwriting AI-enriched metadata. |
+| **FSM** | State Isolation | Wipes wizard memory on fresh start to prevent "Ghost Data" bleed. |
+| **UI** | Lean Navigation | Replaced redundant 6-button grids with contextual "Home" buttons. |
+| **UX** | Dashboard Hub | Consolidated commands into a single "Golden 8" Mission Control menu. |
+
+---
+
+## End-to-End Flow (v0.7.0)
+
+```
+1. Signal Detection          ✅ (X / Farcaster / GeckoTerminal)
+        ↓
+2. AI Intelligence           ✅ (Heuristic Gatekeeper + Tiered LLM Fallback)
+        ↓
+3. Integrity Check           ✅ (Smart Metadata Guard — skip update if AI-enriched exists)
+        ↓
+4. Operator Decision         ✅ (Mission Control UI — Status / Queue / Manual Deploy)
+        ↓
+5. Deploy Execution          ✅ (Idempotent Clanker v4 SDK Bridge)
+        ↓
+6. Clean Notification        ✅ (Lean Navigation Result — back to Home hub)
+```
+
+---
+
 ## Key Runtime Settings Reference
 
 | Key | Default | Set via |
@@ -357,3 +390,4 @@ Centralized formatting helpers shared between `bot.py` (interactive handlers) an
 | `ops.deployer_mode` | `clanker` | `/setdeployer clanker\|bankr\|both` |
 
 **Emergency:** `/panic` → forces `ops.mode=review` immediately, no arguments needed.
+**Global Hub:** `/status` → opens the full Mission Control dashboard.

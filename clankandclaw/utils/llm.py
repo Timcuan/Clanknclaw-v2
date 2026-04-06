@@ -223,10 +223,17 @@ async def suggest_token_metadata(theme: str) -> list[dict[str, str]]:
         return []
 
     prompt = f"""
-    Generate 3 original, creative, and bullish meme token ideas based on the theme/prompt '{theme}'.
-    For each idea, provide a unique 'name' and a catchy 'symbol' (3-6 characters).
-    Format the response as a JSON array of objects with keys 'name' and 'symbol'.
-    Example: [{{"name": "CoinName", "symbol": "COIN"}}]
+    Suggest 4 creative, trending, and organic-looking meme token ideas for the Base Network.
+    Theme/Prompt: '{theme}'
+    
+    IMPORTANT: Avoid generic 'AI-sounding' names (e.g., 'MemeDog', 'BaseMission').
+    INSTEAD: Use high-conviction, natural, and low-cap tickers that 'snipers' hunt (e.g., 'PONKE', 'GIGA', 'HIM', 'PEPE').
+    
+    Each idea must have:
+    - name: A catchy and natural name (max 30 chars).
+    - symbol: A high-alpha ticker (3-6 chars, ALL CAPS).
+    
+    Return ONLY a JSON array of objects with 'name' and 'symbol' keys.
     """
     
     for model in ["gemini-1.5-flash-latest", "gemini-1.5-flash-8b"]:
@@ -243,9 +250,15 @@ async def suggest_token_metadata(theme: str) -> list[dict[str, str]]:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["candidates"][0]["content"]["parts"][0]["text"]
+                # Robust JSON cleaning (remove markdown etc)
+                json_match = re.search(r"\[.*\]", content, re.DOTALL)
+                if json_match:
+                    content = json_match.group(0)
+                
                 gemini_breaker.record_success()
                 return json.loads(content)
-        except Exception:
+        except Exception as exc:
+            logger.debug(f"AI Metadata Suggestion failed: {exc}")
             continue
             
     gemini_breaker.record_failure()
@@ -261,9 +274,10 @@ async def suggest_token_description(name: str, symbol: str, theme: str = "") -> 
     if not api_key: return ""
 
     prompt = f"""
-    Generate a short, catchy, and professional token description for {symbol} ({name}).
-    Theme/Context: {theme}
-    Format: Plain text only, 150-300 chars, high-alpha vibe.
+    Write a short, viral-ready, and professional meme token description for {symbol} ({name}).
+    Context: {theme}
+    Tone: Degen-friendly, high-conviction, Base network 'moon mission' vibe.
+    Constraint: Plain text, 150-250 characters, NO hashtags.
     """
     
     for model in ["gemini-1.5-flash-latest", "gemini-1.5-flash-8b"]:
