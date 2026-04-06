@@ -19,6 +19,7 @@ class XDetectorSection(BaseModel):
     target_handles: list[str] = Field(default_factory=lambda: ["bankrbot", "clankerdeploy"])
     query_terms: list[str] = Field(default_factory=lambda: ["deploy", "launch", "contract", "ca", "token"])
     max_process_concurrency: int = 8
+    max_query_concurrency: int = 3
 
 
 class FarcasterDetectorSection(BaseModel):
@@ -31,6 +32,7 @@ class FarcasterDetectorSection(BaseModel):
     query_terms: list[str] = Field(default_factory=lambda: ["deploy", "launch", "contract", "ca", "token"])
     request_timeout_seconds: float = 20.0
     max_process_concurrency: int = 8
+    max_query_concurrency: int = 2
 
 
 class GeckoDetectorSection(BaseModel):

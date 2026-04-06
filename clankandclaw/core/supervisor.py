@@ -104,6 +104,7 @@ class Supervisor:
                 target_handles=self.config.x_detector.target_handles,
                 query_terms=self.config.x_detector.query_terms,
                 max_process_concurrency=self.config.x_detector.max_process_concurrency,
+                max_query_concurrency=self.config.x_detector.max_query_concurrency,
             )
             x_detector.set_telegram_worker(telegram)
             self._workers["x_detector"] = x_detector
@@ -121,6 +122,7 @@ class Supervisor:
                 query_terms=self.config.farcaster_detector.query_terms,
                 request_timeout_seconds=self.config.farcaster_detector.request_timeout_seconds,
                 max_process_concurrency=self.config.farcaster_detector.max_process_concurrency,
+                max_query_concurrency=self.config.farcaster_detector.max_query_concurrency,
             )
             farcaster_detector.set_telegram_worker(telegram)
             self._workers["farcaster_detector"] = farcaster_detector

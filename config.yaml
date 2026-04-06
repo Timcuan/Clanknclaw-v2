@@ -12,6 +12,7 @@ x_detector:
   target_handles: ["bankrbot", "clankerdeploy"]
   query_terms: ["deploy", "launch", "contract", "ca", "token"]
   max_process_concurrency: 8
+  max_query_concurrency: 3
 
 farcaster_detector:
   enabled: true
@@ -23,6 +24,7 @@ farcaster_detector:
   query_terms: ["deploy", "launch", "contract", "ca", "token"]
   request_timeout_seconds: 20.0
   max_process_concurrency: 8
+  max_query_concurrency: 2
 
 gecko_detector:
   enabled: true

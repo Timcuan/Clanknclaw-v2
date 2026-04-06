@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -57,6 +58,8 @@ async def test_farcaster_worker_process_event_sends_notification(db):
             },
             "https://warpcast.com/~/conversations/fc1",
         )
+    if worker._notification_tasks:
+        await asyncio.gather(*list(worker._notification_tasks))
     telegram.send_review_notification.assert_awaited_once()
 
 

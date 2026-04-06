@@ -29,6 +29,7 @@ class FarcasterDetectorWorker:
         query_terms: list[str] | None = None,
         request_timeout_seconds: float = 20.0,
         max_process_concurrency: int = 8,
+        max_query_concurrency: int = 2,
     ):
         self.db = db
         self.poll_interval = poll_interval
@@ -39,6 +40,7 @@ class FarcasterDetectorWorker:
         self.query_terms = query_terms or ["deploy", "launch", "contract", "ca", "token"]
         self.request_timeout_seconds = request_timeout_seconds
         self.max_process_concurrency = max(1, max_process_concurrency)
+        self.max_query_concurrency = max(1, max_query_concurrency)
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._telegram_worker: Any = None
@@ -47,6 +49,9 @@ class FarcasterDetectorWorker:
         self._billing_blocked = False
         self._http_client: httpx.AsyncClient | None = None
         self._process_semaphore = asyncio.Semaphore(self.max_process_concurrency)
+        self._query_semaphore = asyncio.Semaphore(self.max_query_concurrency)
+        self._notify_semaphore = asyncio.Semaphore(8)
+        self._notification_tasks: set[asyncio.Task[Any]] = set()
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         self._telegram_worker = telegram_worker
@@ -76,6 +81,8 @@ class FarcasterDetectorWorker:
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
+        if self._notification_tasks:
+            await asyncio.gather(*list(self._notification_tasks), return_exceptions=True)
         logger.info("Farcaster detector worker stopped")
 
     async def _run(self) -> None:
@@ -109,56 +116,17 @@ class FarcasterDetectorWorker:
 
         client = self._http_client or httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_seconds))
         processed_count = 0
-        for query in self._build_queries():
-                params = {"q": query, "limit": self.max_results}
-                try:
-                    response = await self._request_with_retry(client, headers, params)
-                    if response.status_code == 402:
-                        self._billing_blocked = True
-                        logger.error("Neynar API returned 402 PaymentRequired; disable farcaster_detector or upgrade plan")
-                        return
-                    response.raise_for_status()
-                except httpx.HTTPError as exc:
-                    logger.error("HTTP error polling Farcaster query '%s': %s", query, exc)
+        query_tasks = [
+            asyncio.create_task(self._run_query(client, headers, query))
+            for query in self._build_queries()
+        ]
+        if query_tasks:
+            results = await asyncio.gather(*query_tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Farcaster query task failed: %s", result, exc_info=True)
                     continue
-
-                payload = response.json()
-                casts = payload.get("result", {}).get("casts", payload.get("casts", []))
-                logger.info("Fetched %s Farcaster casts for query '%s'", len(casts), query)
-                process_tasks: list[asyncio.Task[None]] = []
-                for cast in casts:
-                    cast_id = str(cast.get("hash") or cast.get("id") or "")
-                    if not cast_id or cast_id in self._seen_cast_ids:
-                        continue
-                    self._seen_cast_ids.append(cast_id)
-
-                    author = cast.get("author") or {}
-                    text = str(cast.get("text") or "")
-                    reactions = cast.get("reactions") or {}
-                    replies = cast.get("replies") or {}
-                    mentions = cast.get("mentioned_profiles") or cast.get("mentions") or []
-                    mentioned_handles = []
-                    for mention in mentions:
-                        if isinstance(mention, dict):
-                            username = mention.get("username")
-                            if username:
-                                mentioned_handles.append(str(username))
-
-                    event = {
-                        "id": cast_id,
-                        "text": text,
-                        "author": {"username": author.get("username")},
-                        "created_at": cast.get("timestamp"),
-                        "mentioned_handles": mentioned_handles,
-                        "like_count": int(reactions.get("likes_count") or 0),
-                        "recast_count": int(reactions.get("recasts_count") or 0),
-                        "reply_count": int(replies.get("count") or 0),
-                    }
-                    context_url = str(cast.get("permalink") or f"https://warpcast.com/~/conversations/{cast_id}")
-                    process_tasks.append(asyncio.create_task(self._process_event_with_semaphore(event, context_url)))
-                if process_tasks:
-                    await asyncio.gather(*process_tasks)
-                    processed_count += len(process_tasks)
+                processed_count += int(result)
 
         self._last_poll_time = datetime.now(timezone.utc)
         logger.info("farcaster.loop_ms=%d processed=%d", int((perf_counter() - started) * 1000), processed_count)
@@ -184,7 +152,7 @@ class FarcasterDetectorWorker:
             if scored.decision in ("review", "priority_review"):
                 logger.info("Candidate %s scored %s -> %s", candidate.id, scored.score, scored.decision)
                 if self._telegram_worker:
-                    await self._telegram_worker.send_review_notification(
+                    self._schedule_review_notification(
                         candidate.id,
                         scored.review_priority,
                         scored.score,
@@ -200,3 +168,96 @@ class FarcasterDetectorWorker:
     async def _process_event_with_semaphore(self, event: dict[str, Any], context_url: str) -> None:
         async with self._process_semaphore:
             await self.process_event(event, context_url)
+
+    async def _run_query(
+        self,
+        client: httpx.AsyncClient,
+        headers: dict[str, str],
+        query: str,
+    ) -> int:
+        async with self._query_semaphore:
+            params = {"q": query, "limit": self.max_results}
+            response = await self._request_with_retry(client, headers, params)
+            if response.status_code == 402:
+                self._billing_blocked = True
+                logger.error("Neynar API returned 402 PaymentRequired; disable farcaster_detector or upgrade plan")
+                return 0
+            response.raise_for_status()
+
+            payload = response.json()
+            casts = payload.get("result", {}).get("casts", payload.get("casts", []))
+            logger.info("Fetched %s Farcaster casts for query '%s'", len(casts), query)
+
+            process_tasks: list[asyncio.Task[None]] = []
+            for cast in casts:
+                cast_id = str(cast.get("hash") or cast.get("id") or "")
+                if not cast_id or cast_id in self._seen_cast_ids:
+                    continue
+                self._seen_cast_ids.append(cast_id)
+
+                author = cast.get("author") or {}
+                text = str(cast.get("text") or "")
+                reactions = cast.get("reactions") or {}
+                replies = cast.get("replies") or {}
+                mentions = cast.get("mentioned_profiles") or cast.get("mentions") or []
+                mentioned_handles = []
+                for mention in mentions:
+                    if isinstance(mention, dict):
+                        username = mention.get("username")
+                        if username:
+                            mentioned_handles.append(str(username))
+
+                event = {
+                    "id": cast_id,
+                    "text": text,
+                    "author": {"username": author.get("username")},
+                    "created_at": cast.get("timestamp"),
+                    "mentioned_handles": mentioned_handles,
+                    "like_count": int(reactions.get("likes_count") or 0),
+                    "recast_count": int(reactions.get("recasts_count") or 0),
+                    "reply_count": int(replies.get("count") or 0),
+                }
+                context_url = str(cast.get("permalink") or f"https://warpcast.com/~/conversations/{cast_id}")
+                process_tasks.append(asyncio.create_task(self._process_event_with_semaphore(event, context_url)))
+
+            if process_tasks:
+                await asyncio.gather(*process_tasks)
+            return len(process_tasks)
+
+    def _schedule_review_notification(
+        self,
+        candidate_id: str,
+        review_priority: str,
+        score: int,
+        reason_codes: list[str],
+    ) -> None:
+        task = asyncio.create_task(
+            self._send_review_notification_with_semaphore(
+                candidate_id,
+                review_priority,
+                score,
+                reason_codes,
+            )
+        )
+        self._notification_tasks.add(task)
+        task.add_done_callback(lambda t: self._notification_tasks.discard(t))
+
+    async def _send_review_notification_with_semaphore(
+        self,
+        candidate_id: str,
+        review_priority: str,
+        score: int,
+        reason_codes: list[str],
+    ) -> None:
+        if not self._telegram_worker:
+            return
+        async with self._notify_semaphore:
+            try:
+                await self._telegram_worker.send_review_notification(
+                    candidate_id,
+                    review_priority,
+                    score,
+                    reason_codes,
+                )
+            except Exception as exc:
+                logger.error("Failed to send review notification for %s: %s", candidate_id, exc, exc_info=True)

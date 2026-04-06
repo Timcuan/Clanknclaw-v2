@@ -64,6 +64,7 @@ x_detector:
   target_handles: ["bankrbot", "clankerdeploy"]  # Mention/focus handles
   query_terms: ["deploy", "launch", "contract", "ca", "token"]
   max_process_concurrency: 8
+  max_query_concurrency: 3      # Parallel query tasks per loop
 
 farcaster_detector:
   enabled: true
@@ -73,7 +74,9 @@ farcaster_detector:
   max_results: 20
   target_handles: ["bankr", "clanker"]
   query_terms: ["deploy", "launch", "contract", "ca", "token"]
+  request_timeout_seconds: 20.0
   max_process_concurrency: 8
+  max_query_concurrency: 2      # Parallel Neynar search queries per loop
 
 gecko_detector:
   enabled: true                # Enable GeckoTerminal polling

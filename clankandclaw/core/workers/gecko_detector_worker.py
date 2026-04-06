@@ -92,6 +92,8 @@ class GeckoDetectorWorker:
         self._last_request_at: datetime | None = None
         self._http_client: httpx.AsyncClient | None = None
         self._process_semaphore = asyncio.Semaphore(self.max_process_concurrency)
+        self._notify_semaphore = asyncio.Semaphore(8)
+        self._notification_tasks: set[asyncio.Task[Any]] = set()
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         self._telegram_worker = telegram_worker
@@ -121,6 +123,8 @@ class GeckoDetectorWorker:
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
+        if self._notification_tasks:
+            await asyncio.gather(*list(self._notification_tasks), return_exceptions=True)
         logger.info("Gecko detector worker stopped")
 
     async def _run(self) -> None:
@@ -263,57 +267,57 @@ class GeckoDetectorWorker:
         client = self._http_client or httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_seconds))
         processed_count = 0
         for network in self.networks:
-                try:
-                    pools, included = await self._poll_network(client, network)
-                except httpx.HTTPError as exc:
-                    logger.error("HTTP error polling GeckoTerminal (%s): %s", network, exc)
+            try:
+                pools, included = await self._poll_network(client, network)
+            except httpx.HTTPError as exc:
+                logger.error("HTTP error polling GeckoTerminal (%s): %s", network, exc)
+                continue
+
+            token_index = self._build_token_index(included)
+            logger.info("Fetched %s new pools from GeckoTerminal network=%s", len(pools), network)
+            process_tasks: list[asyncio.Task[None]] = []
+            for pool in pools:
+                attrs = pool.get("attributes") or {}
+                pool_address = str(attrs.get("address") or "")
+                if not pool_address:
                     continue
 
-                token_index = self._build_token_index(included)
-                logger.info("Fetched %s new pools from GeckoTerminal network=%s", len(pools), network)
-                process_tasks: list[asyncio.Task[None]] = []
-                for pool in pools:
-                    attrs = pool.get("attributes") or {}
-                    pool_address = str(attrs.get("address") or "")
-                    if not pool_address:
-                        continue
+                pool_id = f"{network}:{pool_address}"
+                if pool_id in self._seen_pool_ids:
+                    continue
 
-                    pool_id = f"{network}:{pool_address}"
-                    if pool_id in self._seen_pool_ids:
-                        continue
+                is_hot, stats = self._is_hot_pool(network, attrs)
+                if not is_hot:
+                    continue
 
-                    is_hot, stats = self._is_hot_pool(network, attrs)
-                    if not is_hot:
-                        continue
+                self._seen_pool_ids.append(pool_id)
 
-                    self._seen_pool_ids.append(pool_id)
+                token_data = self._extract_base_token(pool, token_index)
+                token_name = str(token_data.get("name") or attrs.get("name") or "Unknown").strip()
+                token_symbol = str(token_data.get("symbol") or "???").strip().upper()
+                context_url = self._build_context_url(network, attrs)
 
-                    token_data = self._extract_base_token(pool, token_index)
-                    token_name = str(token_data.get("name") or attrs.get("name") or "Unknown").strip()
-                    token_symbol = str(token_data.get("symbol") or "???").strip().upper()
-                    context_url = self._build_context_url(network, attrs)
-
-                    payload = {
-                        "id": pool_id,
-                        "text": self._build_text(network, token_name, token_symbol, stats),
-                        "author": "geckoterminal",
-                        "timestamp": attrs.get("pool_created_at"),
-                        "token_data": token_data,
-                        "network": network,
-                        "dex": attrs.get("dex_id"),
-                        "volume": stats["volume"],
-                        "transactions": stats["transactions"],
-                        "liquidity_usd": stats["liquidity_usd"],
-                        "pool_created_at": stats["pool_created_at"],
-                        "spike_ratio": stats["spike_ratio"],
-                        "hot_score": stats["hot_score"],
-                        "source_match_score": stats["source_match_score"],
-                        "source_tags_matched": stats["source_tags_matched"],
-                    }
-                    process_tasks.append(asyncio.create_task(self._process_payload_with_semaphore(payload, context_url)))
-                if process_tasks:
-                    await asyncio.gather(*process_tasks)
-                    processed_count += len(process_tasks)
+                payload = {
+                    "id": pool_id,
+                    "text": self._build_text(network, token_name, token_symbol, stats),
+                    "author": "geckoterminal",
+                    "timestamp": attrs.get("pool_created_at"),
+                    "token_data": token_data,
+                    "network": network,
+                    "dex": attrs.get("dex_id"),
+                    "volume": stats["volume"],
+                    "transactions": stats["transactions"],
+                    "liquidity_usd": stats["liquidity_usd"],
+                    "pool_created_at": stats["pool_created_at"],
+                    "spike_ratio": stats["spike_ratio"],
+                    "hot_score": stats["hot_score"],
+                    "source_match_score": stats["source_match_score"],
+                    "source_tags_matched": stats["source_tags_matched"],
+                }
+                process_tasks.append(asyncio.create_task(self._process_payload_with_semaphore(payload, context_url)))
+            if process_tasks:
+                await asyncio.gather(*process_tasks)
+                processed_count += len(process_tasks)
 
         self._last_poll_time = datetime.now(timezone.utc)
         logger.info("gecko.loop_ms=%d processed=%d networks=%d", int((perf_counter() - started) * 1000), processed_count, len(self.networks))
@@ -326,7 +330,7 @@ class GeckoDetectorWorker:
             if scored.decision in ("review", "priority_review"):
                 logger.info("Candidate %s scored %s -> %s", candidate.id, scored.score, scored.decision)
                 if self._telegram_worker:
-                    await self._telegram_worker.send_review_notification(
+                    self._schedule_review_notification(
                         candidate.id,
                         scored.review_priority,
                         scored.score,
@@ -342,3 +346,41 @@ class GeckoDetectorWorker:
     async def _process_payload_with_semaphore(self, payload: dict[str, Any], context_url: str) -> None:
         async with self._process_semaphore:
             await self.process_payload(payload, context_url)
+
+    def _schedule_review_notification(
+        self,
+        candidate_id: str,
+        review_priority: str,
+        score: int,
+        reason_codes: list[str],
+    ) -> None:
+        task = asyncio.create_task(
+            self._send_review_notification_with_semaphore(
+                candidate_id,
+                review_priority,
+                score,
+                reason_codes,
+            )
+        )
+        self._notification_tasks.add(task)
+        task.add_done_callback(lambda t: self._notification_tasks.discard(t))
+
+    async def _send_review_notification_with_semaphore(
+        self,
+        candidate_id: str,
+        review_priority: str,
+        score: int,
+        reason_codes: list[str],
+    ) -> None:
+        if not self._telegram_worker:
+            return
+        async with self._notify_semaphore:
+            try:
+                await self._telegram_worker.send_review_notification(
+                    candidate_id,
+                    review_priority,
+                    score,
+                    reason_codes,
+                )
+            except Exception as exc:
+                logger.error("Failed to send Gecko review notification for %s: %s", candidate_id, exc, exc_info=True)

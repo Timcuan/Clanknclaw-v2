@@ -116,8 +116,10 @@ Full aiogram bot with commands and approve/reject callbacks. `AIOGRAM_AVAILABLE`
 All workers with start/stop lifecycle. `TelegramWorker` accepts `bot_token`/`chat_id` from config.
 Throughput optimizations:
 - bounded worker concurrency (`max_process_concurrency`)
+- bounded query fanout (`max_query_concurrency`) for X/Farcaster loops
 - sync pipeline calls offloaded via `asyncio.to_thread`
 - HTTP client reuse + retry/backoff for transient `429/5xx`
+- non-blocking detector notifications with bounded async Telegram send tasks
 
 **Tests:** Covered by supervisor tests ✅
 

@@ -26,6 +26,7 @@ class XDetectorWorker:
         target_handles: list[str] | None = None,
         query_terms: list[str] | None = None,
         max_process_concurrency: int = 8,
+        max_query_concurrency: int = 3,
     ):
         self.db = db
         self.poll_interval = poll_interval
@@ -34,6 +35,7 @@ class XDetectorWorker:
         self.target_handles = [h.lower().lstrip("@") for h in (target_handles or ["bankrbot", "clankerdeploy"])]
         self.query_terms = query_terms or ["deploy", "launch", "contract", "ca", "token"]
         self.max_process_concurrency = max(1, max_process_concurrency)
+        self.max_query_concurrency = max(1, max_query_concurrency)
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._telegram_worker: Any = None  # Will be set by supervisor
@@ -41,6 +43,9 @@ class XDetectorWorker:
         self._last_poll_time: datetime | None = None
         self._seen_tweet_ids: deque[str] = deque(maxlen=5000)
         self._process_semaphore = asyncio.Semaphore(self.max_process_concurrency)
+        self._query_semaphore = asyncio.Semaphore(self.max_query_concurrency)
+        self._notify_semaphore = asyncio.Semaphore(8)
+        self._notification_tasks: set[asyncio.Task[Any]] = set()
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         """Set the telegram worker for sending notifications."""
@@ -81,6 +86,8 @@ class XDetectorWorker:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self._notification_tasks:
+            await asyncio.gather(*list(self._notification_tasks), return_exceptions=True)
         logger.info("X detector worker stopped")
 
     async def _run(self) -> None:
@@ -103,59 +110,14 @@ class XDetectorWorker:
             started = perf_counter()
             processed_count = 0
             queries = self._build_queries()
-            for query in queries:
-                logger.debug("Searching X with query: %s", query)
-                
-                try:
-                    tweets = []
-                    async for tweet in self._api.search(
-                        query,
-                        limit=self.max_results,
-                        kv={"product": "Latest"},
-                    ):
-                        tweets.append(tweet)
-                    
-                    logger.info("Found %s tweets for query '%s'", len(tweets), query)
-                    process_tasks: list[asyncio.Task[None]] = []
-                    for tweet in tweets:
-                        tweet_id = str(getattr(tweet, "id", ""))
-                        if not tweet_id or tweet_id in self._seen_tweet_ids:
-                            continue
-                        self._seen_tweet_ids.append(tweet_id)
-
-                        event = {
-                            "id": tweet_id,
-                            "text": getattr(tweet, "rawContent", "") or "",
-                            "user": {
-                                "username": getattr(getattr(tweet, "user", None), "username", "unknown"),
-                            },
-                            "created_at": getattr(tweet, "date", None).isoformat() if getattr(tweet, "date", None) else None,
-                            "like_count": int(getattr(tweet, "likeCount", 0) or 0),
-                            "retweet_count": int(getattr(tweet, "retweetCount", 0) or 0),
-                            "reply_count": int(getattr(tweet, "replyCount", 0) or 0),
-                            "quote_count": int(getattr(tweet, "quoteCount", 0) or 0),
-                            "view_count": int(getattr(tweet, "viewCount", 0) or 0),
-                            "conversation_id": str(getattr(tweet, "conversationId", "") or ""),
-                            "in_reply_to_tweet_id": str(getattr(tweet, "inReplyToTweetId", "") or ""),
-                            "mentioned_users": [
-                                {"username": getattr(u, "username", "")}
-                                for u in (getattr(tweet, "mentionedUsers", None) or [])
-                                if getattr(u, "username", "")
-                            ],
-                            "media": [{"url": url} for url in self._extract_media_urls(tweet)],
-                        }
-                        
-                        context_url = f"https://x.com/{event['user']['username']}/status/{tweet.id}"
-                        
-                        process_tasks.append(
-                            asyncio.create_task(self._process_event_with_semaphore(event, context_url))
-                        )
-                    if process_tasks:
-                        await asyncio.gather(*process_tasks)
-                        processed_count += len(process_tasks)
-                        
-                except Exception as exc:
-                    logger.error("Error searching X query '%s': %s", query, exc, exc_info=True)
+            query_tasks = [asyncio.create_task(self._run_query(query)) for query in queries]
+            if query_tasks:
+                results = await asyncio.gather(*query_tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error("X query task failed: %s", result, exc_info=True)
+                        continue
+                    processed_count += int(result)
                     
             self._last_poll_time = datetime.now(timezone.utc)
             logger.info("x.loop_ms=%d processed=%d queries=%d", int((perf_counter() - started) * 1000), processed_count, len(queries))
@@ -214,6 +176,58 @@ class XDetectorWorker:
             deduped.append(url)
         return deduped
 
+    async def _run_query(self, query: str) -> int:
+        async with self._query_semaphore:
+            logger.debug("Searching X with query: %s", query)
+            try:
+                tweets = []
+                async for tweet in self._api.search(
+                    query,
+                    limit=self.max_results,
+                    kv={"product": "Latest"},
+                ):
+                    tweets.append(tweet)
+
+                logger.info("Found %s tweets for query '%s'", len(tweets), query)
+                process_tasks: list[asyncio.Task[None]] = []
+                for tweet in tweets:
+                    tweet_id = str(getattr(tweet, "id", ""))
+                    if not tweet_id or tweet_id in self._seen_tweet_ids:
+                        continue
+                    self._seen_tweet_ids.append(tweet_id)
+
+                    event = {
+                        "id": tweet_id,
+                        "text": getattr(tweet, "rawContent", "") or "",
+                        "user": {
+                            "username": getattr(getattr(tweet, "user", None), "username", "unknown"),
+                        },
+                        "created_at": getattr(tweet, "date", None).isoformat() if getattr(tweet, "date", None) else None,
+                        "like_count": int(getattr(tweet, "likeCount", 0) or 0),
+                        "retweet_count": int(getattr(tweet, "retweetCount", 0) or 0),
+                        "reply_count": int(getattr(tweet, "replyCount", 0) or 0),
+                        "quote_count": int(getattr(tweet, "quoteCount", 0) or 0),
+                        "view_count": int(getattr(tweet, "viewCount", 0) or 0),
+                        "conversation_id": str(getattr(tweet, "conversationId", "") or ""),
+                        "in_reply_to_tweet_id": str(getattr(tweet, "inReplyToTweetId", "") or ""),
+                        "mentioned_users": [
+                            {"username": getattr(u, "username", "")}
+                            for u in (getattr(tweet, "mentionedUsers", None) or [])
+                            if getattr(u, "username", "")
+                        ],
+                        "media": [{"url": url} for url in self._extract_media_urls(tweet)],
+                    }
+                    context_url = f"https://x.com/{event['user']['username']}/status/{tweet.id}"
+                    process_tasks.append(
+                        asyncio.create_task(self._process_event_with_semaphore(event, context_url))
+                    )
+                if process_tasks:
+                    await asyncio.gather(*process_tasks)
+                return len(process_tasks)
+            except Exception as exc:
+                logger.error("Error searching X query '%s': %s", query, exc, exc_info=True)
+                return 0
+
     async def process_event(self, event: dict[str, Any], context_url: str) -> None:
         """Process a single X event through the pipeline."""
         try:
@@ -224,10 +238,8 @@ class XDetectorWorker:
                 logger.info(
                     f"Candidate {candidate.id} scored {scored.score} -> {scored.decision}"
                 )
-                
-                # Send to Telegram for review
                 if self._telegram_worker:
-                    await self._telegram_worker.send_review_notification(
+                    self._schedule_review_notification(
                         candidate.id,
                         scored.review_priority,
                         scored.score,
@@ -244,3 +256,41 @@ class XDetectorWorker:
     async def _process_event_with_semaphore(self, event: dict[str, Any], context_url: str) -> None:
         async with self._process_semaphore:
             await self.process_event(event, context_url)
+
+    def _schedule_review_notification(
+        self,
+        candidate_id: str,
+        review_priority: str,
+        score: int,
+        reason_codes: list[str],
+    ) -> None:
+        task = asyncio.create_task(
+            self._send_review_notification_with_semaphore(
+                candidate_id,
+                review_priority,
+                score,
+                reason_codes,
+            )
+        )
+        self._notification_tasks.add(task)
+        task.add_done_callback(lambda t: self._notification_tasks.discard(t))
+
+    async def _send_review_notification_with_semaphore(
+        self,
+        candidate_id: str,
+        review_priority: str,
+        score: int,
+        reason_codes: list[str],
+    ) -> None:
+        if not self._telegram_worker:
+            return
+        async with self._notify_semaphore:
+            try:
+                await self._telegram_worker.send_review_notification(
+                    candidate_id,
+                    review_priority,
+                    score,
+                    reason_codes,
+                )
+            except Exception as exc:
+                logger.error("Failed to send review notification for %s: %s", candidate_id, exc, exc_info=True)

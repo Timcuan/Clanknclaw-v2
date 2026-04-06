@@ -1,5 +1,7 @@
 """Tests for GeckoDetectorWorker."""
 
+import asyncio
+
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -102,6 +104,8 @@ async def test_process_payload_sends_review_notification_for_matching_candidate(
 
         await worker.process_payload(payload, "https://www.geckoterminal.com/base/pools/0xdeadbeef")
 
+    if worker._notification_tasks:
+        await asyncio.gather(*list(worker._notification_tasks))
     telegram.send_review_notification.assert_awaited_once()
 
 
