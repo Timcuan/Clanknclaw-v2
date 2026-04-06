@@ -9,7 +9,7 @@
 set -e
 
 APP_DIR="/opt/clankandclaw/app"
-SERVICE_NAME="clankandclaw.service"
+SERVICE_NAME="clanknclaw-v2.service"
 
 # 1. Colors for visibility
 GREEN='\033[0;32m'
