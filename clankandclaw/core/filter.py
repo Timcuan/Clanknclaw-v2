@@ -19,11 +19,32 @@ def quick_filter(candidate: SignalCandidate) -> FilterDecision:
         metadata = candidate.metadata or {}
         network = str(metadata.get("network") or "").lower()
         source_match_score = int(metadata.get("source_match_score") or 0)
+        gate_stage = str(metadata.get("gate_stage") or "")
+        confidence_tier = str(metadata.get("confidence_tier") or "low").lower()
+        volume = metadata.get("volume") or {}
+        tx_data = metadata.get("transactions") or {}
+        volume_m1 = float(volume.get("m1") or 0.0)
+        volume_m5 = float(volume.get("m5") or 0.0)
+        tx_m1 = int(tx_data.get("m1") or 0)
+        tx_m5 = int(tx_data.get("m5") or 0)
+        hot_score = int(metadata.get("hot_score") or 0)
+        spike_ratio_m1_m5 = float(metadata.get("spike_ratio_m1_m5") or 0.0)
+
+        if gate_stage in {"stage1_failed", "stage2_failed", "stage3_failed"}:
+            return FilterDecision(False, [gate_stage])
         if network == "base" and source_match_score < 1:
             return FilterDecision(False, ["gecko_base_source_not_target"])
-        hot_score = int(metadata.get("hot_score") or 0)
-        if hot_score >= 4:
-            return FilterDecision(True, ["gecko_hot_pool"])
+
+        strong_momentum = (
+            hot_score >= 5
+            and volume_m5 >= 3500
+            and tx_m5 >= 12
+            and (spike_ratio_m1_m5 >= 0.2 or (volume_m1 >= 500 and tx_m1 >= 3))
+        )
+        if confidence_tier in {"high", "medium"}:
+            return FilterDecision(True, [f"gecko_confidence_{confidence_tier}"])
+        if strong_momentum:
+            return FilterDecision(True, ["gecko_low_confidence_override"])
         return FilterDecision(False, ["gecko_not_hot"])
 
     if candidate.source == "x":

@@ -122,3 +122,53 @@ def test_score_candidate_gecko_solana_attention_burst_reason():
     )
     scored = score_candidate(candidate)
     assert "solana_attention_burst" in scored.reason_codes
+
+
+def test_score_candidate_gecko_confidence_high_and_m1_momentum():
+    candidate = SignalCandidate(
+        id="g-base-2",
+        source="gecko",
+        source_event_id="base:0x2",
+        observed_at="2026-04-04T00:00:00Z",
+        raw_text="hot pool",
+        fingerprint="fp-gb-2",
+        metadata={
+            "network": "base",
+            "volume": {"m1": 9000.0, "m5": 17000.0, "m15": 38000.0},
+            "transactions": {"m1": 15, "m5": 48},
+            "liquidity_usd": 110000.0,
+            "hot_score": 7,
+            "spike_ratio": 0.7,
+            "spike_ratio_m1_m5": 0.9,
+            "source_match_score": 2,
+            "confidence_tier": "high",
+            "gate_stage": "stage2_passed",
+        },
+    )
+    scored = score_candidate(candidate)
+    assert "gecko_confidence_high" in scored.reason_codes
+    assert "gecko_volume_m1_strong" in scored.reason_codes
+    assert "gecko_tx_m1_strong" in scored.reason_codes
+    assert "gecko_spike_m1_m5_strong" in scored.reason_codes
+
+
+def test_score_candidate_gecko_stage_failed_penalized():
+    candidate = SignalCandidate(
+        id="g-base-3",
+        source="gecko",
+        source_event_id="base:0x3",
+        observed_at="2026-04-04T00:00:00Z",
+        raw_text="hot pool",
+        fingerprint="fp-gb-3",
+        metadata={
+            "network": "base",
+            "volume": {"m1": 100.0, "m5": 1200.0, "m15": 2500.0},
+            "transactions": {"m1": 1, "m5": 5},
+            "liquidity_usd": 9000.0,
+            "hot_score": 2,
+            "confidence_tier": "low",
+            "gate_stage": "stage2_failed",
+        },
+    )
+    scored = score_candidate(candidate)
+    assert "stage2_failed" in scored.reason_codes

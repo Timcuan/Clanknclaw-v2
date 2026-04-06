@@ -95,8 +95,57 @@ def test_quick_filter_gecko_base_allows_when_target_source_matches():
         observed_at="2026-04-04T00:00:00Z",
         raw_text="hot pool",
         fingerprint="fp-g-2",
-        metadata={"network": "base", "hot_score": 5, "source_match_score": 1},
+        metadata={
+            "network": "base",
+            "hot_score": 5,
+            "source_match_score": 1,
+            "confidence_tier": "medium",
+            "gate_stage": "stage2_passed",
+        },
     )
     decision = quick_filter(candidate)
     assert decision.allowed is True
-    assert "gecko_hot_pool" in decision.reason_codes
+    assert "gecko_confidence_medium" in decision.reason_codes
+
+
+def test_quick_filter_gecko_rejects_failed_gate_stage():
+    candidate = SignalCandidate(
+        id="g-3",
+        source="gecko",
+        source_event_id="base:0x3",
+        observed_at="2026-04-04T00:00:00Z",
+        raw_text="hot pool",
+        fingerprint="fp-g-3",
+        metadata={
+            "network": "base",
+            "gate_stage": "stage2_failed",
+            "hot_score": 5,
+            "source_match_score": 2,
+            "confidence_tier": "high",
+        },
+    )
+    decision = quick_filter(candidate)
+    assert decision.allowed is False
+    assert "stage2_failed" in decision.reason_codes
+
+
+def test_quick_filter_gecko_low_confidence_override_on_strong_momentum():
+    candidate = SignalCandidate(
+        id="g-4",
+        source="gecko",
+        source_event_id="solana:0x4",
+        observed_at="2026-04-04T00:00:00Z",
+        raw_text="hot pool",
+        fingerprint="fp-g-4",
+        metadata={
+            "network": "solana",
+            "hot_score": 6,
+            "confidence_tier": "low",
+            "volume": {"m1": 1500.0, "m5": 8000.0},
+            "transactions": {"m1": 5, "m5": 20},
+            "spike_ratio_m1_m5": 0.4,
+        },
+    )
+    decision = quick_filter(candidate)
+    assert decision.allowed is True
+    assert "gecko_low_confidence_override" in decision.reason_codes

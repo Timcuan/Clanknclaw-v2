@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - X worker now captures richer media URL candidates for downstream image selection
 - Farcaster and X polling now execute query fanout concurrently with bounded semaphores
 - Gecko network polling order now prioritizes gameplay: `base -> solana -> bsc -> eth`
+- Quick filter/scoring layer now consumes Gecko staged metadata (`gate_stage`, `confidence_tier`, `m1` velocity, `spike_ratio_m1_m5`) for faster and cleaner review routing
 - X filter/scoring upgraded to prioritize target-mention intent and engagement bursts
 - Replaced GMGN ingestion path with GeckoTerminal ingestion path in supervisor/config/runtime
 - Pipeline quick filter now handles Gecko hot-pool signals directly (not keyword-only)

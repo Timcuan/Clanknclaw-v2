@@ -98,12 +98,21 @@ def score_candidate(candidate: SignalCandidate) -> ScoreResult:
         tx_data = metadata.get("transactions") or {}
         liquidity = float(metadata.get("liquidity_usd") or 0.0)
         spike_ratio = float(metadata.get("spike_ratio") or 0.0)
+        spike_ratio_m1_m5 = float(metadata.get("spike_ratio_m1_m5") or 0.0)
         source_match_score = int(metadata.get("source_match_score") or 0)
+        confidence_tier = str(metadata.get("confidence_tier") or "low").lower()
+        gate_stage = str(metadata.get("gate_stage") or "")
 
+        volume_m1 = float(volume.get("m1") or 0.0)
         volume_m5 = float(volume.get("m5") or 0.0)
         volume_m15 = float(volume.get("m15") or 0.0)
+        tx_m1 = int(tx_data.get("m1") or 0)
         tx_m5 = int(tx_data.get("m5") or 0)
         hot_score = int(metadata.get("hot_score") or 0)
+
+        if gate_stage in {"stage1_failed", "stage2_failed", "stage3_failed"}:
+            score -= 30
+            reasons.append(gate_stage)
 
         if volume_m5 >= 15000:
             score += 25
@@ -112,12 +121,26 @@ def score_candidate(candidate: SignalCandidate) -> ScoreResult:
             score += 15
             reasons.append("gecko_volume_m5_ok")
 
+        if volume_m1 >= 8000:
+            score += 14
+            reasons.append("gecko_volume_m1_strong")
+        elif volume_m1 >= 1800:
+            score += 8
+            reasons.append("gecko_volume_m1_ok")
+
         if volume_m15 >= 35000:
             score += 20
             reasons.append("gecko_volume_m15_strong")
         elif volume_m15 >= 12000:
             score += 10
             reasons.append("gecko_volume_m15_ok")
+
+        if tx_m1 >= 12:
+            score += 10
+            reasons.append("gecko_tx_m1_strong")
+        elif tx_m1 >= 4:
+            score += 5
+            reasons.append("gecko_tx_m1_ok")
 
         if tx_m5 >= 45:
             score += 15
@@ -143,6 +166,23 @@ def score_candidate(candidate: SignalCandidate) -> ScoreResult:
         elif spike_ratio >= 0.45:
             score += 6
             reasons.append("gecko_spike_ratio_ok")
+
+        if spike_ratio_m1_m5 >= 0.8:
+            score += 10
+            reasons.append("gecko_spike_m1_m5_strong")
+        elif spike_ratio_m1_m5 >= 0.3:
+            score += 5
+            reasons.append("gecko_spike_m1_m5_ok")
+
+        if confidence_tier == "high":
+            score += 15
+            reasons.append("gecko_confidence_high")
+        elif confidence_tier == "medium":
+            score += 8
+            reasons.append("gecko_confidence_medium")
+        elif confidence_tier == "low":
+            score -= 5
+            reasons.append("gecko_confidence_low")
 
         if network == "base" and source_match_score >= 1:
             score += 10
