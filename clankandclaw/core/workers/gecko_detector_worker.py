@@ -5,16 +5,16 @@ import logging
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
-import inspect
-import random
 from time import perf_counter
 from typing import Any
 
 import httpx
 
+from clankandclaw.config import StealthConfig
 from clankandclaw.core.detectors.gecko_detector import normalize_gecko_payload
 from clankandclaw.core.pipeline import process_candidate
 from clankandclaw.database.manager import DatabaseManager
+from clankandclaw.utils.stealth_client import StealthClient
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +72,10 @@ class GeckoDetectorWorker:
         request_timeout_seconds: float = 20.0,
         base_target_sources: list[str] | None = None,
         max_process_concurrency: int = 10,
-        user_agent: str = "ClankAndClaw/1.0 (+ops)",
         loop_timeout_seconds: float = 90.0,
         candidate_process_timeout_seconds: float = 20.0,
         max_pending_notifications: int = 500,
+        stealth_config: StealthConfig | None = None,
     ):
         self.db = db
         self.poll_interval = poll_interval
@@ -91,7 +91,6 @@ class GeckoDetectorWorker:
         self.max_requests_per_minute = max(1, max_requests_per_minute)
         self.request_timeout_seconds = request_timeout_seconds
         self.max_process_concurrency = max(1, max_process_concurrency)
-        self.user_agent = user_agent
         self.loop_timeout_seconds = max(10.0, loop_timeout_seconds)
         self.candidate_process_timeout_seconds = max(1.0, candidate_process_timeout_seconds)
         self.max_pending_notifications = max(10, max_pending_notifications)
@@ -104,8 +103,9 @@ class GeckoDetectorWorker:
         self._pool_processed_at: dict[str, datetime] = {}
         self._pool_last_hot_score: dict[str, int] = {}
         self._pool_last_volume_m5: dict[str, float] = {}
+        self._stealth_config = stealth_config or StealthConfig()
         self._last_request_at: datetime | None = None
-        self._http_client: httpx.AsyncClient | None = None
+        self._stealth: StealthClient | None = None
         self._process_semaphore = asyncio.Semaphore(self.max_process_concurrency)
         self._notify_semaphore = asyncio.Semaphore(8)
         self._notification_tasks: set[asyncio.Task[Any]] = set()
@@ -120,13 +120,6 @@ class GeckoDetectorWorker:
         self._consecutive_poll_errors = 0
         self._consecutive_poll_successes = 0
         self._pool_reprocess_cooldown_seconds = 600
-        self._request_jitter_seconds = 0.2
-        self._default_headers = {
-            "accept": "application/json",
-            "accept-language": "en-US,en;q=0.9",
-            "user-agent": self.user_agent,
-            "connection": "keep-alive",
-        }
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         self._telegram_worker = telegram_worker
@@ -138,7 +131,7 @@ class GeckoDetectorWorker:
 
         self._running = True
         self._last_poll_time = datetime.now(timezone.utc)
-        self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_seconds))
+        self._stealth = StealthClient(self._stealth_config, timeout=self.request_timeout_seconds)
         self._task = asyncio.create_task(self._run())
         logger.info("Gecko detector worker started")
 
@@ -153,9 +146,9 @@ class GeckoDetectorWorker:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        if self._http_client:
-            await self._http_client.aclose()
-            self._http_client = None
+        if self._stealth:
+            await self._stealth.aclose()
+            self._stealth = None
         if self._notification_tasks:
             await asyncio.gather(*list(self._notification_tasks), return_exceptions=True)
         await asyncio.to_thread(self._pipeline_executor.shutdown, True)
@@ -182,14 +175,13 @@ class GeckoDetectorWorker:
             deduped.append(network)
         return sorted(deduped, key=lambda net: (priority.get(net, 10), net))
 
-    async def _respect_rate_limit(self) -> None:
+    async def _respect_rate_limit(self, stealth: StealthClient) -> None:
         min_interval = self._base_request_interval_seconds * self._adaptive_interval_multiplier
         if not self._last_request_at:
             return
         elapsed = (datetime.now(timezone.utc) - self._last_request_at).total_seconds()
         if elapsed < min_interval:
-            jitter = random.uniform(0.0, self._request_jitter_seconds)
-            await asyncio.sleep((min_interval - elapsed) + jitter)
+            await stealth.sleep_jitter(min_interval - elapsed)
 
     def _on_poll_success(self) -> None:
         self._consecutive_poll_successes += 1
@@ -211,12 +203,13 @@ class GeckoDetectorWorker:
         if self._consecutive_poll_errors >= 7:
             self._circuit_open_until = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=180)
 
-    async def _poll_network(self, client: httpx.AsyncClient, network: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    async def _poll_network(self, stealth: StealthClient, network: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         url = f"{self.api_base_url}/networks/{network}/new_pools"
         for attempt in range(3):
-            await self._respect_rate_limit()
-            response = await client.get(url, params={"page": 1}, headers=self._default_headers)
+            await self._respect_rate_limit(stealth)
+            response = await stealth.get(url, params={"page": 1})
             self._last_request_at = datetime.now(timezone.utc)
+            stealth.on_response(response.status_code)
             if response.status_code in {403, 429, 500, 502, 503, 504} and attempt < 2:
                 self._on_poll_failure()
                 await asyncio.sleep(0.35 * (attempt + 1))
@@ -427,81 +420,71 @@ class GeckoDetectorWorker:
             return
         started = perf_counter()
         logger.debug("Polling GeckoTerminal new pools for networks: %s", ",".join(self.networks))
-        created_local_client = False
-        client = self._http_client
-        if client is None:
-            client = httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_seconds))
-            created_local_client = True
+        stealth = self._stealth
+        if stealth is None:
+            stealth = StealthClient(self._stealth_config, timeout=self.request_timeout_seconds)
         processed_count = 0
         skipped_by_gate = 0
         skipped_by_cooldown = 0
-        try:
-            for network in self.networks:
-                try:
-                    pools, included = await self._poll_network(client, network)
-                except httpx.HTTPError as exc:
-                    self._on_poll_failure()
-                    logger.error("HTTP error polling GeckoTerminal (%s): %s", network, exc)
+        for network in self.networks:
+            try:
+                pools, included = await self._poll_network(stealth, network)
+            except httpx.HTTPError as exc:
+                self._on_poll_failure()
+                logger.error("HTTP error polling GeckoTerminal (%s): %s", network, exc)
+                continue
+
+            token_index = self._build_token_index(included)
+            logger.info("Fetched %s new pools from GeckoTerminal network=%s", len(pools), network)
+            process_tasks: list[asyncio.Task[None]] = []
+            for pool in pools:
+                attrs = pool.get("attributes") or {}
+                pool_address = str(attrs.get("address") or "")
+                if not pool_address:
                     continue
 
-                token_index = self._build_token_index(included)
-                logger.info("Fetched %s new pools from GeckoTerminal network=%s", len(pools), network)
-                process_tasks: list[asyncio.Task[None]] = []
-                for pool in pools:
-                    attrs = pool.get("attributes") or {}
-                    pool_address = str(attrs.get("address") or "")
-                    if not pool_address:
-                        continue
+                pool_id = f"{network}:{pool_address}"
 
-                    pool_id = f"{network}:{pool_address}"
+                is_hot, stats, skip_reason = self._evaluate_pool(network, attrs)
+                if not is_hot:
+                    skipped_by_gate += 1
+                    logger.debug("Skipping pool %s (%s)", pool_id, skip_reason)
+                    continue
+                if not self._should_process_hot_pool(pool_id, stats):
+                    skipped_by_cooldown += 1
+                    continue
 
-                    is_hot, stats, skip_reason = self._evaluate_pool(network, attrs)
-                    if not is_hot:
-                        skipped_by_gate += 1
-                        logger.debug("Skipping pool %s (%s)", pool_id, skip_reason)
-                        continue
-                    if not self._should_process_hot_pool(pool_id, stats):
-                        skipped_by_cooldown += 1
-                        continue
+                self._seen_pool_ids.append(pool_id)
 
-                    self._seen_pool_ids.append(pool_id)
+                token_data = self._extract_base_token(pool, token_index)
+                token_name = str(token_data.get("name") or attrs.get("name") or "Unknown").strip()
+                token_symbol = str(token_data.get("symbol") or "???").strip().upper()
+                context_url = self._build_context_url(network, attrs)
 
-                    token_data = self._extract_base_token(pool, token_index)
-                    token_name = str(token_data.get("name") or attrs.get("name") or "Unknown").strip()
-                    token_symbol = str(token_data.get("symbol") or "???").strip().upper()
-                    context_url = self._build_context_url(network, attrs)
-
-                    payload = {
-                        "id": pool_id,
-                        "text": self._build_text(network, token_name, token_symbol, stats),
-                        "author": "geckoterminal",
-                        "timestamp": attrs.get("pool_created_at"),
-                        "token_data": token_data,
-                        "network": network,
-                        "dex": attrs.get("dex_id"),
-                        "volume": stats["volume"],
-                        "transactions": stats["transactions"],
-                        "liquidity_usd": stats["liquidity_usd"],
-                        "pool_created_at": stats["pool_created_at"],
-                        "spike_ratio": stats["spike_ratio"],
-                        "spike_ratio_m1_m5": stats["spike_ratio_m1_m5"],
-                        "hot_score": stats["hot_score"],
-                        "confidence_tier": stats["confidence_tier"],
-                        "gate_stage": stats["gate_stage"],
-                        "source_match_score": stats["source_match_score"],
-                        "source_tags_matched": stats["source_tags_matched"],
-                    }
-                    process_tasks.append(asyncio.create_task(self._process_payload_with_semaphore(payload, context_url)))
-                if process_tasks:
-                    await asyncio.gather(*process_tasks)
-                    processed_count += len(process_tasks)
-        finally:
-            if created_local_client:
-                close = getattr(client, "aclose", None)
-                if callable(close):
-                    maybe_awaitable = close()
-                    if inspect.isawaitable(maybe_awaitable):
-                        await maybe_awaitable
+                payload = {
+                    "id": pool_id,
+                    "text": self._build_text(network, token_name, token_symbol, stats),
+                    "author": "geckoterminal",
+                    "timestamp": attrs.get("pool_created_at"),
+                    "token_data": token_data,
+                    "network": network,
+                    "dex": attrs.get("dex_id"),
+                    "volume": stats["volume"],
+                    "transactions": stats["transactions"],
+                    "liquidity_usd": stats["liquidity_usd"],
+                    "pool_created_at": stats["pool_created_at"],
+                    "spike_ratio": stats["spike_ratio"],
+                    "spike_ratio_m1_m5": stats["spike_ratio_m1_m5"],
+                    "hot_score": stats["hot_score"],
+                    "confidence_tier": stats["confidence_tier"],
+                    "gate_stage": stats["gate_stage"],
+                    "source_match_score": stats["source_match_score"],
+                    "source_tags_matched": stats["source_tags_matched"],
+                }
+                process_tasks.append(asyncio.create_task(self._process_payload_with_semaphore(payload, context_url)))
+            if process_tasks:
+                await asyncio.gather(*process_tasks)
+                processed_count += len(process_tasks)
 
         self._last_poll_time = datetime.now(timezone.utc)
         logger.info(
