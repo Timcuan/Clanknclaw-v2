@@ -136,10 +136,10 @@ class Supervisor:
                 max_requests_per_minute=self.config.farcaster_detector.max_requests_per_minute,
                 max_process_concurrency=self.config.farcaster_detector.max_process_concurrency,
                 max_query_concurrency=self.config.farcaster_detector.max_query_concurrency,
-                user_agent=self.config.app.user_agent,
                 loop_timeout_seconds=self.config.app.worker_loop_timeout_seconds,
                 candidate_process_timeout_seconds=self.config.app.candidate_process_timeout_seconds,
                 max_pending_notifications=self.config.app.max_pending_notifications,
+                stealth_config=self.config.stealth,
             )
             farcaster_detector.set_telegram_worker(telegram)
             self._workers["farcaster_detector"] = farcaster_detector
@@ -162,10 +162,10 @@ class Supervisor:
                 request_timeout_seconds=self.config.gecko_detector.request_timeout_seconds,
                 base_target_sources=self.config.gecko_detector.base_target_sources,
                 max_process_concurrency=self.config.gecko_detector.max_process_concurrency,
-                user_agent=self.config.app.user_agent,
                 loop_timeout_seconds=self.config.app.worker_loop_timeout_seconds,
                 candidate_process_timeout_seconds=self.config.app.candidate_process_timeout_seconds,
                 max_pending_notifications=self.config.app.max_pending_notifications,
+                stealth_config=self.config.stealth,
             )
             gecko_detector.set_telegram_worker(telegram)
             self._workers["gecko_detector"] = gecko_detector

@@ -5,16 +5,16 @@ import logging
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
-import inspect
-import random
 from time import perf_counter
 from typing import Any
 
 import httpx
 
+from clankandclaw.config import StealthConfig
 from clankandclaw.core.detectors.farcaster_detector import normalize_farcaster_event
 from clankandclaw.core.pipeline import process_candidate
 from clankandclaw.database.manager import DatabaseManager
+from clankandclaw.utils.stealth_client import StealthClient
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +34,10 @@ class FarcasterDetectorWorker:
         max_requests_per_minute: int = 45,
         max_process_concurrency: int = 8,
         max_query_concurrency: int = 2,
-        user_agent: str = "ClankAndClaw/1.0 (+ops)",
         loop_timeout_seconds: float = 90.0,
         candidate_process_timeout_seconds: float = 20.0,
         max_pending_notifications: int = 500,
+        stealth_config: StealthConfig | None = None,
     ):
         self.db = db
         self.poll_interval = poll_interval
@@ -50,10 +50,10 @@ class FarcasterDetectorWorker:
         self.max_requests_per_minute = max(1, max_requests_per_minute)
         self.max_process_concurrency = max(1, max_process_concurrency)
         self.max_query_concurrency = max(1, max_query_concurrency)
-        self.user_agent = user_agent
         self.loop_timeout_seconds = max(10.0, loop_timeout_seconds)
         self.candidate_process_timeout_seconds = max(1.0, candidate_process_timeout_seconds)
         self.max_pending_notifications = max(10, max_pending_notifications)
+        self._stealth_config = stealth_config or StealthConfig()
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._telegram_worker: Any = None
@@ -62,7 +62,7 @@ class FarcasterDetectorWorker:
         self._seen_cast_id_set: set[str] = set()
         self._max_seen_cast_ids = 5000
         self._billing_blocked = False
-        self._http_client: httpx.AsyncClient | None = None
+        self._stealth: StealthClient | None = None
         self._process_semaphore = asyncio.Semaphore(self.max_process_concurrency)
         self._query_semaphore = asyncio.Semaphore(self.max_query_concurrency)
         self._notify_semaphore = asyncio.Semaphore(8)
@@ -73,15 +73,8 @@ class FarcasterDetectorWorker:
         )
         self._last_request_at: datetime | None = None
         self._request_interval_multiplier = 1.0
-        self._request_jitter_seconds = 0.2
         self._provider_cooldown_until: datetime | None = None
         self._consecutive_request_failures = 0
-        self._default_headers = {
-            "accept": "application/json",
-            "accept-language": "en-US,en;q=0.9",
-            "user-agent": self.user_agent,
-            "connection": "keep-alive",
-        }
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         self._telegram_worker = telegram_worker
@@ -94,7 +87,7 @@ class FarcasterDetectorWorker:
             logger.warning("Farcaster detector started without NEYNAR_API_KEY; polling may fail")
         self._running = True
         self._last_poll_time = datetime.now(timezone.utc)
-        self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_seconds))
+        self._stealth = StealthClient(self._stealth_config, timeout=self.request_timeout_seconds)
         self._task = asyncio.create_task(self._run())
         logger.info("Farcaster detector worker started")
 
@@ -108,9 +101,9 @@ class FarcasterDetectorWorker:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        if self._http_client:
-            await self._http_client.aclose()
-            self._http_client = None
+        if self._stealth:
+            await self._stealth.aclose()
+            self._stealth = None
         if self._notification_tasks:
             await asyncio.gather(*list(self._notification_tasks), return_exceptions=True)
         await asyncio.to_thread(self._pipeline_executor.shutdown, True)
@@ -143,38 +136,30 @@ class FarcasterDetectorWorker:
         if self._provider_cooldown_until and datetime.now(timezone.utc) < self._provider_cooldown_until:
             logger.warning("Farcaster detector cooldown active until %s", self._provider_cooldown_until.isoformat())
             return
-        headers = dict(self._default_headers)
-        if self.api_key:
-            headers["x-api-key"] = self.api_key
         if self._billing_blocked:
             logger.warning("Farcaster detector polling paused: Neynar cast search requires paid plan")
             return
 
-        created_local_client = False
-        client = self._http_client
-        if client is None:
-            client = httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_seconds))
-            created_local_client = True
-        try:
-            processed_count = 0
-            query_tasks = [
-                asyncio.create_task(self._run_query(client, headers, query))
-                for query in self._build_queries()
-            ]
-            if query_tasks:
-                results = await asyncio.gather(*query_tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.error("Farcaster query task failed: %s", result, exc_info=True)
-                        continue
-                    processed_count += int(result)
-        finally:
-            if created_local_client:
-                close = getattr(client, "aclose", None)
-                if callable(close):
-                    maybe_awaitable = close()
-                    if inspect.isawaitable(maybe_awaitable):
-                        await maybe_awaitable
+        api_headers: dict[str, str] = {}
+        if self.api_key:
+            api_headers["x-api-key"] = self.api_key
+
+        stealth = self._stealth
+        if stealth is None:
+            stealth = StealthClient(self._stealth_config, timeout=self.request_timeout_seconds)
+
+        processed_count = 0
+        query_tasks = [
+            asyncio.create_task(self._run_query(stealth, api_headers, query))
+            for query in self._build_queries()
+        ]
+        if query_tasks:
+            results = await asyncio.gather(*query_tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Farcaster query task failed: %s", result, exc_info=True)
+                    continue
+                processed_count += int(result)
 
         self._last_poll_time = datetime.now(timezone.utc)
         logger.info(
@@ -184,14 +169,13 @@ class FarcasterDetectorWorker:
             self._request_interval_multiplier,
         )
 
-    async def _respect_rate_limit(self) -> None:
+    async def _respect_rate_limit(self, stealth: StealthClient) -> None:
         min_interval = (60.0 / float(self.max_requests_per_minute)) * self._request_interval_multiplier
         if not self._last_request_at:
             return
         elapsed = (datetime.now(timezone.utc) - self._last_request_at).total_seconds()
         if elapsed < min_interval:
-            jitter = random.uniform(0.0, self._request_jitter_seconds)
-            await asyncio.sleep((min_interval - elapsed) + jitter)
+            await stealth.sleep_jitter(min_interval - elapsed)
 
     def _on_request_success(self) -> None:
         self._consecutive_request_failures = 0
@@ -209,14 +193,15 @@ class FarcasterDetectorWorker:
 
     async def _request_with_retry(
         self,
-        client: httpx.AsyncClient,
-        headers: dict[str, str],
+        stealth: StealthClient,
+        api_headers: dict[str, str],
         params: dict[str, Any],
     ) -> httpx.Response:
         for attempt in range(3):
-            await self._respect_rate_limit()
-            response = await client.get(self.api_url, headers=headers, params=params)
+            await self._respect_rate_limit(stealth)
+            response = await stealth.get(self.api_url, headers=api_headers, params=params)
             self._last_request_at = datetime.now(timezone.utc)
+            stealth.on_response(response.status_code)
             if response.status_code in {403, 429, 500, 502, 503, 504} and attempt < 2:
                 self._on_request_failure(response.status_code)
                 await asyncio.sleep(0.35 * (attempt + 1))
@@ -264,13 +249,13 @@ class FarcasterDetectorWorker:
 
     async def _run_query(
         self,
-        client: httpx.AsyncClient,
-        headers: dict[str, str],
+        stealth: StealthClient,
+        api_headers: dict[str, str],
         query: str,
     ) -> int:
         async with self._query_semaphore:
             params = {"q": query, "limit": self.max_results}
-            response = await self._request_with_retry(client, headers, params)
+            response = await self._request_with_retry(stealth, api_headers, params)
             if response.status_code == 402:
                 self._billing_blocked = True
                 logger.error("Neynar API returned 402 PaymentRequired; disable farcaster_detector or upgrade plan")
