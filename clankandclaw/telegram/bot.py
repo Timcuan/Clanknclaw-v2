@@ -2,8 +2,10 @@
 
 import asyncio
 import html
+import json
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -31,6 +33,9 @@ _MAX_RAW_TEXT = 300  # chars shown in review message
 _MAX_QUEUE_ITEMS = 10
 _MAX_ERROR_TEXT = 80
 _MAX_REASONS = 6
+_THREAD_CATEGORIES = ("review", "deploy", "claim", "ops", "alert")
+_EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+_PRIVATE_KEY_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
 
 
 def _source_label(source: str | None) -> str:
@@ -70,6 +75,23 @@ def _shorten_text(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + "…"
+
+
+def _is_evm_address(value: str) -> bool:
+    return bool(_EVM_ADDRESS_RE.fullmatch(value.strip()))
+
+
+def _is_private_key(value: str) -> bool:
+    return bool(_PRIVATE_KEY_RE.fullmatch(value.strip()))
+
+
+def _mask_sensitive_wallet(value: str) -> str:
+    text = value.strip()
+    if _is_private_key(text):
+        return f"{text[:8]}…{text[-4:]}"
+    if len(text) > 12:
+        return f"{text[:8]}…{text[-4:]}"
+    return text
 
 
 def build_review_message(
@@ -286,6 +308,11 @@ class TelegramBot:
         token: str | None = None,
         chat_id: str | None = None,
         message_thread_id: int | None = None,
+        thread_review_id: int | None = None,
+        thread_deploy_id: int | None = None,
+        thread_claim_id: int | None = None,
+        thread_ops_id: int | None = None,
+        thread_alert_id: int | None = None,
         db: Any = None,
     ):
         if not AIOGRAM_AVAILABLE:
@@ -294,8 +321,14 @@ class TelegramBot:
         self.token = token or os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
         self.message_thread_id = message_thread_id
+        self.thread_review_id = thread_review_id
+        self.thread_deploy_id = thread_deploy_id
+        self.thread_claim_id = thread_claim_id
+        self.thread_ops_id = thread_ops_id
+        self.thread_alert_id = thread_alert_id
         self._db = db  # optional DatabaseManager for operator commands
         self._last_operator_thread_id: int | None = None
+        self._dynamic_thread_bindings: dict[str, int] = {}
 
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN is required")
@@ -310,6 +343,66 @@ class TelegramBot:
         self.on_approve: Any = None
         self.on_reject: Any = None
         self.on_claim_fees: Any = None
+        self._load_dynamic_thread_bindings()
+
+    def _persist_dynamic_thread_binding(self, category: str, thread_id: int) -> None:
+        if not self._db:
+            return
+        setter = getattr(self._db, "set_runtime_setting", None)
+        if not callable(setter):
+            return
+        try:
+            setter(f"telegram.thread.{category}", str(thread_id))
+        except Exception as exc:
+            logger.debug("Failed persisting dynamic thread binding %s=%s: %s", category, thread_id, exc)
+
+    def _load_dynamic_thread_bindings(self) -> None:
+        if not self._db:
+            return
+        getter = getattr(self._db, "get_runtime_setting", None)
+        if not callable(getter):
+            return
+        for category in _THREAD_CATEGORIES:
+            try:
+                raw_value = getter(f"telegram.thread.{category}")
+            except Exception as exc:
+                logger.debug("Failed loading dynamic thread binding for %s: %s", category, exc)
+                continue
+            if raw_value is None:
+                continue
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                self._dynamic_thread_bindings[category] = parsed
+
+    def _bind_dynamic_thread(self, category: str, thread_id: Any) -> None:
+        if category not in _THREAD_CATEGORIES:
+            return
+        try:
+            parsed = int(thread_id)
+        except (TypeError, ValueError):
+            return
+        if parsed <= 0:
+            return
+
+        configured = {
+            "review": self.thread_review_id,
+            "deploy": self.thread_deploy_id,
+            "claim": self.thread_claim_id,
+            "ops": self.thread_ops_id,
+            "alert": self.thread_alert_id,
+        }.get(category)
+        if configured is not None:
+            return
+
+        previous = self._dynamic_thread_bindings.get(category)
+        if previous == parsed:
+            return
+        self._dynamic_thread_bindings[category] = parsed
+        self._persist_dynamic_thread_binding(category, parsed)
+        logger.info("telegram.smart_bind category=%s thread_id=%s", category, parsed)
 
     def _capture_operator_thread(self, thread_id: Any) -> None:
         try:
@@ -329,6 +422,35 @@ class TelegramBot:
         if self._last_operator_thread_id is not None:
             return self._last_operator_thread_id
         return None
+
+    def _thread_for(self, category: str) -> int | None:
+        mapping = {
+            "review": self.thread_review_id,
+            "deploy": self.thread_deploy_id,
+            "claim": self.thread_claim_id,
+            "ops": self.thread_ops_id,
+            "alert": self.thread_alert_id,
+        }
+        configured = mapping.get(category)
+        if configured is not None:
+            return configured
+        dynamic = self._dynamic_thread_bindings.get(category)
+        if dynamic is not None:
+            return dynamic
+
+        if category in {"deploy", "alert"}:
+            review_thread = mapping.get("review") or self._dynamic_thread_bindings.get("review")
+            if review_thread is not None:
+                return review_thread
+        if category == "claim":
+            ops_thread = mapping.get("ops") or self._dynamic_thread_bindings.get("ops")
+            if ops_thread is not None:
+                return ops_thread
+        if category != "ops":
+            ops_thread = mapping.get("ops") or self._dynamic_thread_bindings.get("ops")
+            if ops_thread is not None:
+                return ops_thread
+        return self._resolve_message_thread_id()
 
     async def _send_bot_message(
         self,
@@ -375,6 +497,10 @@ class TelegramBot:
         self.dp.message.register(self._handle_candidate, Command("candidate"))
         self.dp.message.register(self._handle_deploys, Command("deploys"))
         self.dp.message.register(self._handle_claimfees, Command("claimfees"))
+        self.dp.message.register(self._handle_wallets, Command("wallets"))
+        self.dp.message.register(self._handle_setsigner, Command("setsigner"))
+        self.dp.message.register(self._handle_setadmin, Command("setadmin"))
+        self.dp.message.register(self._handle_setreward, Command("setreward"))
         # Backward-compatible aliases
         self.dp.message.register(self._handle_queue, Command("candidates"))
         self.dp.message.register(self._handle_status, Command("stats"))
@@ -399,6 +525,10 @@ class TelegramBot:
                 BotCommand(command="candidate", description="Candidate detail by ID"),
                 BotCommand(command="deploys", description="Recent deployments"),
                 BotCommand(command="claimfees", description="Claim rewards by token"),
+                BotCommand(command="wallets", description="Show runtime wallet config"),
+                BotCommand(command="setsigner", description="Set deployer signer wallet/key"),
+                BotCommand(command="setadmin", description="Set token admin wallet"),
+                BotCommand(command="setreward", description="Set reward recipient wallet"),
                 BotCommand(command="help", description="Usage guide"),
             ]
         )
@@ -408,7 +538,9 @@ class TelegramBot:
     async def _handle_start(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
-        self._capture_operator_thread(getattr(message, "message_thread_id", None))
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
         await message.answer(
             "🤖 <b>Clank&Claw Bot</b>\n\n"
             "Manual review mode is active.\n"
@@ -419,6 +551,10 @@ class TelegramBot:
             "/candidate &lt;id&gt; — Candidate detail\n"
             "/deploys — Recent deployments\n"
             "/claimfees &lt;token_address&gt; — Claim token rewards\n"
+            "/wallets — Show runtime wallet config\n"
+            "/setsigner &lt;address|private_key|default&gt; — Set deployer signer\n"
+            "/setadmin &lt;address|default&gt; — Set token admin\n"
+            "/setreward &lt;address|default&gt; — Set reward recipient\n"
             "/help — This help",
             parse_mode="HTML",
         )
@@ -426,7 +562,9 @@ class TelegramBot:
     async def _handle_help(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
-        self._capture_operator_thread(getattr(message, "message_thread_id", None))
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
         await message.answer(
             "📚 <b>Help</b>\n\n"
             "<b>Review Flow</b>\n"
@@ -439,6 +577,10 @@ class TelegramBot:
             "/candidate &lt;id&gt; — Candidate detail\n"
             "/deploys — Recent deployments\n"
             "/claimfees &lt;token_address&gt; — Claim rewards via Clanker SDK\n"
+            "/wallets — Show runtime wallet config\n"
+            "/setsigner &lt;address|private_key|default&gt; — Set deployer signer\n"
+            "/setadmin &lt;address|default&gt; — Set token admin\n"
+            "/setreward &lt;address|default&gt; — Set reward recipient\n"
             "/cancel &lt;id&gt; — Cancel pending review (manual override)\n"
             "/help — Command guide",
             parse_mode="HTML",
@@ -447,7 +589,9 @@ class TelegramBot:
     async def _handle_status(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
-        self._capture_operator_thread(getattr(message, "message_thread_id", None))
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
         if self._db:
             try:
                 stats = self._db.get_stats()
@@ -469,13 +613,16 @@ class TelegramBot:
     async def _handle_queue(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
-        self._capture_operator_thread(getattr(message, "message_thread_id", None))
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
         if not self._db:
             await message.answer("ℹ️ Database not available.", parse_mode="HTML")
             return
         try:
             rows = self._db.list_pending_reviews()
-            await message.answer(build_queue_message(rows), parse_mode="HTML")
+            msg = build_queue_message(rows)
+            await message.answer(msg, parse_mode="HTML")
         except Exception as exc:
             logger.error(f"Error listing queue: {exc}", exc_info=True)
             await message.answer("⚠️ Error fetching queue.", parse_mode="HTML")
@@ -483,7 +630,9 @@ class TelegramBot:
     async def _handle_candidate(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
-        self._capture_operator_thread(getattr(message, "message_thread_id", None))
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
         if not self._db:
             await message.answer("ℹ️ Database not available.", parse_mode="HTML")
             return
@@ -506,13 +655,16 @@ class TelegramBot:
     async def _handle_deploys(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
-        self._capture_operator_thread(getattr(message, "message_thread_id", None))
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
         if not self._db:
             await message.answer("ℹ️ Database not available.", parse_mode="HTML")
             return
         try:
             rows = self._db.list_recent_deployments(limit=10)
-            await message.answer(build_deploys_message(rows), parse_mode="HTML")
+            msg = build_deploys_message(rows)
+            await message.answer(msg, parse_mode="HTML")
         except Exception as exc:
             logger.error(f"Error fetching deployments: {exc}", exc_info=True)
             await message.answer("⚠️ Error fetching deployments.", parse_mode="HTML")
@@ -520,7 +672,9 @@ class TelegramBot:
     async def _handle_cancel(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
-        self._capture_operator_thread(getattr(message, "message_thread_id", None))
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
         if not self._db:
             await message.answer("ℹ️ Database not available.", parse_mode="HTML")
             return
@@ -549,7 +703,9 @@ class TelegramBot:
     async def _handle_claimfees(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
-        self._capture_operator_thread(getattr(message, "message_thread_id", None))
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("claim", thread_id)
         if not self.on_claim_fees:
             await message.answer("⚠️ Claim fees handler is not configured.", parse_mode="HTML")
             return
@@ -562,26 +718,161 @@ class TelegramBot:
             result = await self.on_claim_fees(token_address)
             if result.status == "claim_success":
                 tx_line = f"\n• <b>TX:</b> {_fmt_inline_code(result.tx_hash)}" if result.tx_hash else ""
-                await message.answer(
+                claim_msg = (
                     "💸 <b>Claim Result</b>\n\n"
                     "<b>Status</b>\n"
                     "• <b>Outcome:</b> success\n"
-                    f"• <b>Token:</b> {_fmt_inline_code(token_address)}{tx_line}",
-                    parse_mode="HTML",
+                    f"• <b>Token:</b> {_fmt_inline_code(token_address)}{tx_line}"
                 )
+                await message.answer(claim_msg, parse_mode="HTML")
             else:
-                await message.answer(
+                claim_msg = (
                     "💸 <b>Claim Result</b>\n\n"
                     "<b>Status</b>\n"
                     "• <b>Outcome:</b> failed\n"
                     f"• <b>Token:</b> {_fmt_inline_code(token_address)}\n"
                     f"• <b>Error:</b> {_fmt_text(result.error_code or 'unknown')}\n"
-                    f"• <b>Message:</b> {_fmt_text(result.error_message or 'unknown')}",
-                    parse_mode="HTML",
+                    f"• <b>Message:</b> {_fmt_text(result.error_message or 'unknown')}"
                 )
+                await message.answer(claim_msg, parse_mode="HTML")
         except Exception as exc:
             logger.error("Error in claim fees handler: %s", exc, exc_info=True)
             await message.answer("⚠️ Claim fees execution failed.", parse_mode="HTML")
+
+    def _runtime_get(self, key: str) -> str | None:
+        if not self._db or not hasattr(self._db, "get_runtime_setting"):
+            return None
+        try:
+            return self._db.get_runtime_setting(key)
+        except Exception as exc:
+            logger.error("Failed reading runtime setting %s: %s", key, exc, exc_info=True)
+            return None
+
+    def _runtime_set(self, key: str, value: str) -> bool:
+        if not self._db or not hasattr(self._db, "set_runtime_setting"):
+            return False
+        try:
+            self._db.set_runtime_setting(key, value)
+            return True
+        except Exception as exc:
+            logger.error("Failed writing runtime setting %s: %s", key, exc, exc_info=True)
+            return False
+
+    def _runtime_delete(self, key: str) -> bool:
+        if not self._db or not hasattr(self._db, "delete_runtime_setting"):
+            return False
+        try:
+            self._db.delete_runtime_setting(key)
+            return True
+        except Exception as exc:
+            logger.error("Failed deleting runtime setting %s: %s", key, exc, exc_info=True)
+            return False
+
+    async def _handle_wallets(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+
+        signer_runtime = self._runtime_get("wallet.deployer_signer")
+        admin_runtime = self._runtime_get("wallet.token_admin")
+        reward_runtime = self._runtime_get("wallet.fee_recipient")
+
+        signer_display = _mask_sensitive_wallet(signer_runtime) if signer_runtime else "default (env/config)"
+        admin_display = admin_runtime or "default (env/config)"
+        reward_display = reward_runtime or "default (env/config)"
+
+        await message.answer(
+            "👛 <b>Runtime Wallet Config</b>\n\n"
+            f"• <b>Signer/Deployer:</b> {_fmt_inline_code(signer_display)}\n"
+            f"• <b>Token Admin:</b> {_fmt_inline_code(admin_display)}\n"
+            f"• <b>Reward Recipient:</b> {_fmt_inline_code(reward_display)}\n\n"
+            "Use /setsigner, /setadmin, /setreward to update.\n"
+            "Use value <code>default</code> to clear override.",
+            parse_mode="HTML",
+        )
+
+    async def _handle_setsigner(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+
+        parts = (message.text or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("Usage: /setsigner &lt;address|private_key|default&gt;", parse_mode="HTML")
+            return
+        value = parts[1].strip()
+        if value.lower() in {"default", "clear", "reset"}:
+            if not self._runtime_delete("wallet.deployer_signer"):
+                await message.answer("⚠️ Failed resetting signer override.", parse_mode="HTML")
+                return
+            await message.answer("✅ Signer override reset to default (env/config).", parse_mode="HTML")
+            return
+        if not (_is_evm_address(value) or _is_private_key(value)):
+            await message.answer("⚠️ Invalid signer. Use EVM address or 0x private key.", parse_mode="HTML")
+            return
+        if not self._runtime_set("wallet.deployer_signer", value):
+            await message.answer("⚠️ Failed saving signer override.", parse_mode="HTML")
+            return
+        await message.answer(
+            f"✅ Signer override updated: {_fmt_inline_code(_mask_sensitive_wallet(value))}",
+            parse_mode="HTML",
+        )
+
+    async def _handle_setadmin(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+
+        parts = (message.text or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("Usage: /setadmin &lt;address|default&gt;", parse_mode="HTML")
+            return
+        value = parts[1].strip()
+        if value.lower() in {"default", "clear", "reset"}:
+            if not self._runtime_delete("wallet.token_admin"):
+                await message.answer("⚠️ Failed resetting token admin override.", parse_mode="HTML")
+                return
+            await message.answer("✅ Token admin override reset to default (env/config).", parse_mode="HTML")
+            return
+        if not _is_evm_address(value):
+            await message.answer("⚠️ Invalid token admin address.", parse_mode="HTML")
+            return
+        if not self._runtime_set("wallet.token_admin", value):
+            await message.answer("⚠️ Failed saving token admin override.", parse_mode="HTML")
+            return
+        await message.answer(f"✅ Token admin updated: {_fmt_inline_code(value)}", parse_mode="HTML")
+
+    async def _handle_setreward(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+
+        parts = (message.text or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("Usage: /setreward &lt;address|default&gt;", parse_mode="HTML")
+            return
+        value = parts[1].strip()
+        if value.lower() in {"default", "clear", "reset"}:
+            if not self._runtime_delete("wallet.fee_recipient"):
+                await message.answer("⚠️ Failed resetting reward recipient override.", parse_mode="HTML")
+                return
+            await message.answer("✅ Reward recipient override reset to default (env/config).", parse_mode="HTML")
+            return
+        if not _is_evm_address(value):
+            await message.answer("⚠️ Invalid reward recipient address.", parse_mode="HTML")
+            return
+        if not self._runtime_set("wallet.fee_recipient", value):
+            await message.answer("⚠️ Failed saving reward recipient override.", parse_mode="HTML")
+            return
+        await message.answer(f"✅ Reward recipient updated: {_fmt_inline_code(value)}", parse_mode="HTML")
 
     # ── callback handlers ─────────────────────────────────────────────────────
 
@@ -591,7 +882,11 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
-        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
+        thread_id = getattr(callback.message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("review", thread_id)
+        self._bind_dynamic_thread("deploy", thread_id)
+        self._bind_dynamic_thread("alert", thread_id)
 
         candidate_id = callback.data.split(":", 1)[1]
         logger.info(f"Approve callback for candidate {candidate_id}")
@@ -628,7 +923,9 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
-        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
+        thread_id = getattr(callback.message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("review", thread_id)
 
         candidate_id = callback.data.split(":", 1)[1]
         logger.info(f"Reject callback for candidate {candidate_id}")
@@ -675,7 +972,9 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
-        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
+        thread_id = getattr(callback.message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("review", thread_id)
         candidate_id = callback.data.split(":", 1)[1]
         try:
             text = await self._render_candidate_detail(candidate_id)
@@ -691,7 +990,9 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
-        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
+        thread_id = getattr(callback.message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("review", thread_id)
         candidate_id = callback.data.split(":", 1)[1]
         if not self._db:
             await callback.answer("Database unavailable", show_alert=True)
@@ -735,7 +1036,9 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
-        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
+        thread_id = getattr(callback.message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("review", thread_id)
         if not self._db:
             await callback.answer("Database unavailable", show_alert=True)
             return
@@ -751,7 +1054,9 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
-        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
+        thread_id = getattr(callback.message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("review", thread_id)
         if not self._db:
             await callback.answer("Database unavailable", show_alert=True)
             return
@@ -798,6 +1103,7 @@ class TelegramBot:
                 parse_mode="HTML",
                 reply_markup=keyboard,
                 disable_web_page_preview=True,
+                message_thread_id=self._thread_for("review"),
             )
 
             logger.info(f"Sent review notification for {candidate_id}, message_id={result.message_id}")
@@ -819,6 +1125,7 @@ class TelegramBot:
                     "• <b>Action:</b> fetch image + upload IPFS"
                 ),
                 parse_mode="HTML",
+                message_thread_id=self._thread_for("deploy"),
             )
         except Exception as exc:
             logger.error(f"Error sending prepare notification: {exc}", exc_info=True)
@@ -841,6 +1148,7 @@ class TelegramBot:
                     f"• <b>TX:</b> {_fmt_inline_code(tx_hash)}"
                 ),
                 parse_mode="HTML",
+                message_thread_id=self._thread_for("deploy"),
             )
             logger.info(f"Sent deploy success notification for {candidate_id}")
         except Exception as exc:
@@ -864,6 +1172,7 @@ class TelegramBot:
                     f"• <b>Message:</b> {_fmt_text(error_message)}"
                 ),
                 parse_mode="HTML",
+                message_thread_id=self._thread_for("alert"),
             )
             logger.info(f"Sent deploy failure notification for {candidate_id}")
         except Exception as exc:

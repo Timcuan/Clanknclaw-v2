@@ -135,6 +135,41 @@ See `.env.example` for all available environment variables.
 - X/Twitter accounts configured via twscrape (see below)
 - `NEYNAR_API_KEY` for Farcaster detector
 - `TELEGRAM_MESSAGE_THREAD_ID` to route bot notifications into a specific Telegram topic/thread
+- Per-category Telegram topic routing:
+  - `TELEGRAM_THREAD_REVIEW_ID`
+  - `TELEGRAM_THREAD_DEPLOY_ID`
+  - `TELEGRAM_THREAD_CLAIM_ID`
+  - `TELEGRAM_THREAD_OPS_ID`
+  - `TELEGRAM_THREAD_ALERT_ID`
+
+### Telegram Topic Routing
+
+For group/forum chats, configure dedicated topic/thread IDs to avoid mixed notifications:
+
+- `review`: new review cards with approve/reject actions
+- `deploy`: deploy preparing/success updates
+- `claim`: claim-fees results
+- `ops`: operational slash-command workflows (`/status`, `/queue`, `/candidate`, `/deploys`)
+- `alert`: deploy failure/error-focused notifications
+
+Recommended default thread map:
+- `TELEGRAM_THREAD_REVIEW_ID` = review
+- `TELEGRAM_THREAD_DEPLOY_ID` = deploy
+- `TELEGRAM_THREAD_CLAIM_ID` = claim
+- `TELEGRAM_THREAD_OPS_ID` = ops
+- `TELEGRAM_THREAD_ALERT_ID` = alert
+
+Smart bind (default, no manual setup required):
+- If thread IDs are not configured, the bot auto-learns topic routing from operator usage.
+- Learned bindings are persisted in SQLite (`runtime_settings`) and reused after restart.
+- Priority order per category: explicit config/env -> learned binding -> safe fallback (`ops` / last operator thread / chat default).
+
+Runtime wallet controls (no VPS redeploy/restart required):
+- `/wallets` shows current runtime overrides.
+- `/setsigner <address|private_key|default>` sets deployer signer override.
+- `/setadmin <address|default>` sets token admin override.
+- `/setreward <address|default>` sets reward recipient override.
+- Wallet overrides are persisted in SQLite and applied on next deploy request.
 
 ### X/Twitter Polling Setup
 

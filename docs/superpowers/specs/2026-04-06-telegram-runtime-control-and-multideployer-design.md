@@ -41,6 +41,11 @@ Required keys:
 - `ops.deployer_mode`: `clanker | bankr | both`
 - `ops.auto_rule`: `priority_review_only` (fixed in this phase)
 
+Global wallet runtime keys:
+- `wallet.deployer_signer` (EVM address or 0x private key)
+- `wallet.token_admin` (EVM address)
+- `wallet.fee_recipient` (EVM address)
+
 Thread binding keys:
 - `telegram.thread.review`
 - `telegram.thread.deploy`
@@ -84,9 +89,18 @@ Buttons:
 - `/manualdeploy` (wizard entrypoint)
 - `/deploynow <platform> <name> <symbol> <image_or_cid> [description]` (power-user direct mode)
 - `/deployca <platform> <candidate_id>` (force deploy from existing candidate)
+- `/wallets`
+- `/setsigner <address|private_key|default>`
+- `/setadmin <address|default>`
+- `/setreward <address|default>`
 
 Backward-compatible operational commands remain:
 - `/status`, `/queue`, `/candidate`, `/deploys`, `/claimfees`
+
+Global wallet override rules:
+- overrides are global runtime values for next deploys.
+- changing values does not require VPS redeploy/restart.
+- using `default` clears override and reverts to env/config values.
 
 ### Manual Deploy UX (Hybrid)
 

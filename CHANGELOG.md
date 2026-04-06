@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - optional `message_thread_id` routing for topic/thread-based chats
   - bounded retry/backoff on outbound bot notifications for transient `429`/delivery failures
   - auto-capture operator topic/thread context and reuse as fallback routing target when static thread is not configured
+- Per-category Telegram forum topic routing:
+  - `thread_review_id`, `thread_deploy_id`, `thread_claim_id`, `thread_ops_id`, `thread_alert_id`
+  - env support: `TELEGRAM_THREAD_REVIEW_ID`, `TELEGRAM_THREAD_DEPLOY_ID`, `TELEGRAM_THREAD_CLAIM_ID`, `TELEGRAM_THREAD_OPS_ID`, `TELEGRAM_THREAD_ALERT_ID`
+  - smart bind: auto-learn topic/thread per category from operator actions, persisted in SQLite (`runtime_settings`)
+- Runtime wallet management from Telegram:
+  - `/wallets`, `/setsigner`, `/setadmin`, `/setreward` for live global wallet overrides
+  - overrides stored in `runtime_settings` and applied at deploy preparation time
+  - signer private-key override is passed to Node deploy process without requiring service redeploy
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`
@@ -99,6 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mitigated over-polling risk with request pacing and bounded poll scope per network
 - Prevented misconfiguration risk for reward recipient delivery with strict preflight checks
 - Added fail-fast guardrails for invalid SDK success output and missing node modules
+- Removed duplicate slash-command responses caused by cross-posting into ops topic while replying in the source topic
 
 ## [0.4.0] - 2026-04-05
 

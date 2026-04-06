@@ -11,6 +11,7 @@ def test_database_manager_initializes_schema(tmp_path):
     tables = db.list_tables()
     assert "signal_candidates" in tables
     assert "review_items" in tables
+    assert "runtime_settings" in tables
 
 
 def test_database_manager_persists_candidate_and_decision(tmp_path):
@@ -261,3 +262,24 @@ def test_save_reward_claim_result_persists_row(tmp_path):
         ).fetchone()
 
     assert row == ("claim-1", "0x" + "a" * 40, "claim_success", "0x" + "b" * 64)
+
+
+def test_runtime_settings_persist_and_update(tmp_path):
+    db = DatabaseManager(tmp_path / "state.db")
+    db.initialize()
+
+    db.set_runtime_setting("telegram.thread.ops", "201")
+    assert db.get_runtime_setting("telegram.thread.ops") == "201"
+
+    db.set_runtime_setting("telegram.thread.ops", "202")
+    assert db.get_runtime_setting("telegram.thread.ops") == "202"
+    assert db.get_runtime_setting("telegram.thread.missing") is None
+
+
+def test_runtime_settings_delete(tmp_path):
+    db = DatabaseManager(tmp_path / "state.db")
+    db.initialize()
+    db.set_runtime_setting("wallet.token_admin", "0x" + "1" * 40)
+    assert db.get_runtime_setting("wallet.token_admin") == "0x" + "1" * 40
+    db.delete_runtime_setting("wallet.token_admin")
+    assert db.get_runtime_setting("wallet.token_admin") is None

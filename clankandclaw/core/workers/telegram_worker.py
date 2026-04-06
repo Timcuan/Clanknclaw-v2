@@ -25,12 +25,22 @@ class TelegramWorker:
         bot_token: str | None = None,
         chat_id: str | None = None,
         message_thread_id: int | None = None,
+        thread_review_id: int | None = None,
+        thread_deploy_id: int | None = None,
+        thread_claim_id: int | None = None,
+        thread_ops_id: int | None = None,
+        thread_alert_id: int | None = None,
     ):
         self.db = db
         self.review_expiry_seconds = review_expiry_seconds
         self._bot_token = bot_token
         self._chat_id = chat_id
         self._message_thread_id = message_thread_id
+        self._thread_review_id = thread_review_id
+        self._thread_deploy_id = thread_deploy_id
+        self._thread_claim_id = thread_claim_id
+        self._thread_ops_id = thread_ops_id
+        self._thread_alert_id = thread_alert_id
         self.review_queue = ReviewQueue(db)
         self._running = False
         self._task: asyncio.Task[None] | None = None
@@ -57,6 +67,11 @@ class TelegramWorker:
                 token=self._bot_token or None,
                 chat_id=self._chat_id or None,
                 message_thread_id=self._message_thread_id,
+                thread_review_id=self._thread_review_id,
+                thread_deploy_id=self._thread_deploy_id,
+                thread_claim_id=self._thread_claim_id,
+                thread_ops_id=self._thread_ops_id,
+                thread_alert_id=self._thread_alert_id,
                 db=self.db,
             )
 

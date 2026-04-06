@@ -75,6 +75,11 @@ class TelegramSection(BaseModel):
     bot_token: str = ""
     chat_id: str = ""
     message_thread_id: int | None = None
+    thread_review_id: int | None = None
+    thread_deploy_id: int | None = None
+    thread_claim_id: int | None = None
+    thread_ops_id: int | None = None
+    thread_alert_id: int | None = None
 
 
 class WalletSection(BaseModel):
@@ -141,6 +146,16 @@ def load_config(path: Path) -> AppConfig:
         raw["telegram"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID")
     if os.getenv("TELEGRAM_MESSAGE_THREAD_ID"):
         raw["telegram"]["message_thread_id"] = int(os.getenv("TELEGRAM_MESSAGE_THREAD_ID", "0"))
+    if os.getenv("TELEGRAM_THREAD_REVIEW_ID"):
+        raw["telegram"]["thread_review_id"] = int(os.getenv("TELEGRAM_THREAD_REVIEW_ID", "0"))
+    if os.getenv("TELEGRAM_THREAD_DEPLOY_ID"):
+        raw["telegram"]["thread_deploy_id"] = int(os.getenv("TELEGRAM_THREAD_DEPLOY_ID", "0"))
+    if os.getenv("TELEGRAM_THREAD_CLAIM_ID"):
+        raw["telegram"]["thread_claim_id"] = int(os.getenv("TELEGRAM_THREAD_CLAIM_ID", "0"))
+    if os.getenv("TELEGRAM_THREAD_OPS_ID"):
+        raw["telegram"]["thread_ops_id"] = int(os.getenv("TELEGRAM_THREAD_OPS_ID", "0"))
+    if os.getenv("TELEGRAM_THREAD_ALERT_ID"):
+        raw["telegram"]["thread_alert_id"] = int(os.getenv("TELEGRAM_THREAD_ALERT_ID", "0"))
 
     if "farcaster_detector" not in raw:
         raw["farcaster_detector"] = {}

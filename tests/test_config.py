@@ -67,10 +67,20 @@ def test_load_config_reads_telegram_from_env(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1234567890:AABBCCaabbcc")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "-100123456")
     monkeypatch.setenv("TELEGRAM_MESSAGE_THREAD_ID", "777")
+    monkeypatch.setenv("TELEGRAM_THREAD_REVIEW_ID", "1001")
+    monkeypatch.setenv("TELEGRAM_THREAD_DEPLOY_ID", "1002")
+    monkeypatch.setenv("TELEGRAM_THREAD_CLAIM_ID", "1003")
+    monkeypatch.setenv("TELEGRAM_THREAD_OPS_ID", "1004")
+    monkeypatch.setenv("TELEGRAM_THREAD_ALERT_ID", "1005")
     cfg = load_config(config_file)
     assert cfg.telegram.bot_token == "1234567890:AABBCCaabbcc"
     assert cfg.telegram.chat_id == "-100123456"
     assert cfg.telegram.message_thread_id == 777
+    assert cfg.telegram.thread_review_id == 1001
+    assert cfg.telegram.thread_deploy_id == 1002
+    assert cfg.telegram.thread_claim_id == 1003
+    assert cfg.telegram.thread_ops_id == 1004
+    assert cfg.telegram.thread_alert_id == 1005
 
 
 def test_load_config_reads_deployment_overrides_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

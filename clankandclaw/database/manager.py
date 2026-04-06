@@ -260,6 +260,15 @@ class DatabaseManager:
                     );
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS runtime_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    """
+                )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_review_items_status_expires ON review_items(status, expires_at)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_review_items_created_at ON review_items(created_at DESC)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_candidates_observed_at ON signal_candidates(observed_at DESC)")
@@ -545,3 +554,37 @@ class DatabaseManager:
             "deploy_failed": failed,
             "rejected": rejected,
         }
+
+    def set_runtime_setting(self, key: str, value: str) -> None:
+        def _op():
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO runtime_settings (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (key, value, _utc_now_iso()),
+                )
+
+        self._with_retry(_op)
+
+    def get_runtime_setting(self, key: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM runtime_settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+            return str(row["value"]) if row else None
+
+    def delete_runtime_setting(self, key: str) -> None:
+        def _op():
+            with self._connect() as conn:
+                conn.execute(
+                    "DELETE FROM runtime_settings WHERE key = ?",
+                    (key,),
+                )
+
+        self._with_retry(_op)

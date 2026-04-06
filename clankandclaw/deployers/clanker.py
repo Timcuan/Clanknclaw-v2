@@ -21,6 +21,7 @@ _IPFS_URI_RE = re.compile(r"^ipfs://[a-zA-Z0-9]+")
 _TOKEN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,49}$")
 _TOKEN_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,10}$")
 _ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+_PRIVATE_KEY_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
 
 # Default script path (relative to project root)
 _DEFAULT_SCRIPT_PATH = Path(__file__).parent.parent.parent / "scripts" / "clanker_deploy.mjs"
@@ -381,6 +382,9 @@ class ClankerDeployer:
             env = os.environ.copy()
             env["NODE_PATH"] = str(node_modules)
             env["BASE_RPC_URL"] = self.rpc_url
+            signer_value = (deploy_request.signer_wallet or "").strip()
+            if _PRIVATE_KEY_RE.fullmatch(signer_value):
+                env["DEPLOYER_SIGNER_PRIVATE_KEY"] = signer_value
 
             logger.info(f"Deploying {deploy_request.token_symbol!r} via Clanker SDK v4")
 

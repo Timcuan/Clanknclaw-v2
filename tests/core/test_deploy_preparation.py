@@ -321,6 +321,43 @@ async def test_prepare_deploy_request_applies_pool_fee_admin_reward_config(db, m
 
 
 @pytest.mark.asyncio
+async def test_prepare_deploy_request_uses_runtime_wallet_overrides(db, monkeypatch):
+    async def fake_fetch(url: str) -> bytes:
+        return b"fake-image-bytes"
+
+    monkeypatch.setattr("clankandclaw.core.deploy_preparation.fetch_image_bytes", fake_fetch)
+
+    db.set_runtime_setting("wallet.deployer_signer", "0x" + "d" * 64)
+    db.set_runtime_setting("wallet.token_admin", "0x" + "e" * 40)
+    db.set_runtime_setting("wallet.fee_recipient", "0x" + "f" * 40)
+
+    prep, _, _ = make_preparation(db)
+    candidate = make_candidate(metadata={"image_url": "https://example.com/img.png"})
+
+    deploy_request = await prep.prepare_deploy_request(candidate)
+
+    assert deploy_request.signer_wallet == "0x" + "d" * 64
+    assert deploy_request.token_admin == "0x" + "e" * 40
+    assert deploy_request.fee_recipient == "0x" + "f" * 40
+    assert deploy_request.tax_recipient == "0x" + "f" * 40
+
+
+@pytest.mark.asyncio
+async def test_prepare_deploy_request_fails_on_invalid_runtime_wallet_override(db, monkeypatch):
+    async def fake_fetch(url: str) -> bytes:
+        return b"fake-image-bytes"
+
+    monkeypatch.setattr("clankandclaw.core.deploy_preparation.fetch_image_bytes", fake_fetch)
+    db.set_runtime_setting("wallet.token_admin", "not-an-address")
+
+    prep, _, _ = make_preparation(db)
+    candidate = make_candidate(metadata={"image_url": "https://example.com/img.png"})
+
+    with pytest.raises(DeployPreparationError, match="wallet_runtime"):
+        await prep.prepare_deploy_request(candidate)
+
+
+@pytest.mark.asyncio
 async def test_prepare_deploy_request_logs_step_timings(db, monkeypatch, caplog):
     async def fake_fetch(url: str) -> bytes:
         return b"fake-image-bytes"

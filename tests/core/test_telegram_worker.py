@@ -66,6 +66,37 @@ async def test_worker_starts_and_stops_with_mock_bot(db):
     bot.stop.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_worker_start_passes_thread_routing_config(db):
+    bot = make_mock_bot()
+    worker = TelegramWorker(
+        db=db,
+        review_expiry_seconds=900,
+        bot_token="t",
+        chat_id="c",
+        message_thread_id=11,
+        thread_review_id=21,
+        thread_deploy_id=22,
+        thread_claim_id=23,
+        thread_ops_id=24,
+        thread_alert_id=25,
+    )
+    with patch("clankandclaw.core.workers.telegram_worker.TelegramBot", return_value=bot) as bot_cls:
+        await worker.start()
+
+    bot_cls.assert_called_once_with(
+        token="t",
+        chat_id="c",
+        message_thread_id=11,
+        thread_review_id=21,
+        thread_deploy_id=22,
+        thread_claim_id=23,
+        thread_ops_id=24,
+        thread_alert_id=25,
+        db=db,
+    )
+
+
 # ── send_review_notification ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio

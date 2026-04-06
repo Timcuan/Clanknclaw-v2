@@ -70,6 +70,11 @@ class Supervisor:
             bot_token=self.config.telegram.bot_token or None,
             chat_id=self.config.telegram.chat_id or None,
             message_thread_id=self.config.telegram.message_thread_id,
+            thread_review_id=self.config.telegram.thread_review_id,
+            thread_deploy_id=self.config.telegram.thread_deploy_id,
+            thread_claim_id=self.config.telegram.thread_claim_id,
+            thread_ops_id=self.config.telegram.thread_ops_id,
+            thread_alert_id=self.config.telegram.thread_alert_id,
         )
         self._workers["telegram"] = telegram
         telegram.set_rewards_claimer(rewards_claimer)

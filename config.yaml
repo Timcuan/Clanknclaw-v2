@@ -66,3 +66,8 @@ telegram:
   bot_token: ""
   chat_id: ""
   message_thread_id: null
+  thread_review_id: null
+  thread_deploy_id: null
+  thread_claim_id: null
+  thread_ops_id: null
+  thread_alert_id: null

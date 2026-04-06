@@ -24,6 +24,8 @@ _MAX_IMAGE_DIMENSION = 1024
 _MIN_IMAGE_DIMENSION = 120
 _IMAGE_BAD_HINTS = ("profile_images", "profile_banners", "avatar", "banner", "default_profile")
 _IMAGE_EXT_HINTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+_EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+_PRIVATE_KEY_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
 
 
 class DeployPreparationError(Exception):
@@ -256,6 +258,39 @@ class DeployPreparation:
         self.token_admin_enabled = token_admin_enabled
         self.token_reward_enabled = token_reward_enabled
 
+    def _resolve_runtime_wallets(self) -> tuple[str, str, str]:
+        """Resolve signer/admin/reward wallets with runtime overrides."""
+        signer_wallet = self.signer_wallet
+        token_admin = self.token_admin
+        fee_recipient = self.fee_recipient
+
+        if not hasattr(self.db, "get_runtime_setting"):
+            return signer_wallet, token_admin, fee_recipient
+
+        signer_override = self.db.get_runtime_setting("wallet.deployer_signer")
+        admin_override = self.db.get_runtime_setting("wallet.token_admin")
+        reward_override = self.db.get_runtime_setting("wallet.fee_recipient")
+
+        if signer_override:
+            signer_value = signer_override.strip()
+            if not (_EVM_ADDRESS_RE.fullmatch(signer_value) or _PRIVATE_KEY_RE.fullmatch(signer_value)):
+                raise DeployPreparationError(
+                    "wallet_runtime: wallet.deployer_signer must be valid EVM address or private key"
+                )
+            signer_wallet = signer_value
+        if admin_override:
+            admin_value = admin_override.strip()
+            if not _EVM_ADDRESS_RE.fullmatch(admin_value):
+                raise DeployPreparationError("wallet_runtime: wallet.token_admin must be a valid EVM address")
+            token_admin = admin_value
+        if reward_override:
+            reward_value = reward_override.strip()
+            if not _EVM_ADDRESS_RE.fullmatch(reward_value):
+                raise DeployPreparationError("wallet_runtime: wallet.fee_recipient must be a valid EVM address")
+            fee_recipient = reward_value
+
+        return signer_wallet, token_admin, fee_recipient
+
     async def prepare_deploy_request(
         self,
         candidate: SignalCandidate,
@@ -280,19 +315,21 @@ class DeployPreparation:
                 candidate.id,
             )
 
+            signer_wallet, token_admin, fee_recipient = self._resolve_runtime_wallets()
+
             deploy_request = DeployRequest(
                 candidate_id=candidate.id,
                 platform="clanker",
-                signer_wallet=self.signer_wallet,
+                signer_wallet=signer_wallet,
                 token_name=_normalize_token_name(token_name),
                 token_symbol=_normalize_token_symbol(token_symbol),
                 image_uri=image_uri,
                 tax_bps=self.tax_bps,
-                tax_recipient=self.fee_recipient,
+                tax_recipient=fee_recipient,
                 token_admin_enabled=self.token_admin_enabled,
                 token_reward_enabled=self.token_reward_enabled,
-                token_admin=self.token_admin,
-                fee_recipient=self.fee_recipient,
+                token_admin=token_admin,
+                fee_recipient=fee_recipient,
                 clanker_fee_bps=self.clanker_fee_bps,
                 paired_fee_bps=self.paired_fee_bps,
                 source=candidate.source,
