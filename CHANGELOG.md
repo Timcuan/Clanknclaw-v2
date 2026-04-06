@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Telegram API hardening aligned with recent Bot API capabilities:
   - optional `message_thread_id` routing for topic/thread-based chats
   - bounded retry/backoff on outbound bot notifications for transient `429`/delivery failures
+  - auto-capture operator topic/thread context and reuse as fallback routing target when static thread is not configured
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`

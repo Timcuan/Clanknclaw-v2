@@ -295,6 +295,7 @@ class TelegramBot:
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
         self.message_thread_id = message_thread_id
         self._db = db  # optional DatabaseManager for operator commands
+        self._last_operator_thread_id: int | None = None
 
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN is required")
@@ -310,6 +311,25 @@ class TelegramBot:
         self.on_reject: Any = None
         self.on_claim_fees: Any = None
 
+    def _capture_operator_thread(self, thread_id: Any) -> None:
+        try:
+            if thread_id is None:
+                return
+            parsed = int(thread_id)
+            if parsed > 0:
+                self._last_operator_thread_id = parsed
+        except (TypeError, ValueError):
+            return
+
+    def _resolve_message_thread_id(self, explicit_thread_id: int | None = None) -> int | None:
+        if explicit_thread_id is not None:
+            return explicit_thread_id
+        if self.message_thread_id is not None:
+            return self.message_thread_id
+        if self._last_operator_thread_id is not None:
+            return self._last_operator_thread_id
+        return None
+
     async def _send_bot_message(
         self,
         *,
@@ -317,6 +337,7 @@ class TelegramBot:
         parse_mode: str = "HTML",
         reply_markup: Any | None = None,
         disable_web_page_preview: bool = False,
+        message_thread_id: int | None = None,
     ) -> Any:
         """Send message with bounded retries for transient Telegram API failures."""
         payload: dict[str, Any] = {
@@ -324,8 +345,9 @@ class TelegramBot:
             "text": text,
             "parse_mode": parse_mode,
         }
-        if self.message_thread_id is not None:
-            payload["message_thread_id"] = self.message_thread_id
+        resolved_thread_id = self._resolve_message_thread_id(message_thread_id)
+        if resolved_thread_id is not None:
+            payload["message_thread_id"] = resolved_thread_id
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         if disable_web_page_preview:
@@ -386,6 +408,7 @@ class TelegramBot:
     async def _handle_start(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+        self._capture_operator_thread(getattr(message, "message_thread_id", None))
         await message.answer(
             "🤖 <b>Clank&Claw Bot</b>\n\n"
             "Manual review mode is active.\n"
@@ -403,6 +426,7 @@ class TelegramBot:
     async def _handle_help(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+        self._capture_operator_thread(getattr(message, "message_thread_id", None))
         await message.answer(
             "📚 <b>Help</b>\n\n"
             "<b>Review Flow</b>\n"
@@ -423,6 +447,7 @@ class TelegramBot:
     async def _handle_status(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+        self._capture_operator_thread(getattr(message, "message_thread_id", None))
         if self._db:
             try:
                 stats = self._db.get_stats()
@@ -444,6 +469,7 @@ class TelegramBot:
     async def _handle_queue(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+        self._capture_operator_thread(getattr(message, "message_thread_id", None))
         if not self._db:
             await message.answer("ℹ️ Database not available.", parse_mode="HTML")
             return
@@ -457,6 +483,7 @@ class TelegramBot:
     async def _handle_candidate(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+        self._capture_operator_thread(getattr(message, "message_thread_id", None))
         if not self._db:
             await message.answer("ℹ️ Database not available.", parse_mode="HTML")
             return
@@ -479,6 +506,7 @@ class TelegramBot:
     async def _handle_deploys(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+        self._capture_operator_thread(getattr(message, "message_thread_id", None))
         if not self._db:
             await message.answer("ℹ️ Database not available.", parse_mode="HTML")
             return
@@ -492,6 +520,7 @@ class TelegramBot:
     async def _handle_cancel(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+        self._capture_operator_thread(getattr(message, "message_thread_id", None))
         if not self._db:
             await message.answer("ℹ️ Database not available.", parse_mode="HTML")
             return
@@ -520,6 +549,7 @@ class TelegramBot:
     async def _handle_claimfees(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+        self._capture_operator_thread(getattr(message, "message_thread_id", None))
         if not self.on_claim_fees:
             await message.answer("⚠️ Claim fees handler is not configured.", parse_mode="HTML")
             return
@@ -561,6 +591,7 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
+        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
 
         candidate_id = callback.data.split(":", 1)[1]
         logger.info(f"Approve callback for candidate {candidate_id}")
@@ -597,6 +628,7 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
+        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
 
         candidate_id = callback.data.split(":", 1)[1]
         logger.info(f"Reject callback for candidate {candidate_id}")
@@ -643,6 +675,7 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
+        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
         candidate_id = callback.data.split(":", 1)[1]
         try:
             text = await self._render_candidate_detail(candidate_id)
@@ -658,6 +691,7 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
+        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
         candidate_id = callback.data.split(":", 1)[1]
         if not self._db:
             await callback.answer("Database unavailable", show_alert=True)
@@ -701,6 +735,7 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
+        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
         if not self._db:
             await callback.answer("Database unavailable", show_alert=True)
             return
@@ -716,6 +751,7 @@ class TelegramBot:
         if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
+        self._capture_operator_thread(getattr(callback.message, "message_thread_id", None))
         if not self._db:
             await callback.answer("Database unavailable", show_alert=True)
             return
