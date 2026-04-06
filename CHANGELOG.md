@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - unified mention/chain/contract/symbol/name hint parsing
   - improved structured symbol/ticker detection (including lowercase and punctuation cleanup)
   - reduced parser drift between X and Farcaster normalization paths
+- Runtime resilience controls for difficult moments:
+  - detector loop timeout guard
+  - per-candidate processing timeout in detector pipeline
+  - bounded pending notification queue to avoid burst-memory pressure
+  - deploy preparation/deploy execution timeout guardrails
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`

@@ -31,6 +31,8 @@ class DeployWorker:
         paired_fee_bps: int | None = None,
         token_admin_enabled: bool = True,
         token_reward_enabled: bool = True,
+        prepare_timeout_seconds: float = 90.0,
+        deploy_timeout_seconds: float = 180.0,
     ):
         self.db = db
         self.preparation = DeployPreparation(
@@ -47,6 +49,8 @@ class DeployWorker:
             token_reward_enabled=token_reward_enabled,
         )
         self.deployer = deployer
+        self.prepare_timeout_seconds = max(10.0, prepare_timeout_seconds)
+        self.deploy_timeout_seconds = max(10.0, deploy_timeout_seconds)
         self._telegram_worker: Any = None  # Will be set by supervisor
         self._running = False
 
@@ -84,7 +88,10 @@ class DeployWorker:
                 raise DeployPreparationError(f"lookup_candidate: Candidate {candidate_id} not found")
 
             prepare_started = perf_counter()
-            deploy_request = await self.preparation.prepare_deploy_request(candidate)
+            deploy_request = await asyncio.wait_for(
+                self.preparation.prepare_deploy_request(candidate),
+                timeout=self.prepare_timeout_seconds,
+            )
             logger.info(
                 "deploy_worker.prepare_ms=%d candidate=%s",
                 int((perf_counter() - prepare_started) * 1000),
@@ -92,7 +99,10 @@ class DeployWorker:
             )
 
             deploy_started = perf_counter()
-            deploy_result = await self.deployer.deploy(deploy_request)
+            deploy_result = await asyncio.wait_for(
+                self.deployer.deploy(deploy_request),
+                timeout=self.deploy_timeout_seconds,
+            )
             logger.info(
                 "deploy_worker.deploy_ms=%d candidate=%s",
                 int((perf_counter() - deploy_started) * 1000),

@@ -87,6 +87,8 @@ class Supervisor:
                 paired_fee_bps=self.config.deployment.paired_fee_bps,
                 token_admin_enabled=self.config.deployment.token_admin_enabled,
                 token_reward_enabled=self.config.deployment.token_reward_enabled,
+                prepare_timeout_seconds=self.config.app.deploy_prepare_timeout_seconds,
+                deploy_timeout_seconds=self.config.app.deploy_execute_timeout_seconds,
             )
             self._workers["deploy"] = deploy
             deploy.set_telegram_worker(telegram)
@@ -105,6 +107,9 @@ class Supervisor:
                 query_terms=self.config.x_detector.query_terms,
                 max_process_concurrency=self.config.x_detector.max_process_concurrency,
                 max_query_concurrency=self.config.x_detector.max_query_concurrency,
+                loop_timeout_seconds=self.config.app.worker_loop_timeout_seconds,
+                candidate_process_timeout_seconds=self.config.app.candidate_process_timeout_seconds,
+                max_pending_notifications=self.config.app.max_pending_notifications,
             )
             x_detector.set_telegram_worker(telegram)
             self._workers["x_detector"] = x_detector
@@ -125,6 +130,9 @@ class Supervisor:
                 max_process_concurrency=self.config.farcaster_detector.max_process_concurrency,
                 max_query_concurrency=self.config.farcaster_detector.max_query_concurrency,
                 user_agent=self.config.app.user_agent,
+                loop_timeout_seconds=self.config.app.worker_loop_timeout_seconds,
+                candidate_process_timeout_seconds=self.config.app.candidate_process_timeout_seconds,
+                max_pending_notifications=self.config.app.max_pending_notifications,
             )
             farcaster_detector.set_telegram_worker(telegram)
             self._workers["farcaster_detector"] = farcaster_detector
@@ -148,6 +156,9 @@ class Supervisor:
                 base_target_sources=self.config.gecko_detector.base_target_sources,
                 max_process_concurrency=self.config.gecko_detector.max_process_concurrency,
                 user_agent=self.config.app.user_agent,
+                loop_timeout_seconds=self.config.app.worker_loop_timeout_seconds,
+                candidate_process_timeout_seconds=self.config.app.candidate_process_timeout_seconds,
+                max_pending_notifications=self.config.app.max_pending_notifications,
             )
             gecko_detector.set_telegram_worker(telegram)
             self._workers["gecko_detector"] = gecko_detector

@@ -34,6 +34,9 @@ class FarcasterDetectorWorker:
         max_process_concurrency: int = 8,
         max_query_concurrency: int = 2,
         user_agent: str = "ClankAndClaw/1.0 (+ops)",
+        loop_timeout_seconds: float = 90.0,
+        candidate_process_timeout_seconds: float = 20.0,
+        max_pending_notifications: int = 500,
     ):
         self.db = db
         self.poll_interval = poll_interval
@@ -47,6 +50,9 @@ class FarcasterDetectorWorker:
         self.max_process_concurrency = max(1, max_process_concurrency)
         self.max_query_concurrency = max(1, max_query_concurrency)
         self.user_agent = user_agent
+        self.loop_timeout_seconds = max(10.0, loop_timeout_seconds)
+        self.candidate_process_timeout_seconds = max(1.0, candidate_process_timeout_seconds)
+        self.max_pending_notifications = max(10, max_pending_notifications)
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._telegram_worker: Any = None
@@ -110,7 +116,9 @@ class FarcasterDetectorWorker:
     async def _run(self) -> None:
         while self._running:
             try:
-                await self._poll_and_process()
+                await asyncio.wait_for(self._poll_and_process(), timeout=self.loop_timeout_seconds)
+            except asyncio.TimeoutError:
+                logger.error("Farcaster detector loop timeout after %.1fs", self.loop_timeout_seconds)
             except Exception as exc:
                 logger.error("Error in Farcaster detector worker: %s", exc, exc_info=True)
             await asyncio.sleep(self.poll_interval)
@@ -210,11 +218,14 @@ class FarcasterDetectorWorker:
         try:
             candidate = normalize_farcaster_event(event, context_url)
             loop = asyncio.get_running_loop()
-            scored = await loop.run_in_executor(
-                self._pipeline_executor,
-                process_candidate,
-                self.db,
-                candidate,
+            scored = await asyncio.wait_for(
+                loop.run_in_executor(
+                    self._pipeline_executor,
+                    process_candidate,
+                    self.db,
+                    candidate,
+                ),
+                timeout=self.candidate_process_timeout_seconds,
             )
             if scored.decision in ("review", "priority_review"):
                 logger.info("Candidate %s scored %s -> %s", candidate.id, scored.score, scored.decision)
@@ -298,6 +309,13 @@ class FarcasterDetectorWorker:
         score: int,
         reason_codes: list[str],
     ) -> None:
+        if len(self._notification_tasks) >= self.max_pending_notifications:
+            logger.warning(
+                "Skipping Farcaster review notification for %s: pending queue saturated (%d)",
+                candidate_id,
+                len(self._notification_tasks),
+            )
+            return
         task = asyncio.create_task(
             self._send_review_notification_with_semaphore(
                 candidate_id,

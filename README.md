@@ -54,6 +54,11 @@ app:
   log_level: INFO              # Logging level (DEBUG, INFO, WARNING, ERROR)
   review_expiry_seconds: 900   # Review item expiration (15 minutes)
   user_agent: "ClankAndClaw/1.0 (+ops)"  # Consistent API client identity
+  worker_loop_timeout_seconds: 90.0
+  candidate_process_timeout_seconds: 20.0
+  max_pending_notifications: 500
+  deploy_prepare_timeout_seconds: 90.0
+  deploy_execute_timeout_seconds: 180.0
 
 x_detector:
   enabled: true                # Enable X/Twitter polling
@@ -107,6 +112,10 @@ Gecko runtime tuning:
   - Stage 3: Base source/factory confidence validation
 - Adaptive anti-block pacing: request interval auto-adjusts on `429/5xx` and recovers when healthy.
 - Cooldown-aware reprocessing prevents spam while allowing significant momentum jumps.
+- Hard-failure resilience:
+  - per-loop timeout guard (detectors auto-recover on hung cycle)
+  - per-candidate processing timeout (prevents worker starvation)
+  - bounded pending notification queue (prevents memory flood under burst)
 
 ### Environment Variables
 

@@ -10,6 +10,11 @@ class AppSection(BaseModel):
     log_level: str = "INFO"
     review_expiry_seconds: int = 900
     user_agent: str = "ClankAndClaw/1.0 (+ops)"
+    worker_loop_timeout_seconds: float = 90.0
+    candidate_process_timeout_seconds: float = 20.0
+    max_pending_notifications: int = 500
+    deploy_prepare_timeout_seconds: float = 90.0
+    deploy_execute_timeout_seconds: float = 180.0
 
 
 class XDetectorSection(BaseModel):

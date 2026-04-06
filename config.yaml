@@ -2,6 +2,11 @@ app:
   log_level: INFO
   review_expiry_seconds: 900
   user_agent: "ClankAndClaw/1.0 (+ops)"
+  worker_loop_timeout_seconds: 90.0
+  candidate_process_timeout_seconds: 20.0
+  max_pending_notifications: 500
+  deploy_prepare_timeout_seconds: 90.0
+  deploy_execute_timeout_seconds: 180.0
 
 x_detector:
   enabled: true
