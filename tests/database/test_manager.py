@@ -397,6 +397,4 @@ def test_with_retry_uses_exponential_backoff(tmp_path):
         result = db._with_retry(flaky)
 
     assert result == "ok"
-    assert len(sleep_calls) == 3
-    assert sleep_calls[1] > sleep_calls[0]
-    assert sleep_calls[2] > sleep_calls[1]
+    assert sleep_calls == [0.1, 0.2, 0.4]

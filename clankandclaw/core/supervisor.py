@@ -1,6 +1,7 @@
 """Supervisor for managing async workers."""
 
 import asyncio
+import functools
 import logging
 import signal
 from typing import Any
@@ -248,7 +249,6 @@ class Supervisor:
             loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
 
     async def _run_cleanup_loop(self) -> None:
-        import functools
         interval = max(60.0, float(self.config.app.cleanup_interval_seconds))
         loop = asyncio.get_running_loop()
         while self._running:
