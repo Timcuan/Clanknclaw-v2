@@ -26,9 +26,9 @@ class FarcasterDetectorWorker:
         db: DatabaseManager,
         *,
         poll_interval: float = 35.0,
-        api_url: str = "https://api.neynar.com/v2/farcaster/cast/search/",
+        api_url: str = "https://api.neynar.com/v2/farcaster/feed",
         api_key: str | None = None,
-        max_results: int = 20,
+        max_results: int = 50,
         target_handles: list[str] | None = None,
         query_terms: list[str] | None = None,
         request_timeout_seconds: float = 20.0,
@@ -140,7 +140,7 @@ class FarcasterDetectorWorker:
             logger.warning("Farcaster detector cooldown active until %s", self._provider_cooldown_until.isoformat())
             return
         if self._billing_blocked:
-            logger.warning("Farcaster detector polling paused: Neynar cast search requires paid plan")
+            logger.warning("Farcaster detector polling paused: Neynar API restricted. Check plan limits.")
             return
 
         api_headers: dict[str, str] = {}
@@ -151,18 +151,7 @@ class FarcasterDetectorWorker:
         if stealth is None:
             stealth = StealthClient(self._stealth_config, timeout=self.request_timeout_seconds)
 
-        processed_count = 0
-        query_tasks = [
-            asyncio.create_task(self._run_query(stealth, api_headers, query))
-            for query in self._build_queries()
-        ]
-        if query_tasks:
-            results = await asyncio.gather(*query_tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error("Farcaster query task failed: %s", result, exc_info=True)
-                    continue
-                processed_count += int(result)
+        processed_count = await self._run_feed(stealth, api_headers)
 
         self._last_poll_time = datetime.now(timezone.utc)
         logger.info(
@@ -268,49 +257,67 @@ class FarcasterDetectorWorker:
         async with self._process_semaphore:
             await self.process_event(event, context_url)
 
-    async def _run_query(
+    async def _run_feed(
         self,
         stealth: StealthClient,
         api_headers: dict[str, str],
-        query: str,
     ) -> int:
         async with self._query_semaphore:
-            params = {"q": query, "limit": self.max_results}
+            # We use trending feed which usually works on lower tiers
+            params = {"feed_params": '{"feed_type": "trending"}', "limit": self.max_results}
+            # Note: Feed API endpoint V2 often uses feed_params as a JSON string or individual fields depending on library version.
+            # Here we use the standard Neynar V2 feed format.
             response = await self._request_with_retry(stealth, api_headers, params)
+            
             if response.status_code == 402:
                 self._billing_blocked = True
-                logger.error("Neynar API returned 402 PaymentRequired; disable farcaster_detector or upgrade plan")
+                logger.error("Neynar API returned 402 PaymentRequired")
                 return 0
+            
             response.raise_for_status()
 
             payload = response.json()
-            casts = payload.get("result", {}).get("casts", payload.get("casts", []))
-            logger.info("Fetched %s Farcaster casts for query '%s'", len(casts), query)
+            casts = payload.get("casts", [])
+            logger.info("Fetched %s Farcaster casts from trending feed", len(casts))
 
             process_tasks: list[asyncio.Task[None]] = []
+            
+            # Local filtering logic: find relevant casts for token discovery
+            keywords = [k.lower() for k in self.query_terms]
+            handles = [h.lower() for h in self.target_handles]
+            
             for cast in casts:
+                text = str(cast.get("text") or "").lower()
+                author_data = cast.get("author") or {}
+                author = author_data.get("username", "").lower()
+                
+                # Filter locally: does it contain keywords OR is it from/mentioning a launcher?
+                is_relevant = any(k in text for k in keywords) or author in handles
+                if not is_relevant:
+                    # Check mentions
+                    mentions = cast.get("mentioned_profiles") or cast.get("mentions") or []
+                    for m in mentions:
+                        m_username = (m.get("username") if isinstance(m, dict) else "").lower()
+                        if m_username in handles:
+                            is_relevant = True
+                            break
+                
+                if not is_relevant:
+                    continue
+                    
                 cast_id = str(cast.get("hash") or cast.get("id") or "")
                 if not cast_id or not self._mark_cast_seen(cast_id):
                     continue
 
-                author = cast.get("author") or {}
-                text = str(cast.get("text") or "")
                 reactions = cast.get("reactions") or {}
                 replies = cast.get("replies") or {}
-                mentions = cast.get("mentioned_profiles") or cast.get("mentions") or []
-                mentioned_handles = []
-                for mention in mentions:
-                    if isinstance(mention, dict):
-                        username = mention.get("username")
-                        if username:
-                            mentioned_handles.append(str(username))
-
+                
                 event = {
                     "id": cast_id,
-                    "text": text,
-                    "author": {"username": author.get("username")},
+                    "text": cast.get("text") or "",
+                    "author": {"username": author_data.get("username")},
                     "created_at": cast.get("timestamp"),
-                    "mentioned_handles": mentioned_handles,
+                    "mentioned_handles": [h.get("username") for h in (cast.get("mentioned_profiles") or []) if isinstance(h, dict)],
                     "like_count": int(reactions.get("likes_count") or 0),
                     "recast_count": int(reactions.get("recasts_count") or 0),
                     "reply_count": int(replies.get("count") or 0),
@@ -321,7 +328,6 @@ class FarcasterDetectorWorker:
             if process_tasks:
                 await asyncio.gather(*process_tasks)
             return len(process_tasks)
-
     def _mark_cast_seen(self, cast_id: str) -> bool:
         if cast_id in self._seen_cast_id_set:
             return False
