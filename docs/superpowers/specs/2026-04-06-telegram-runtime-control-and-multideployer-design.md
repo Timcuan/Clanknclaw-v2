@@ -117,6 +117,11 @@ Rationale:
 4. Show preview card (name, symbol, image CID, tax/admin/reward config, deployer mode).
 5. Final action: `Confirm Deploy` or `Cancel`.
 
+Manual deploy preview must include:
+- `token_admin` address
+- `reward_recipient` address
+- whether values are `default` (from system config) or `custom override` (set in chat)
+
 ### Manual Deploy Data Model
 
 Add table `manual_deploy_requests`:
@@ -128,6 +133,8 @@ Add table `manual_deploy_requests`:
 - `candidate_id` nullable
 - `platform_mode` (`clanker|bankr|both`)
 - `payload_json`
+- `token_admin_override` nullable
+- `reward_recipient_override` nullable
 - `status` (`draft|confirmed|deploying|completed|failed|cancelled`)
 - `created_at`
 - `updated_at`
@@ -139,6 +146,10 @@ Add table `manual_deploy_requests`:
 - Rate limit per window to avoid accidental spam.
 - Strict payload validation before confirmation.
 - If selected deployer is unavailable, block with explicit operator message.
+- Validate `token_admin` and `reward_recipient` as chain-correct addresses before confirm.
+- Reject `reward_recipient == zero-address`.
+- If override is absent, fallback to configured defaults.
+- Overrides are per-request only (do not mutate global wallet config).
 
 ## Runtime Behavior
 
@@ -233,6 +244,25 @@ Operator can send image directly to bot, and bot converts it automatically into 
 - use previous CID
 - cancel flow
 - Reject unsupported or corrupted files with actionable error text.
+
+## Custom Token Admin and Reward Recipient in Chat Flow
+
+Manual deploy supports custom wallet routing for each request:
+
+- Default behavior:
+  - `token_admin` and `reward_recipient` are loaded from configured wallet values.
+- Optional per-request overrides:
+  - operator can set `token_admin` and `reward_recipient` in wizard/direct command.
+  - overrides apply only to current manual deploy request.
+
+Input channels:
+- Wizard buttons + prompted text fields (`Set Token Admin`, `Set Reward Recipient`)
+- Direct command flags (future-compatible syntax in implementation plan)
+
+Preview and confirmation:
+- Final preview card must render resolved addresses and mark source:
+  - `default` or `custom`
+- Deploy cannot execute unless both resolved addresses pass validation.
 
 ### Storage
 
