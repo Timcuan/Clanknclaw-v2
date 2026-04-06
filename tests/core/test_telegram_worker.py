@@ -297,6 +297,22 @@ async def test_handle_approve_marks_review_rejected_on_deploy_failure(db):
     assert row["status"] == "rejected"
 
 
+@pytest.mark.asyncio
+async def test_handle_approve_marks_rejected_when_deploy_handler_missing(db):
+    bot = make_mock_bot()
+    worker = make_worker(db)
+    with patch("clankandclaw.core.workers.telegram_worker.TelegramBot", return_value=bot):
+        await worker.start()
+
+    await worker.send_review_notification("x-1", "review", 70, [])
+    await worker._handle_approve("x-1")
+
+    row = db.get_review_item("review-x-1")
+    assert row is not None
+    assert row["status"] == "rejected"
+    bot.send_deploy_failure.assert_awaited_once()
+
+
 # ── _handle_reject ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -373,3 +389,70 @@ async def test_handle_claim_fees_persists_result(db):
             "SELECT token_address, status, tx_hash FROM reward_claim_results ORDER BY claimed_at DESC LIMIT 1"
         ).fetchone()
     assert row == ("0x" + "b" * 40, "claim_success", "0x" + "a" * 64)
+
+
+@pytest.mark.asyncio
+async def test_manual_deploy_creates_candidate_and_calls_prepare(db):
+    bot = make_mock_bot()
+    worker = make_worker(db)
+    with patch("clankandclaw.core.workers.telegram_worker.TelegramBot", return_value=bot):
+        await worker.start()
+
+    deploy_prep = MagicMock()
+    deploy_prep.prepare_and_deploy = AsyncMock(return_value=True)
+    worker.set_deploy_preparation(deploy_prep)
+
+    result = await worker._handle_manual_deploy(
+        "clanker",
+        "Moon Coin",
+        "MOON",
+        "auto",
+        "manual context",
+        {"chat_id": 1, "user_id": 2, "username": "alice", "thread_id": 3},
+    )
+    assert result["success"] is True
+    candidate_id = result["candidate_id"]
+    assert candidate_id.startswith("manual-")
+    deploy_prep.prepare_and_deploy.assert_awaited_once_with(candidate_id)
+    candidate_row = db.get_candidate(candidate_id)
+    assert candidate_row is not None
+    assert "Moon Coin" in candidate_row["raw_text"]
+
+
+@pytest.mark.asyncio
+async def test_manual_deploy_rejects_invalid_image_ref(db):
+    worker = make_worker(db)
+    deploy_prep = MagicMock()
+    deploy_prep.prepare_and_deploy = AsyncMock(return_value=True)
+    worker.set_deploy_preparation(deploy_prep)
+
+    with pytest.raises(ValueError, match="image_or_cid"):
+        await worker._handle_manual_deploy("clanker", "Moon", "MOON", "not-a-url", "", None)
+
+
+@pytest.mark.asyncio
+async def test_manual_deploy_candidate_requires_existing_candidate(db):
+    worker = make_worker(db)
+    deploy_prep = MagicMock()
+    deploy_prep.prepare_and_deploy = AsyncMock(return_value=True)
+    worker.set_deploy_preparation(deploy_prep)
+
+    with pytest.raises(ValueError, match="not found"):
+        await worker._handle_manual_deploy_candidate("clanker", "missing-id", None)
+
+
+@pytest.mark.asyncio
+async def test_manual_deploy_candidate_calls_prepare(db):
+    db.save_candidate(
+        "x-22", "x", "tweet-22", "fp-22", "deploy token Moon symbol MOON",
+        observed_at="2026-04-05T10:00:00Z",
+    )
+    worker = make_worker(db)
+    deploy_prep = MagicMock()
+    deploy_prep.prepare_and_deploy = AsyncMock(return_value=True)
+    worker.set_deploy_preparation(deploy_prep)
+
+    result = await worker._handle_manual_deploy_candidate("clanker", "x-22", None)
+    assert result["success"] is True
+    assert result["candidate_id"] == "x-22"
+    deploy_prep.prepare_and_deploy.assert_awaited_once_with("x-22")

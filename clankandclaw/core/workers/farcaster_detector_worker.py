@@ -5,6 +5,7 @@ import logging
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
+import inspect
 import random
 from time import perf_counter
 from typing import Any
@@ -57,7 +58,9 @@ class FarcasterDetectorWorker:
         self._task: asyncio.Task[None] | None = None
         self._telegram_worker: Any = None
         self._last_poll_time: datetime | None = None
-        self._seen_cast_ids: deque[str] = deque(maxlen=5000)
+        self._seen_cast_ids: deque[str] = deque()
+        self._seen_cast_id_set: set[str] = set()
+        self._max_seen_cast_ids = 5000
         self._billing_blocked = False
         self._http_client: httpx.AsyncClient | None = None
         self._process_semaphore = asyncio.Semaphore(self.max_process_concurrency)
@@ -147,19 +150,31 @@ class FarcasterDetectorWorker:
             logger.warning("Farcaster detector polling paused: Neynar cast search requires paid plan")
             return
 
-        client = self._http_client or httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_seconds))
-        processed_count = 0
-        query_tasks = [
-            asyncio.create_task(self._run_query(client, headers, query))
-            for query in self._build_queries()
-        ]
-        if query_tasks:
-            results = await asyncio.gather(*query_tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error("Farcaster query task failed: %s", result, exc_info=True)
-                    continue
-                processed_count += int(result)
+        created_local_client = False
+        client = self._http_client
+        if client is None:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(self.request_timeout_seconds))
+            created_local_client = True
+        try:
+            processed_count = 0
+            query_tasks = [
+                asyncio.create_task(self._run_query(client, headers, query))
+                for query in self._build_queries()
+            ]
+            if query_tasks:
+                results = await asyncio.gather(*query_tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        logger.error("Farcaster query task failed: %s", result, exc_info=True)
+                        continue
+                    processed_count += int(result)
+        finally:
+            if created_local_client:
+                close = getattr(client, "aclose", None)
+                if callable(close):
+                    maybe_awaitable = close()
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
 
         self._last_poll_time = datetime.now(timezone.utc)
         logger.info(
@@ -269,9 +284,8 @@ class FarcasterDetectorWorker:
             process_tasks: list[asyncio.Task[None]] = []
             for cast in casts:
                 cast_id = str(cast.get("hash") or cast.get("id") or "")
-                if not cast_id or cast_id in self._seen_cast_ids:
+                if not cast_id or not self._mark_cast_seen(cast_id):
                     continue
-                self._seen_cast_ids.append(cast_id)
 
                 author = cast.get("author") or {}
                 text = str(cast.get("text") or "")
@@ -301,6 +315,16 @@ class FarcasterDetectorWorker:
             if process_tasks:
                 await asyncio.gather(*process_tasks)
             return len(process_tasks)
+
+    def _mark_cast_seen(self, cast_id: str) -> bool:
+        if cast_id in self._seen_cast_id_set:
+            return False
+        self._seen_cast_id_set.add(cast_id)
+        self._seen_cast_ids.append(cast_id)
+        if len(self._seen_cast_ids) > self._max_seen_cast_ids:
+            oldest = self._seen_cast_ids.popleft()
+            self._seen_cast_id_set.discard(oldest)
+        return True
 
     def _schedule_review_notification(
         self,

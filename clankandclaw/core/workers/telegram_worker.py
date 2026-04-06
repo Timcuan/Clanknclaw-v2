@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
@@ -13,6 +14,7 @@ from clankandclaw.database.manager import DatabaseManager
 from clankandclaw.telegram.bot import TelegramBot
 
 logger = logging.getLogger(__name__)
+_IPFS_CID_RE = re.compile(r"^[A-Za-z0-9]{32,120}$")
 
 
 class TelegramWorker:
@@ -54,6 +56,7 @@ class TelegramWorker:
             "ops.bot_enabled": "on",
             "ops.deployer_mode": "clanker",
         }
+        self._manual_deploy_lock = asyncio.Lock()
 
     def _refresh_ops_cache_if_needed(self) -> None:
         now = perf_counter()
@@ -121,6 +124,8 @@ class TelegramWorker:
             self._bot.on_approve = self._handle_approve
             self._bot.on_reject = self._handle_reject
             self._bot.on_claim_fees = self._handle_claim_fees
+            self._bot.on_manual_deploy = self._handle_manual_deploy
+            self._bot.on_manual_deploy_candidate = self._handle_manual_deploy_candidate
 
             self._running = True
             self._task = asyncio.create_task(self._run())
@@ -290,6 +295,13 @@ class TelegramWorker:
                     )
         else:
             logger.warning("Deploy preparation handler not set")
+            self.db.complete_review_item(review_id, success=False, locked_by="telegram")
+            if self._bot:
+                await self._bot.send_deploy_failure(
+                    candidate_id,
+                    "preparation_unavailable",
+                    "Deploy preparation handler is not configured",
+                )
 
     async def _handle_reject(self, candidate_id: str) -> None:
         """Handle rejection callback."""
@@ -341,3 +353,106 @@ class TelegramWorker:
             claimed_at=datetime.now(timezone.utc).isoformat(),
         )
         return result
+
+    async def _handle_manual_deploy(
+        self,
+        platform: str,
+        token_name: str,
+        token_symbol: str,
+        image_ref: str,
+        description: str | None,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not self._deploy_preparation:
+            raise ValueError("Deploy preparation handler is not configured")
+        normalized_platform = platform.strip().lower()
+        if normalized_platform != "clanker":
+            raise ValueError("Only clanker manual deploy is available right now")
+
+        image_ref_value = (image_ref or "").strip()
+        image_metadata: dict[str, Any] = {}
+        if image_ref_value and image_ref_value.lower() not in {"auto", "none"}:
+            if image_ref_value.startswith(("http://", "https://")):
+                image_metadata["image_url"] = image_ref_value
+            elif image_ref_value.startswith("ipfs://"):
+                cid = image_ref_value[7:].strip()
+                if not _IPFS_CID_RE.fullmatch(cid):
+                    raise ValueError("Invalid ipfs CID format for image")
+                image_metadata["image_uri"] = f"ipfs://{cid}"
+            elif _IPFS_CID_RE.fullmatch(image_ref_value):
+                image_metadata["image_uri"] = f"ipfs://{image_ref_value}"
+            else:
+                raise ValueError("image_or_cid must be http(s) URL, ipfs://CID, CID, or auto")
+
+        suffix = uuid.uuid4().hex[:8]
+        observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        candidate_id = f"manual-{suffix}"
+        base_text = f"deploy token {token_name} symbol {token_symbol}"
+        description_part = (description or "").strip()
+        raw_text = f"{base_text}. {description_part}" if description_part else base_text
+        metadata = {
+            "suggested_name": token_name,
+            "suggested_symbol": token_symbol,
+            "manual_deploy": True,
+            "platform_mode": normalized_platform,
+            **image_metadata,
+        }
+        if context:
+            user_id = context.get("user_id")
+            username = (context.get("username") or "").strip()
+            if user_id:
+                metadata["operator_user_id"] = str(user_id)
+            if username:
+                metadata["author_handle"] = username
+            metadata["operator_chat_id"] = str(context.get("chat_id", ""))
+            metadata["operator_thread_id"] = context.get("thread_id")
+
+        self.db.save_candidate_and_decision(
+            candidate_id=candidate_id,
+            source="x",
+            source_event_id=f"manual:{suffix}",
+            fingerprint=f"manual:{suffix}",
+            raw_text=raw_text,
+            score=100,
+            decision="priority_review",
+            reason_codes=["manual_deploy"],
+            recommended_platform="clanker",
+            observed_at=observed_at,
+            metadata=metadata,
+        )
+
+        async with self._manual_deploy_lock:
+            if self._bot and self._bot_enabled():
+                await self._bot.send_deploy_preparing(candidate_id)
+            success = await self._deploy_preparation.prepare_and_deploy(candidate_id)
+
+        return {
+            "candidate_id": candidate_id,
+            "success": bool(success),
+        }
+
+    async def _handle_manual_deploy_candidate(
+        self,
+        platform: str,
+        candidate_id: str,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del context
+        if not self._deploy_preparation:
+            raise ValueError("Deploy preparation handler is not configured")
+
+        normalized_platform = platform.strip().lower()
+        if normalized_platform != "clanker":
+            raise ValueError("Only clanker manual deploy is available right now")
+        if not self.db.get_candidate(candidate_id):
+            raise ValueError(f"Candidate {candidate_id} not found")
+
+        async with self._manual_deploy_lock:
+            if self._bot and self._bot_enabled():
+                await self._bot.send_deploy_preparing(candidate_id)
+            success = await self._deploy_preparation.prepare_and_deploy(candidate_id)
+
+        return {
+            "candidate_id": candidate_id,
+            "success": bool(success),
+        }

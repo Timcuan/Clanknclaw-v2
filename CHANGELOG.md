@@ -96,6 +96,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Generic IPFS upload support for arbitrary file types with MIME auto-detection
 - Clanker claim-fees integration via Telegram command `/claimfees <token_address>`
 - Reward claim audit logging in `reward_claim_results`
+- Manual deploy command flow from Telegram:
+  - `/manualdeploy` guide
+  - `/deploynow` for direct custom deploy
+  - `/deployca` for force deploy by existing candidate id
+  - execution is serialized with lock to avoid concurrent manual deploy race
+- Deploy preparation now accepts direct IPFS image references (`ipfs://CID` or raw CID) without refetch/upload
 
 ### Changed
 - Deploy preparation image stage now prefers contextual token image candidates over single raw image_url
@@ -107,12 +113,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced GMGN ingestion path with GeckoTerminal ingestion path in supervisor/config/runtime
 - Pipeline quick filter now handles Gecko hot-pool signals directly (not keyword-only)
 - Scoring engine now weights Gecko momentum metrics for faster priority review routing
+- Telegram slash menu/help/start docs now include manual deploy command set
 - Liquidity pool remains hardcoded for safety:
   - paired token WETH Base
   - starting market cap 10 ETH
   - dev buy fixed to 0
 
 ### Fixed
+- Prevented review items from getting stuck in `deploying` when deploy handler is unavailable; approval now finalizes as rejected with explicit failure notification.
+- Hardened Telegram candidate detail rendering by HTML-escaping raw context excerpt to avoid malformed message parse errors.
+- Reduced detector dedupe hot-path overhead from linear membership scans to O(1) set+queue caches for X and Farcaster ids.
+- Closed edge-case HTTP client lifecycle leaks in Gecko/Farcaster pollers when local fallback clients are created outside normal startup.
 - Prevented image/context mismatch by rejecting weak social avatar/banner image candidates
 - Reduced event-loop blocking under burst load by offloading sync pipeline calls to worker threads
 - Removed Telegram send wait from detector hot path (X/Farcaster/Gecko now use bounded async notification tasks)

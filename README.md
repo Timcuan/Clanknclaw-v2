@@ -184,6 +184,11 @@ Runtime operation controls (minimal scope, fast toggle):
 - `/setdeployer <clanker|bankr|both>` stores deployer mode.
   - Current execution support: `clanker` only.
   - `bankr` and `both` are reserved modes and will return explicit failure until Bankr deployer is enabled.
+- Manual deploy commands:
+  - `/manualdeploy` shows direct command examples.
+  - `/deploynow <platform> <name> <symbol> <image_or_cid|auto> [description]` executes immediate manual deploy through the same validation pipeline.
+  - `/deployca <platform> <candidate_id>` forces deploy from an existing candidate row.
+- `image_or_cid` supports `https://...`, `ipfs://<CID>`, raw CID (`Qm...` / `bafy...`), or `auto`.
 
 Storage and payload hygiene optimizations:
 - DB write compaction for oversized `raw_text` and noisy metadata payloads.

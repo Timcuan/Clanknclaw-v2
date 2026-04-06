@@ -82,3 +82,13 @@ async def test_farcaster_worker_sets_billing_blocked_on_402(db):
 
     assert worker._billing_blocked is True
     worker.process_event.assert_not_awaited()
+
+
+def test_farcaster_seen_cache_deduplicates_in_o1_pattern(db):
+    worker = make_worker(db)
+    assert worker._mark_cast_seen("c1") is True
+    assert worker._mark_cast_seen("c1") is False
+    for i in range(worker._max_seen_cast_ids + 5):
+        worker._mark_cast_seen(f"cast-{i}")
+    assert len(worker._seen_cast_ids) <= worker._max_seen_cast_ids
+    assert len(worker._seen_cast_id_set) <= worker._max_seen_cast_ids

@@ -111,6 +111,35 @@ async def test_prepare_image_uploads_and_returns_ipfs_uri(db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_prepare_image_uses_direct_ipfs_uri_without_fetch(db, monkeypatch):
+    prep, pinata, _ = make_preparation(db)
+    fetch_mock = AsyncMock()
+    monkeypatch.setattr("clankandclaw.core.deploy_preparation.fetch_image_bytes", fetch_mock)
+
+    candidate = make_candidate(metadata={"image_uri": "ipfs://QmYwAPJzv5CZsnAzt8auVZRnGi2C2qJfM9vDOMkMt2rt7D"})
+    uri = await prep._prepare_image(candidate, "Moon", "MOON")
+
+    assert uri == "ipfs://QmYwAPJzv5CZsnAzt8auVZRnGi2C2qJfM9vDOMkMt2rt7D"
+    fetch_mock.assert_not_awaited()
+    pinata.upload_file_bytes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepare_image_normalizes_direct_cid_to_ipfs_uri(db, monkeypatch):
+    prep, pinata, _ = make_preparation(db)
+    fetch_mock = AsyncMock()
+    monkeypatch.setattr("clankandclaw.core.deploy_preparation.fetch_image_bytes", fetch_mock)
+
+    cid = "bafybeigdyrzt5m6afm3q5r43azacv4xpkqgho6cn6vdw3r4u6r6b4gnkhy"
+    candidate = make_candidate(metadata={"image_cid": cid})
+    uri = await prep._prepare_image(candidate, "Moon", "MOON")
+
+    assert uri == f"ipfs://{cid}"
+    fetch_mock.assert_not_awaited()
+    pinata.upload_file_bytes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_prepare_image_skips_profile_image_and_uses_better_candidate(db, monkeypatch):
     prep, pinata, _ = make_preparation(db)
 

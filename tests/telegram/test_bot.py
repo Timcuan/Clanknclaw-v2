@@ -4,6 +4,7 @@ import pytest
 
 from clankandclaw.telegram.bot import (
     AIOGRAM_AVAILABLE,
+    _parse_command_args,
     build_candidate_detail_message,
     build_deploys_message,
     build_queue_message,
@@ -149,6 +150,17 @@ def test_build_candidate_detail_message_handles_missing_optional_data():
     assert "n/a" in msg
 
 
+def test_build_candidate_detail_message_escapes_raw_text():
+    candidate = {
+        "id": "x-3",
+        "source": "x",
+        "raw_text": "<b>bad</b> & \"raw\"",
+        "metadata_json": "{}",
+    }
+    msg = build_candidate_detail_message(candidate, None, None, None)
+    assert "<blockquote>&lt;b&gt;bad&lt;/b&gt; &amp; &quot;raw&quot;</blockquote>" in msg
+
+
 def test_build_deploys_message_compact_success_and_failure():
     rows = [
         {
@@ -198,6 +210,15 @@ def test_build_deploys_message_truncates_long_error():
 
 def test_build_deploys_message_empty():
     assert "No deployments yet." in build_deploys_message([])
+
+
+def test_parse_command_args_supports_quoted_values():
+    args = _parse_command_args('/deploynow clanker "Moon Coin" MOON auto "launch alpha"')
+    assert args == ["clanker", "Moon Coin", "MOON", "auto", "launch alpha"]
+
+
+def test_parse_command_args_returns_empty_on_unbalanced_quotes():
+    assert _parse_command_args('/deploynow clanker "Moon Coin MOON auto') == []
 
 
 @pytest.mark.skipif(not AIOGRAM_AVAILABLE, reason="aiogram not installed")

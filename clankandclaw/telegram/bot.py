@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -92,6 +93,19 @@ def _mask_sensitive_wallet(value: str) -> str:
     if len(text) > 12:
         return f"{text[:8]}…{text[-4:]}"
     return text
+
+
+def _parse_command_args(text: str) -> list[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return []
+    if not parts:
+        return []
+    return parts[1:]
 
 
 def build_review_message(
@@ -244,7 +258,7 @@ def build_candidate_detail_message(
         trimmed = raw_text[:_MAX_RAW_TEXT]
         if len(raw_text) > _MAX_RAW_TEXT:
             trimmed += "…"
-        lines += ["", f"<blockquote>{trimmed}</blockquote>"]
+        lines += ["", f"<blockquote>{_fmt_text(trimmed)}</blockquote>"]
 
     return "\n".join(lines)
 
@@ -343,6 +357,8 @@ class TelegramBot:
         self.on_approve: Any = None
         self.on_reject: Any = None
         self.on_claim_fees: Any = None
+        self.on_manual_deploy: Any = None
+        self.on_manual_deploy_candidate: Any = None
         self._load_dynamic_thread_bindings()
 
     def _persist_dynamic_thread_binding(self, category: str, thread_id: int) -> None:
@@ -505,6 +521,9 @@ class TelegramBot:
         self.dp.message.register(self._handle_setsigner, Command("setsigner"))
         self.dp.message.register(self._handle_setadmin, Command("setadmin"))
         self.dp.message.register(self._handle_setreward, Command("setreward"))
+        self.dp.message.register(self._handle_manualdeploy, Command("manualdeploy"))
+        self.dp.message.register(self._handle_deploynow, Command("deploynow"))
+        self.dp.message.register(self._handle_deployca, Command("deployca"))
         # Backward-compatible aliases
         self.dp.message.register(self._handle_queue, Command("candidates"))
         self.dp.message.register(self._handle_status, Command("stats"))
@@ -537,6 +556,9 @@ class TelegramBot:
                 BotCommand(command="setsigner", description="Set deployer signer wallet/key"),
                 BotCommand(command="setadmin", description="Set token admin wallet"),
                 BotCommand(command="setreward", description="Set reward recipient wallet"),
+                BotCommand(command="manualdeploy", description="Manual deploy guide"),
+                BotCommand(command="deploynow", description="Manual deploy now"),
+                BotCommand(command="deployca", description="Deploy existing candidate"),
                 BotCommand(command="help", description="Usage guide"),
             ]
         )
@@ -567,6 +589,9 @@ class TelegramBot:
             "/setsigner &lt;address|private_key|default&gt; — Set deployer signer\n"
             "/setadmin &lt;address|default&gt; — Set token admin\n"
             "/setreward &lt;address|default&gt; — Set reward recipient\n"
+            "/manualdeploy — Show manual deploy command format\n"
+            "/deploynow &lt;platform&gt; &lt;name&gt; &lt;symbol&gt; &lt;image_or_cid|auto&gt; [description]\n"
+            "/deployca &lt;platform&gt; &lt;candidate_id&gt; — Force deploy existing candidate\n"
             "/help — This help",
             parse_mode="HTML",
         )
@@ -597,6 +622,9 @@ class TelegramBot:
             "/setsigner &lt;address|private_key|default&gt; — Set deployer signer\n"
             "/setadmin &lt;address|default&gt; — Set token admin\n"
             "/setreward &lt;address|default&gt; — Set reward recipient\n"
+            "/manualdeploy — Show manual deploy command format\n"
+            "/deploynow &lt;platform&gt; &lt;name&gt; &lt;symbol&gt; &lt;image_or_cid|auto&gt; [description]\n"
+            "/deployca &lt;platform&gt; &lt;candidate_id&gt; — Force deploy existing candidate\n"
             "/cancel &lt;id&gt; — Cancel pending review (manual override)\n"
             "/help — Command guide",
             parse_mode="HTML",
@@ -985,6 +1013,151 @@ class TelegramBot:
             await message.answer("⚠️ Failed saving reward recipient override.", parse_mode="HTML")
             return
         await message.answer(f"✅ Reward recipient updated: {_fmt_inline_code(value)}", parse_mode="HTML")
+
+    async def _handle_manualdeploy(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+        await message.answer(
+            "🧪 <b>Manual Deploy Guide</b>\n\n"
+            "<b>Direct Deploy:</b>\n"
+            "<code>/deploynow clanker \"Token Name\" SYMBOL auto optional description</code>\n"
+            "<code>/deploynow clanker \"Token Name\" SYMBOL ipfs://QmCID optional description</code>\n"
+            "<code>/deploynow clanker \"Token Name\" SYMBOL https://example.com/logo.png optional description</code>\n\n"
+            "<b>Deploy Existing Candidate:</b>\n"
+            "<code>/deployca clanker &lt;candidate_id&gt;</code>\n\n"
+            "Notes:\n"
+            "• Current executable platform: <b>clanker</b>\n"
+            "• <b>bankr</b>/<b>both</b> are reserved and will be rejected\n"
+            "• Name with spaces must use quotes",
+            parse_mode="HTML",
+        )
+
+    async def _handle_deploynow(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+        self._bind_dynamic_thread("deploy", thread_id)
+        self._bind_dynamic_thread("alert", thread_id)
+        if not self.on_manual_deploy:
+            await message.answer("⚠️ Manual deploy handler is not configured.", parse_mode="HTML")
+            return
+
+        args = _parse_command_args(message.text or "")
+        if len(args) < 4:
+            await message.answer(
+                "Usage: /deploynow &lt;platform&gt; &lt;name&gt; &lt;symbol&gt; &lt;image_or_cid|auto&gt; [description]",
+                parse_mode="HTML",
+            )
+            return
+        platform, token_name, token_symbol, image_ref = args[0], args[1], args[2], args[3]
+        description = " ".join(args[4:]).strip() if len(args) > 4 else ""
+
+        if platform.strip().lower() not in {"clanker", "bankr", "both"}:
+            await message.answer("⚠️ Invalid platform. Use clanker|bankr|both.", parse_mode="HTML")
+            return
+
+        if len(token_name.strip()) < 2 or len(token_symbol.strip()) < 2:
+            await message.answer("⚠️ Token name/symbol too short.", parse_mode="HTML")
+            return
+
+        await message.answer("⏳ Manual deploy started…", parse_mode="HTML")
+        try:
+            result = await self.on_manual_deploy(
+                platform.strip().lower(),
+                token_name.strip(),
+                token_symbol.strip(),
+                image_ref.strip(),
+                description,
+                {
+                    "chat_id": message.chat.id,
+                    "user_id": getattr(message.from_user, "id", None),
+                    "username": getattr(message.from_user, "username", None),
+                    "thread_id": thread_id,
+                },
+            )
+            candidate_id = result.get("candidate_id") or "unknown"
+            success = bool(result.get("success"))
+            if success:
+                await message.answer(
+                    "✅ <b>Manual Deploy Success</b>\n\n"
+                    f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}",
+                    parse_mode="HTML",
+                )
+            else:
+                await message.answer(
+                    "❌ <b>Manual Deploy Failed</b>\n\n"
+                    f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}",
+                    parse_mode="HTML",
+                )
+        except Exception as exc:
+            logger.error("Error in deploynow handler: %s", exc, exc_info=True)
+            await message.answer(
+                "⚠️ Manual deploy rejected.\n"
+                f"Reason: {_fmt_text(str(exc))}",
+                parse_mode="HTML",
+            )
+
+    async def _handle_deployca(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+        self._bind_dynamic_thread("deploy", thread_id)
+        self._bind_dynamic_thread("alert", thread_id)
+        if not self.on_manual_deploy_candidate:
+            await message.answer("⚠️ Manual candidate deploy handler is not configured.", parse_mode="HTML")
+            return
+
+        args = _parse_command_args(message.text or "")
+        if len(args) < 2:
+            await message.answer("Usage: /deployca &lt;platform&gt; &lt;candidate_id&gt;", parse_mode="HTML")
+            return
+        platform, candidate_id = args[0], args[1]
+        if platform.strip().lower() not in {"clanker", "bankr", "both"}:
+            await message.answer("⚠️ Invalid platform. Use clanker|bankr|both.", parse_mode="HTML")
+            return
+
+        await message.answer(
+            f"⏳ Deploying candidate {_fmt_inline_code(candidate_id)}…",
+            parse_mode="HTML",
+        )
+        try:
+            result = await self.on_manual_deploy_candidate(
+                platform.strip().lower(),
+                candidate_id.strip(),
+                {
+                    "chat_id": message.chat.id,
+                    "user_id": getattr(message.from_user, "id", None),
+                    "username": getattr(message.from_user, "username", None),
+                    "thread_id": thread_id,
+                },
+            )
+            success = bool(result.get("success"))
+            if success:
+                await message.answer(
+                    "✅ <b>Deploy Candidate Success</b>\n\n"
+                    f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}",
+                    parse_mode="HTML",
+                )
+            else:
+                await message.answer(
+                    "❌ <b>Deploy Candidate Failed</b>\n\n"
+                    f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}",
+                    parse_mode="HTML",
+                )
+        except Exception as exc:
+            logger.error("Error in deployca handler: %s", exc, exc_info=True)
+            await message.answer(
+                "⚠️ Deploy candidate rejected.\n"
+                f"Reason: {_fmt_text(str(exc))}",
+                parse_mode="HTML",
+            )
 
     # ── callback handlers ─────────────────────────────────────────────────────
 

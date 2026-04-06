@@ -48,7 +48,9 @@ class XDetectorWorker:
         self._telegram_worker: Any = None  # Will be set by supervisor
         self._api: Any = None  # twscrape API instance
         self._last_poll_time: datetime | None = None
-        self._seen_tweet_ids: deque[str] = deque(maxlen=5000)
+        self._seen_tweet_ids: deque[str] = deque()
+        self._seen_tweet_id_set: set[str] = set()
+        self._max_seen_tweet_ids = 5000
         self._process_semaphore = asyncio.Semaphore(self.max_process_concurrency)
         self._query_semaphore = asyncio.Semaphore(self.max_query_concurrency)
         self._notify_semaphore = asyncio.Semaphore(8)
@@ -206,9 +208,8 @@ class XDetectorWorker:
                 process_tasks: list[asyncio.Task[None]] = []
                 for tweet in tweets:
                     tweet_id = str(getattr(tweet, "id", ""))
-                    if not tweet_id or tweet_id in self._seen_tweet_ids:
+                    if not tweet_id or not self._mark_tweet_seen(tweet_id):
                         continue
-                    self._seen_tweet_ids.append(tweet_id)
 
                     event = {
                         "id": tweet_id,
@@ -241,6 +242,16 @@ class XDetectorWorker:
             except Exception as exc:
                 logger.error("Error searching X query '%s': %s", query, exc, exc_info=True)
                 return 0
+
+    def _mark_tweet_seen(self, tweet_id: str) -> bool:
+        if tweet_id in self._seen_tweet_id_set:
+            return False
+        self._seen_tweet_id_set.add(tweet_id)
+        self._seen_tweet_ids.append(tweet_id)
+        if len(self._seen_tweet_ids) > self._max_seen_tweet_ids:
+            oldest = self._seen_tweet_ids.popleft()
+            self._seen_tweet_id_set.discard(oldest)
+        return True
 
     async def process_event(self, event: dict[str, Any], context_url: str) -> None:
         """Process a single X event through the pipeline."""

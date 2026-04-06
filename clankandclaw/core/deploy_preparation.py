@@ -27,6 +27,7 @@ _IMAGE_EXT_HINTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 _MAX_IMAGE_FETCH_ATTEMPTS = 4
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _PRIVATE_KEY_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
+_IPFS_CID_RE = re.compile(r"^[A-Za-z0-9]{32,120}$")
 
 
 class DeployPreparationError(Exception):
@@ -230,6 +231,22 @@ def _build_placeholder_image(token_symbol: str) -> tuple[bytes, str, str]:
     return out.getvalue(), "token_image.webp", "image/webp"
 
 
+def _normalize_ipfs_uri(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.startswith("ipfs://"):
+        cid = raw[7:].strip()
+        if _IPFS_CID_RE.fullmatch(cid):
+            return f"ipfs://{cid}"
+        return None
+    if _IPFS_CID_RE.fullmatch(raw):
+        return f"ipfs://{raw}"
+    return None
+
+
 class DeployPreparation:
     """Handles preparation of approved candidates for deployment."""
 
@@ -375,6 +392,12 @@ class DeployPreparation:
 
     async def _prepare_image(self, candidate: SignalCandidate, token_name: str, token_symbol: str) -> str:
         """Fetch image and upload to IPFS."""
+        metadata = candidate.metadata or {}
+        for key in ("image_uri", "ipfs_image_uri", "image_cid"):
+            direct_uri = _normalize_ipfs_uri(metadata.get(key))
+            if direct_uri:
+                return direct_uri
+
         image_candidates = _build_image_candidates(candidate, token_name, token_symbol)
         attempts = 0
 
