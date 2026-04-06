@@ -110,38 +110,40 @@ const publicClient = createPublicClient({ chain: base, transport })
 // Monkey-patch fetch to locally mine vanity salts if the flaky Render API is called
 const originalFetch = global.fetch;
 global.fetch = async function(url, options) {
-  const urlStr = url?.toString() || "";
-  if (urlStr.includes("vanity-v79d.onrender.com/find")) {
-    const urlObj = new URL(urlStr);
-    const deployer = urlObj.searchParams.get("deployer");
-    const initCodeHash = urlObj.searchParams.get("init_code_hash");
-    const suffixStr = urlObj.searchParams.get("suffix")?.toLowerCase().replace("0x", "") || "b07";
-    // We HARDCODE 'b07' here directly because the user requested 'pastikan hardcode ke b07 suffix'!
-    // Sometimes SDK sends '4b07' but we will search for just 'b07' or whatever is required to match standard Clanker
-    const suffix = suffixStr.includes("b07") ? "b07" : suffixStr;
-    const admin = urlObj.searchParams.get("admin") || deployer;
-    // For local mining, if SDK handles deployer vs admin correctly, we just compute CREATE2:
-    // Notice: The Render API actually mines using CREATE2
-    
-    // Simulate mining locally (it's very fast, takes ~1 second for 3 nibbles)
-    let nonce = 0;
-    while (true) {
-        const salt = pad(toHex(nonce), { size: 32 });
-        // The CREATE2 hash: keccak256( 0xff + deployer + salt + initCodeHash )
-        const hash = keccak256(concat(['0xff', deployer, salt, initCodeHash]));
-        if (hash.toLowerCase().endsWith(suffix)) {
-            // Also ensure it matches any additional clanker logic if needed, but endsWith is enough!
-            return {
-                ok: true,
-                json: async () => ({ salt: salt }),
-                text: async () => JSON.stringify({ salt: salt })
-            };
-        }
-        nonce++;
-        if (nonce > 5000000) {
-            // Bailout just in case to prevent infinite hangs, though 3 nibbles takes ~4096 hashes
-            throw new Error("Local vanity mining failed timeout");
-        }
+  const urlStr = url?.toString() || '';
+  if (urlStr.includes('vanity-v79d.onrender.com/find')) {
+    try {
+      const urlObj = new URL(urlStr);
+      const deployer = urlObj.searchParams.get('deployer');
+      const initCodeHash = urlObj.searchParams.get('init_code_hash');
+      
+      // Fallback to Clanker's original fetch if params are invalid
+      if (!deployer || !initCodeHash || deployer.length !== 42 || initCodeHash.length !== 66) {
+        return originalFetch.apply(this, arguments);
+      }
+
+      const suffixStr = urlObj.searchParams.get('suffix')?.toLowerCase().replace('0x', '') || 'b07';
+      const suffix = suffixStr.includes('b07') ? 'b07' : suffixStr;
+      
+      let nonce = 0;
+      // Loop ceiling set to 2,000,000 to prevent event loop blocking for > 2-3 seconds
+      while (nonce < 2000000) {
+          const salt = pad(toHex(nonce), { size: 32 });
+          const hash = keccak256(concat(['0xff', deployer, salt, initCodeHash]));
+          
+          if (hash.toLowerCase().endsWith(suffix)) {
+              return {
+                  ok: true,
+                  json: async () => ({ salt: salt }),
+                  text: async () => JSON.stringify({ salt: salt })
+              };
+          }
+          nonce++;
+      }
+      // If we somehow exceed the loop ceiling, fall back gracefully
+      console.warn('[CNC-DEBUG] Local vanity mining exceeded 2M iterations, falling back to Render API...');
+    } catch (err) {
+      console.warn('[CNC-DEBUG] Local vanity script error:', err, '- falling back to Render API...');
     }
   }
   return originalFetch.apply(this, arguments);
