@@ -1702,6 +1702,14 @@ class TelegramBot:
             await self._set_bot_commands()
         except Exception as exc:
             logger.warning("Failed setting slash commands: %s", exc)
+        try:
+            created, failures = await self._ensure_forum_topics_bound()
+            if created:
+                logger.info("telegram.auto_thread_setup created=%s", ",".join(created))
+            if failures:
+                logger.warning("telegram.auto_thread_setup failures=%s", " | ".join(failures))
+        except Exception as exc:
+            logger.warning("telegram.auto_thread_setup failed: %s", exc)
         await self.dp.start_polling(self.bot)
 
     async def stop(self) -> None:
