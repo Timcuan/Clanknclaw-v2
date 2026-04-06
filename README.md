@@ -123,7 +123,24 @@ Optional stealth overrides:
 - `STEALTH_JITTER_MIN_MS`
 - `STEALTH_JITTER_MAX_MS`
 
+Optional Telegram thread overrides (explicit static routing):
+
+- `TELEGRAM_THREAD_REVIEW_ID`
+- `TELEGRAM_THREAD_DEPLOY_ID`
+- `TELEGRAM_THREAD_CLAIM_ID`
+- `TELEGRAM_THREAD_OPS_ID`
+- `TELEGRAM_THREAD_ALERT_ID`
+
 ## Telegram operations
+
+Pairing and forum thread provisioning:
+
+- `/pair` binds authorized chat to the current chat (persisted in `runtime_settings` as `telegram.chat_id`)
+- In forum supergroups, `/pair` attempts to auto-create and bind topics:
+  - `cnc-review`, `cnc-deploy`, `cnc-claim`, `cnc-ops`, `cnc-alert`
+- `/autothread` retries topic provisioning and binding when permissions were fixed later
+- On service startup, bot auto-attempts provisioning again for paired forum chats
+- Required Telegram permission for auto-create: bot admin with `Manage Topics`
 
 Runtime controls:
 
@@ -171,3 +188,17 @@ sudo journalctl -u clankandclaw | grep -i "token_dedup"
 ## License
 
 Proprietary. All rights reserved. See [LICENSE](LICENSE).
+
+## Creator
+
+Built by **Timcuan**.
+
+- X: [@timcuan_id](https://x.com/timcuan_id)
+
+## Support the author
+
+If this project helps you, you can support ongoing development:
+
+- Buy Me a Coffee: [buymeacoffee.com/timcuan_id](https://www.buymeacoffee.com/timcuan_id)
+- Share and credit on X: [@timcuan_id](https://x.com/timcuan_id)
+- Contribute code/docs via pull request (see [CONTRIBUTING.md](CONTRIBUTING.md))

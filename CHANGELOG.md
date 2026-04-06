@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Production testing and monitoring
 
 ### Added
+- Telegram forum pairing and auto-thread provisioning:
+  - `/pair` now persists authorized chat binding (`telegram.chat_id`)
+  - `/autothread` command to retry automatic forum topic creation/binding
+  - automatic startup retry for forum topic provisioning in paired forum supergroups
+  - default topic plan: `cnc-review`, `cnc-deploy`, `cnc-claim`, `cnc-ops`, `cnc-alert`
 - Detector runtime throughput controls:
   - `max_process_concurrency` for X/Farcaster/Gecko workers
   - `max_query_concurrency` for X/Farcaster query fanout

@@ -22,7 +22,8 @@ Use it together with:
 1. **Telegram Bot**
    - Create bot via @BotFather
    - Get bot token
-   - Get chat ID (use @userinfobot)
+   - Get chat ID (use @userinfobot) or pair dynamically with `/pair`
+   - For forum supergroup mode, bot must be admin with `Manage Topics`
 
 2. **Pinata Account**
    - Sign up at https://pinata.cloud
@@ -103,6 +104,16 @@ TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
 PINATA_JWT=...
 BASE_RPC_URL=https://mainnet.base.org
+```
+
+Optional static thread routing (forum topics):
+
+```bash
+TELEGRAM_THREAD_REVIEW_ID=
+TELEGRAM_THREAD_DEPLOY_ID=
+TELEGRAM_THREAD_CLAIM_ID=
+TELEGRAM_THREAD_OPS_ID=
+TELEGRAM_THREAD_ALERT_ID=
 ```
 
 Install Node.js dependencies:
@@ -254,8 +265,30 @@ sudo journalctl -u clankandclaw | grep "X detector"
 sudo journalctl -u clankandclaw | grep "Gecko detector"
 
 # Test Telegram bot
-# Send /start to your bot and check for response
+# Send /pair in target chat, then /start
 ```
+
+### 9. Telegram Pairing And Forum Thread Setup
+
+Recommended production flow:
+
+1. Add bot to target Telegram group/supergroup.
+2. Send `/pair` in the target chat.
+3. If using forum supergroup, bot auto-attempts to create/bind topics:
+   - `cnc-review`, `cnc-deploy`, `cnc-claim`, `cnc-ops`, `cnc-alert`
+4. If topic creation previously failed due to rights, grant `Manage Topics` and run:
+   - `/autothread`
+
+Persistence behavior:
+
+- paired chat stored as `telegram.chat_id`
+- thread bindings stored as:
+  - `telegram.thread.review`
+  - `telegram.thread.deploy`
+  - `telegram.thread.claim`
+  - `telegram.thread.ops`
+  - `telegram.thread.alert`
+- bot retries auto-provision at startup for paired forum chats
 
 ## Monitoring
 
@@ -449,6 +482,15 @@ curl https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
 
 # Check logs for Telegram errors
 sudo journalctl -u clankandclaw | grep -i telegram
+```
+
+```bash
+# Verify forum auto-thread setup outcome (success/failure)
+sudo journalctl -u clankandclaw | grep -i "auto_thread_setup"
+
+# Inspect paired chat + thread bindings
+sqlite3 /opt/clankandclaw/app/clankandclaw.db \
+  "SELECT key, value FROM runtime_settings WHERE key LIKE 'telegram.%' ORDER BY key;"
 ```
 
 ### X Polling Issues

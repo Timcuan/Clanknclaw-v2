@@ -85,9 +85,14 @@ Expected startup signals in logs:
 ## 6. Verify bot path
 
 1. Open Telegram.
-2. Send `/start` to your bot.
-3. Wait for review notifications from incoming signals.
-4. Approve one candidate to trigger deploy flow.
+2. Add bot to target chat/supergroup.
+3. Send `/pair` in the target chat.
+4. If using forum supergroup:
+   - ensure bot is admin and has `Manage Topics`
+   - run `/autothread` (or re-run `/pair`) to auto-create/bind topics
+5. Send `/start` to verify command response.
+6. Wait for review notifications from incoming signals.
+7. Approve one candidate to trigger deploy flow.
 
 ## 7. Fast health checks
 
@@ -121,6 +126,14 @@ cat .env | grep -v "^#"
 ```bash
 curl https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 ```
+
+Checklist:
+
+- bot already paired to your current chat (`/pair`)
+- `TELEGRAM_BOT_TOKEN` valid
+- service running and polling active
+- if forum mode is used: bot has admin permission `Manage Topics`
+- run `/autothread` after changing permissions
 
 ### Deploy path fails
 
