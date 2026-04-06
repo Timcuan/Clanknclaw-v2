@@ -50,6 +50,25 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+_THREAD_CATEGORIES = ("review", "deploy", "claim", "ops", "alert")
+_MAX_CALLBACK_DATA = 64
+
+_DEFAULT_FORUM_TOPIC_TITLES = {
+    "review": "🛰 cnc-review",
+    "deploy": "🧪 cnc-deploy",
+    "claim": "💸 cnc-claim",
+    "ops": "🗺 cnc-ops",
+    "alert": "⚠️ cnc-alert",
+}
+
+
+def resolve_authorized_chat_id(configured_id: str | None, runtime_id: str | None) -> str | None:
+    """Determine the effective chat ID with persistence priority."""
+    if runtime_id:
+        return runtime_id
+    return configured_id
+
+
 
 #
 # Core Bot Manager
