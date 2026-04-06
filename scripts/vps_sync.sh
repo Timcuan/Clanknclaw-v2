@@ -34,11 +34,13 @@ git pull origin main
 # 4. Dependency Update (Safe skip if no change)
 if [ -f "requirements.txt" ]; then
     echo -e "${CYAN}📦 Syncing dependencies...${NC}"
-    # Use venv if present
+    # Use venv or .venv if present
     if [ -d "venv" ]; then
         ./venv/bin/pip install -r requirements.txt --quiet
+    elif [ -d ".venv" ]; then
+        ./.venv/bin/pip install -r requirements.txt --quiet
     else
-        pip install -r requirements.txt --quiet
+        pip install -r requirements.txt --quiet || echo "Warning: pip install failed. Check if venv is missing."
     fi
 fi
 
