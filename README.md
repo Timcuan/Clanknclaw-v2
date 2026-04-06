@@ -1,28 +1,56 @@
-# Clank&Claw MVP
+<p align="center">
+  <img src="assets/branding/logo-primary.svg" alt="ClanknClaw v2" width="860" />
+</p>
 
-Signal-driven token deployment service for Base with operator approval, deterministic routing, and production guardrails.
+<p align="center">
+  <strong>Signal-Driven Token Deployment Engine for Base</strong><br/>
+  Human-approved execution, deterministic routing, and production-grade operational guardrails.
+</p>
 
-## Why this exists
+<p align="center">
+  <img alt="python" src="https://img.shields.io/badge/Python-3.11+-0A1020?style=for-the-badge&logo=python&logoColor=9EFF3A"/>
+  <img alt="runtime" src="https://img.shields.io/badge/Runtime-Async%20Workers-121B34?style=for-the-badge&logo=fastapi&logoColor=1DE6C9"/>
+  <img alt="chain" src="https://img.shields.io/badge/Chain-Base-0A1020?style=for-the-badge&logo=ethereum&logoColor=1DE6C9"/>
+  <img alt="storage" src="https://img.shields.io/badge/Storage-SQLite-121B34?style=for-the-badge&logo=sqlite&logoColor=9EFF3A"/>
+</p>
 
-Clank&Claw is built for teams that need a controlled deployment pipeline, not a one-off bot script:
+---
 
-- Multiple signal sources (X, Farcaster, GeckoTerminal) with normalized ingestion.
-- Deterministic filtering/scoring before anything reaches execution.
-- Human-in-the-loop Telegram approval with runtime operational controls.
-- Safe deploy path with idempotency and dedup guardrails.
+## Overview
+
+`ClanknClaw v2` monitors high-signal deploy intent across social and market feeds, routes candidates through deterministic scoring, requires operator approval over Telegram, and executes deployment through Clanker.
+
+The system is designed for always-on operation: bounded concurrency, timeout-driven workers, idempotent execution checks, and auditable lifecycle persistence.
+
+## Brand identity
+
+<table>
+<tr>
+<td align="center" width="50%">
+<img src="assets/branding/logo-mark.svg" alt="ClanknClaw v2 mark" width="220"/><br/>
+<sub><strong>Logo mark</strong> (avatar/fav/icon)</sub>
+</td>
+<td align="left" width="50%">
+<strong>Design direction</strong><br/>
+- 70% claw silhouette, 30% mechanical core.<br/>
+- Palette: <code>midnight</code> + <code>teal/lime</code> accent.<br/>
+- Represents fast predatory signal capture with engineered execution safety.
+</td>
+</tr>
+</table>
 
 ## Core capabilities
 
 | Area | Capability |
 |---|---|
 | Ingestion | X, Farcaster (Neynar), GeckoTerminal multi-network polling |
-| Anti-block transport | Stealth HTTP layer (UA/header profile rotation + bounded jitter) |
-| Decisioning | Quick filter, score engine, route selection, review queue locking |
+| Stealth transport | Rotating browser-like UA/header profiles + bounded jitter |
+| Decisioning | Filter, scorer, router, and locked review queue |
 | Execution | Clanker deploy adapter via Node bridge (`scripts/clanker_deploy.mjs`) |
-| Operator UX | Telegram review cards, approval actions, ops/runtime commands |
+| Operator plane | Telegram review cards + runtime control commands |
 | Persistence | SQLite lifecycle tracking + retention cleanup + runtime settings |
-| Reliability | Worker loop timeout, candidate timeout, bounded queues, retry-on-lock |
-| Safety | Candidate idempotency, symbol dedup window, SSRF-safe image fetching |
+| Reliability | Loop/candidate/deploy timeouts, bounded queues, retry-on-lock |
+| Safety | Idempotent deploy flow, cross-source symbol dedup, SSRF-safe image fetch |
 
 ## Architecture
 
@@ -40,79 +68,54 @@ flowchart LR
   T --> DB
 ```
 
-## Safety and reliability guardrails
+## Safety guardrails
 
-- Candidate idempotency: deploy worker skips when same `candidate_id` already has `deploy_success`.
-- Cross-source symbol dedup (24h): deploy preparation aborts on already-deployed `suggested_symbol`.
-- Idempotent review insert: `INSERT OR IGNORE` for `review_items`.
-- Gecko pool-state eviction prevents unbounded cooldown-map growth.
-- Deploy path timeout controls:
+- Candidate idempotency: skip deploy if candidate already has `deploy_success`.
+- Cross-source symbol dedup: reject same `suggested_symbol` within rolling 24 hours.
+- Idempotent review insert (`INSERT OR IGNORE`) for callback race safety.
+- Gecko stale state eviction to prevent unbounded memory growth.
+- Explicit deploy timeout controls:
   - `app.deploy_prepare_timeout_seconds`
   - `app.deploy_execute_timeout_seconds`
-
-## Enterprise readiness checklist
-
-- Deterministic decisioning before execution.
-- Human approval gate and auditable lifecycle records.
-- Runtime control plane via Telegram commands.
-- Anti-block transport strategy for upstream API stability.
-- Operational runbook (`DEPLOYMENT.md`) for service lifecycle, observability, and incident checks.
-
-## Requirements
-
-- Python `3.11+`
-- Node.js + npm (for `clanker-sdk` bridge)
-- SQLite 3
-- Telegram bot token and chat ID
-- Pinata JWT
-- Base RPC endpoint
-- Funded deployer signer wallet
 
 ## Quick start
 
 ```bash
-# 1) install
 python3.11 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 npm install
 
-# 2) configure
 cp .env.example .env
-# fill required env vars in .env
+# fill required envs
 
-# 3) run
 python -m clankandclaw.main
 ```
 
-For a step-by-step operator flow, use [QUICKSTART.md](QUICKSTART.md).
-For production setup, use [DEPLOYMENT.md](DEPLOYMENT.md).
+Detailed onboarding: [QUICKSTART.md](QUICKSTART.md)
+Production runbook: [DEPLOYMENT.md](DEPLOYMENT.md)
 
-## Configuration
+## Configuration essentials
 
-Main config is in `config.yaml`.
+Main config: `config.yaml`
 
-### Important sections
+- `app`: runtime limits, timeouts, retention cleanup
+- `x_detector`, `farcaster_detector`, `gecko_detector`: source polling and thresholds
+- `deployment`: deployer + tax/reward behavior
+- `stealth`: anti-block transport behavior
+- `telegram`: thread routing and bot configuration
 
-- `app`: runtime limits, timeouts, retention cleanup.
-- `x_detector`, `farcaster_detector`, `gecko_detector`: source-specific polling and thresholds.
-- `deployment`: deployer and tax settings.
-- `stealth`: anti-detection transport behavior.
-- `telegram`: topic/thread routing and bot integration.
+Required environment variables:
 
-### Required environment variables
+- `DEPLOYER_SIGNER_PRIVATE_KEY`
+- `TOKEN_ADMIN_ADDRESS`
+- `FEE_RECIPIENT_ADDRESS`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `PINATA_JWT`
+- `BASE_RPC_URL` or `ALCHEMY_BASE_RPC_URL`
 
-| Variable | Purpose |
-|---|---|
-| `DEPLOYER_SIGNER_PRIVATE_KEY` | signer private key for deploy tx |
-| `TOKEN_ADMIN_ADDRESS` | token admin role address |
-| `FEE_RECIPIENT_ADDRESS` | reward/fee recipient address |
-| `TELEGRAM_BOT_TOKEN` | bot credential |
-| `TELEGRAM_CHAT_ID` | target chat/group id |
-| `PINATA_JWT` | IPFS upload auth |
-| `BASE_RPC_URL` | Base RPC endpoint |
-
-### Optional stealth overrides
+Optional stealth overrides:
 
 - `STEALTH_ENABLED`
 - `STEALTH_ROTATE_EVERY`
@@ -122,84 +125,48 @@ Main config is in `config.yaml`.
 
 ## Telegram operations
 
-### Runtime controls
+Runtime controls:
 
-- `/control` shows live runtime state
+- `/control`
 - `/setmode <review|auto>`
 - `/setbot <on|off>`
 - `/setdeployer <clanker|bankr|both>`
 
-Note: execution support is currently `clanker` only; `bankr` and `both` are stored but fail safely.
-
-### Wallet controls
+Wallet controls:
 
 - `/wallets`
 - `/setsigner <address|private_key|default>`
 - `/setadmin <address|default>`
 - `/setreward <address|default>`
 
-### Manual deploy commands
+Manual deploy commands:
 
 - `/manualdeploy`
 - `/deploynow <platform> <name> <symbol> <image_or_cid|auto> [description]`
 - `/deployca <platform> <candidate_id>`
 
-## Operations runbook
-
-### Start service
+## Verification and ops
 
 ```bash
-python -m clankandclaw.main
-```
-
-### Critical verifications
-
-```bash
-# full test suite
 pytest -q
 
-# check duplicates/idempotency behavior in logs
+# deployment safety checks
 sudo journalctl -u clankandclaw | grep -i "already has a successful deployment"
 sudo journalctl -u clankandclaw | grep -i "token_dedup"
 ```
-
-### Useful docs
-
-- Production deployment: [DEPLOYMENT.md](DEPLOYMENT.md)
-- Fast setup: [QUICKSTART.md](QUICKSTART.md)
-- Clanker adapter details: [docs/CLANKER_INTEGRATION.md](docs/CLANKER_INTEGRATION.md)
-- Change history: [CHANGELOG.md](CHANGELOG.md)
-
-## Project layout
-
-```text
-clankandclaw/
-  core/            # pipeline, workers, routing, deploy preparation
-  deployers/       # deployer contracts and clanker adapter
-  database/        # sqlite manager and queries
-  telegram/        # bot rendering and actions
-  utils/           # extraction, IPFS, stealth client, parsers
-  models/          # pydantic domain models
-```
-
-## Security posture
-
-- SSRF-safe image fetch flow with private/local address blocking.
-- Strict data validation with Pydantic and structured parsing.
-- Parameterized SQL and foreign keys for persistence integrity.
-- Secrets isolated in `.env` and runtime environment.
-
-## Current scope and limits
-
-- Production-ready path: `clanker` deploy execution.
-- `bankr`/`both` mode is reserved for future deployer rollout.
-- SQLite is default system of record for MVP operations.
 
 ## Repository standards
 
 - Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Security policy: [SECURITY.md](SECURITY.md)
 - Code of conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+
+## Scope limits
+
+- Current production execution path: `clanker`.
+- `bankr`/`both` deploy modes are persisted as runtime config but not yet active for execution.
+- Default data plane remains SQLite for MVP operations.
 
 ## License
 

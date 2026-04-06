@@ -1,0 +1,32 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">ClanknClaw v2 Mark</title>
+  <desc id="desc">A midnight circular emblem with teal-lime claw blades and a mechanical core.</desc>
+  <defs>
+    <linearGradient id="bg" x1="64" y1="64" x2="448" y2="448" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0A1020"/>
+      <stop offset="1" stop-color="#121B34"/>
+    </linearGradient>
+    <linearGradient id="claw" x1="150" y1="104" x2="380" y2="402" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1DE6C9"/>
+      <stop offset="1" stop-color="#9EFF3A"/>
+    </linearGradient>
+  </defs>
+
+  <circle cx="256" cy="256" r="232" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="226" stroke="#27D3C3" stroke-opacity="0.24" stroke-width="2"/>
+
+  <path d="M128 326L172 136L250 228L212 380L128 326Z" fill="url(#claw)"/>
+  <path d="M262 96L338 122L286 258L222 234L262 96Z" fill="url(#claw)"/>
+  <path d="M372 152L396 344L302 366L316 236L372 152Z" fill="url(#claw)"/>
+
+  <g>
+    <circle cx="256" cy="256" r="56" fill="#111A2E" stroke="#8BFFD9" stroke-width="4"/>
+    <circle cx="256" cy="256" r="18" fill="#9EFF3A"/>
+    <path d="M256 186L268 202L256 218L244 202L256 186Z" fill="#1DE6C9"/>
+    <path d="M326 256L310 268L294 256L310 244L326 256Z" fill="#1DE6C9"/>
+    <path d="M256 326L244 310L256 294L268 310L256 326Z" fill="#1DE6C9"/>
+    <path d="M186 256L202 244L218 256L202 268L186 256Z" fill="#1DE6C9"/>
+  </g>
+
+  <path d="M168 404C204 426 228 436 256 436C284 436 310 426 344 404" stroke="#9EFF3A" stroke-opacity="0.8" stroke-width="5" stroke-linecap="round"/>
+</svg>

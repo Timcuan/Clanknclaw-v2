@@ -1,0 +1,39 @@
+<svg width="1200" height="320" viewBox="0 0 1200 320" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">ClanknClaw v2 Primary Logo</title>
+  <desc id="desc">ClanknClaw v2 wordmark with claw emblem in midnight, teal, and lime.</desc>
+  <defs>
+    <linearGradient id="bg" x1="20" y1="20" x2="300" y2="300" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0A1020"/>
+      <stop offset="1" stop-color="#121B34"/>
+    </linearGradient>
+    <linearGradient id="claw" x1="100" y1="40" x2="236" y2="250" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1DE6C9"/>
+      <stop offset="1" stop-color="#9EFF3A"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="320" fill="#070C18"/>
+
+  <g transform="translate(28,28)">
+    <circle cx="132" cy="132" r="124" fill="url(#bg)"/>
+    <circle cx="132" cy="132" r="120" stroke="#27D3C3" stroke-opacity="0.24" stroke-width="2"/>
+
+    <path d="M58 174L82 74L124 124L102 204L58 174Z" fill="url(#claw)"/>
+    <path d="M136 52L178 66L148 140L112 126L136 52Z" fill="url(#claw)"/>
+    <path d="M196 86L210 186L158 198L166 130L196 86Z" fill="url(#claw)"/>
+
+    <circle cx="132" cy="132" r="30" fill="#111A2E" stroke="#8BFFD9" stroke-width="3"/>
+    <circle cx="132" cy="132" r="10" fill="#9EFF3A"/>
+    <path d="M132 96L139 105L132 114L125 105L132 96Z" fill="#1DE6C9"/>
+    <path d="M168 132L159 139L150 132L159 125L168 132Z" fill="#1DE6C9"/>
+    <path d="M132 168L125 159L132 150L139 159L132 168Z" fill="#1DE6C9"/>
+    <path d="M96 132L105 125L114 132L105 139L96 132Z" fill="#1DE6C9"/>
+  </g>
+
+  <g transform="translate(310,72)">
+    <text x="0" y="102" fill="#E8F1FF" font-size="84" font-family="'Trebuchet MS', 'Segoe UI', sans-serif" font-weight="700" letter-spacing="1.5">CLANKNCLAW</text>
+    <text x="705" y="102" fill="#9EFF3A" font-size="84" font-family="'Trebuchet MS', 'Segoe UI', sans-serif" font-weight="800">V2</text>
+    <text x="2" y="152" fill="#7FA3C4" font-size="24" font-family="'Trebuchet MS', 'Segoe UI', sans-serif" font-weight="500" letter-spacing="2">Signal-Driven Deployment Engine</text>
+    <rect x="0" y="176" width="496" height="4" fill="#1DE6C9" fill-opacity="0.75"/>
+  </g>
+</svg>
