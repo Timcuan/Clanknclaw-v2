@@ -3083,7 +3083,7 @@ class TelegramBot:
                 logger.warning("telegram.auto_thread_setup failures=%s", " | ".join(failures))
         except Exception as exc:
             logger.warning("telegram.auto_thread_setup failed: %s", exc)
-        await self.dp.start_polling(self.bot)
+        await self.dp.start_polling(self.bot, handle_signals=False)
 
     async def stop(self) -> None:
         """Stop the bot."""
