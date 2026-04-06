@@ -88,6 +88,7 @@ async def test_send_review_notification_creates_review_item(db):
         source="x",
         context_url=None,
         author_handle=None,
+        metadata={},
     )
 
 
@@ -116,6 +117,7 @@ async def test_send_review_notification_uses_candidate_row_without_extra_default
     assert kwargs["source"] == "x"
     assert kwargs["context_url"] == "https://x.com/bob/status/2"
     assert kwargs["author_handle"] == "bob"
+    assert kwargs["metadata"]["context_url"] == "https://x.com/bob/status/2"
     assert any("telegram.review_notify_ms=" in record.message for record in caplog.records)
 
 

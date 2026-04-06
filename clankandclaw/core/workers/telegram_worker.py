@@ -123,6 +123,7 @@ class TelegramWorker:
             source: str | None = None
             context_url: str | None = None
             author_handle: str | None = None
+            metadata: dict[str, Any] = {}
 
             if row:
                 raw_text = row["raw_text"]
@@ -131,6 +132,7 @@ class TelegramWorker:
                     meta = json.loads(row["metadata_json"] or "{}")
                 except Exception:
                     meta = {}
+                metadata = meta
                 context_url = meta.get("context_url")
                 author_handle = meta.get("author_handle")
 
@@ -143,6 +145,7 @@ class TelegramWorker:
                 source=source,
                 context_url=context_url,
                 author_handle=author_handle,
+                metadata=metadata,
             )
 
             if not message_id:

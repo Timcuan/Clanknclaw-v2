@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - per-candidate processing timeout in detector pipeline
   - bounded pending notification queue to avoid burst-memory pressure
   - deploy preparation/deploy execution timeout guardrails
+- Telegram UX revamp for operator flow:
+  - richer review card with momentum-first context (`chain`, `volume`, `tx`, `liquidity`, `confidence`, `gate`)
+  - standardized message sections across review/deploy/claim outputs
+  - expanded inline actions (`Approve`, `Reject`, `Detail`, `Refresh`, `Queue`, `Deploys`)
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`

@@ -28,6 +28,7 @@ def test_build_review_message_contains_required_fields():
     assert "priority_review" in msg
     assert "85" in msg
     assert "deploy_keyword" in msg
+    assert "Momentum" in msg
 
 
 def test_build_review_message_includes_raw_text():
@@ -66,9 +67,9 @@ def test_build_review_message_includes_author_handle():
 
 def test_build_review_message_omits_optional_fields_when_absent():
     msg = build_review_message("sig-1", "review", 50, [])
-    assert "<b>Signals:</b> —" in msg
+    assert "Signals:</b> —" in msg
     assert "blockquote" not in msg
-    assert "<b>Author:</b>" not in msg
+    assert "Author:</b>" not in msg
 
 
 def test_build_review_message_priority_emojis():
@@ -92,7 +93,8 @@ def test_build_queue_message_compact_list():
         },
     ]
     msg = build_queue_message(rows)
-    assert "Pending Queue (2)" in msg
+    assert "Pending Queue" in msg
+    assert "Total: <b>2</b>" in msg
     assert "x-1" in msg
     assert "88" in msg
     assert "deploy_keyword" in msg
@@ -167,7 +169,8 @@ def test_build_deploys_message_compact_success_and_failure():
         },
     ]
     msg = build_deploys_message(rows)
-    assert "Recent Deployments (2)" in msg
+    assert "Recent Deployments" in msg
+    assert "Total: <b>2</b>" in msg
     assert "x-1" in msg
     assert "0x" + "a" * 40 in msg
     assert "0x" + "b" * 64 in msg
@@ -200,9 +203,11 @@ def test_build_deploys_message_empty():
 @pytest.mark.skipif(not AIOGRAM_AVAILABLE, reason="aiogram not installed")
 def test_build_review_keyboard_has_approve_and_reject():
     keyboard = build_review_keyboard("sig-1")
-    assert len(keyboard.inline_keyboard) == 1
-    row = keyboard.inline_keyboard[0]
-    assert len(row) == 2
-    cb_data = {btn.callback_data for btn in row}
+    assert len(keyboard.inline_keyboard) == 3
+    cb_data = {btn.callback_data for row in keyboard.inline_keyboard for btn in row}
     assert "approve:sig-1" in cb_data
     assert "reject:sig-1" in cb_data
+    assert "detail:sig-1" in cb_data
+    assert "refresh:sig-1" in cb_data
+    assert "queue" in cb_data
+    assert "deploys" in cb_data

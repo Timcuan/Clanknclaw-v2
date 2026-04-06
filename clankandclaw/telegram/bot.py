@@ -1,5 +1,6 @@
 """Telegram bot for approval flow."""
 
+import html
 import logging
 import os
 from typing import TYPE_CHECKING, Any
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 _MAX_RAW_TEXT = 300  # chars shown in review message
 _MAX_QUEUE_ITEMS = 10
 _MAX_ERROR_TEXT = 80
+_MAX_REASONS = 6
 
 
 def _source_label(source: str | None) -> str:
@@ -37,6 +39,36 @@ def _source_label(source: str | None) -> str:
         "gecko": "GeckoTerminal",
         "gmgn": "GMGN",
     }.get(source or "", source or "unknown")
+
+
+def _fmt_text(value: Any, *, fallback: str = "n/a") -> str:
+    if value is None:
+        return fallback
+    text = str(value).strip()
+    return html.escape(text) if text else fallback
+
+
+def _fmt_inline_code(value: Any, *, fallback: str = "n/a") -> str:
+    if value is None:
+        return fallback
+    text = str(value).strip()
+    return f"<code>{html.escape(text)}</code>" if text else fallback
+
+
+def _fmt_num(value: Any, *, digits: int = 0, fallback: str = "n/a") -> str:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if digits <= 0:
+        return f"{int(num):,}"
+    return f"{num:,.{digits}f}"
+
+
+def _shorten_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "…"
 
 
 def build_review_message(
@@ -49,33 +81,65 @@ def build_review_message(
     source: str | None = None,
     context_url: str | None = None,
     author_handle: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Build a review message for Telegram."""
-    reasons = ", ".join(reason_codes) if reason_codes else "—"
+    metadata = metadata or {}
+    reason_view = reason_codes[:_MAX_REASONS]
+    reasons = ", ".join(reason_view) if reason_view else "—"
+    if len(reason_codes) > _MAX_REASONS:
+        reasons += f" (+{len(reason_codes) - _MAX_REASONS})"
     priority_emoji = "🔥" if review_priority == "priority_review" else "📋"
     source_label = _source_label(source)
+    network = _fmt_text(metadata.get("network"), fallback="unknown")
+    confidence_tier = _fmt_text(metadata.get("confidence_tier"), fallback="n/a")
+    gate_stage = _fmt_text(metadata.get("gate_stage"), fallback="n/a")
+    liquidity_usd = _fmt_num(metadata.get("liquidity_usd"), digits=2, fallback="0.00")
+    volume = metadata.get("volume") or {}
+    tx_data = metadata.get("transactions") or {}
+    volume_m1 = _fmt_num(volume.get("m1"), digits=2, fallback="0.00")
+    volume_m5 = _fmt_num(volume.get("m5"), digits=2, fallback="0.00")
+    volume_m15 = _fmt_num(volume.get("m15"), digits=2, fallback="0.00")
+    tx_m1 = _fmt_num(tx_data.get("m1"), fallback="0")
+    tx_m5 = _fmt_num(tx_data.get("m5"), fallback="0")
+    contracts = [*list(metadata.get("evm_contracts") or []), *list(metadata.get("sol_contracts") or [])]
+    contracts = [str(item) for item in contracts if str(item).strip()]
+    contract_hint = ", ".join(_fmt_inline_code(item) for item in contracts[:2]) if contracts else "n/a"
+    if len(contracts) > 2:
+        contract_hint += f" (+{len(contracts) - 2})"
 
     lines = [
-        f"{priority_emoji} <b>New Token Candidate</b>",
+        f"{priority_emoji} <b>Review Candidate</b>",
         "",
-        f"<b>ID:</b> <code>{candidate_id}</code>",
+        "<b>Overview</b>",
+        f"• <b>ID:</b> {_fmt_inline_code(candidate_id)}",
         f"<b>Source:</b> {source_label}",
-        f"<b>Priority:</b> {review_priority}",
-        f"<b>Score:</b> {score}",
-        f"<b>Signals:</b> {reasons}",
+        f"• <b>Priority:</b> {_fmt_text(review_priority)}",
+        f"• <b>Score:</b> {_fmt_num(score)}",
+        "",
+        "<b>Momentum</b>",
+        f"• <b>Chain:</b> {network}",
+        f"• <b>Confidence:</b> {confidence_tier}",
+        f"• <b>Gate:</b> {gate_stage}",
+        f"• <b>Volume:</b> m1 ${volume_m1} | m5 ${volume_m5} | m15 ${volume_m15}",
+        f"• <b>Tx:</b> m1 {tx_m1} | m5 {tx_m5}",
+        f"• <b>Liquidity:</b> ${liquidity_usd}",
+        "",
+        "<b>Risk / Signals</b>",
+        f"• <b>Contract hints:</b> {contract_hint}",
+        f"• <b>Signals:</b> {_fmt_text(reasons, fallback='—')}",
     ]
 
     if author_handle:
-        lines.append(f"<b>Author:</b> @{author_handle}")
+        lines.append(f"• <b>Author:</b> @{_fmt_text(author_handle, fallback='unknown')}")
 
     if context_url:
-        lines.append(f'<b>Link:</b> <a href="{context_url}">View original</a>')
+        safe_url = html.escape(context_url, quote=True)
+        lines.append(f'• <b>Link:</b> <a href="{safe_url}">Open source</a>')
 
     if raw_text:
-        trimmed = raw_text[:_MAX_RAW_TEXT]
-        if len(raw_text) > _MAX_RAW_TEXT:
-            trimmed += "…"
-        lines += ["", f"<blockquote>{trimmed}</blockquote>"]
+        trimmed = _shorten_text(raw_text, _MAX_RAW_TEXT)
+        lines += ["", "<b>Context Excerpt</b>", f"<blockquote>{_fmt_text(trimmed)}</blockquote>"]
 
     return "\n".join(lines)
 
@@ -85,13 +149,13 @@ def build_queue_message(rows: list[Any]) -> str:
     if not rows:
         return "📭 No pending reviews."
 
-    lines = [f"📋 <b>Pending Queue ({len(rows)})</b>", ""]
+    lines = [f"📋 <b>Pending Queue</b>", f"Total: <b>{len(rows)}</b>", ""]
     for row in rows[:_MAX_QUEUE_ITEMS]:
         score = row["score"] if row["score"] is not None else "?"
         reasons = row["reason_codes"] or "—"
         lines.append(
-            f"• <code>{row['candidate_id']}</code> — score {score} ({_source_label(row['source'])})\n"
-            f"  signals: {reasons}"
+            f"• {_fmt_inline_code(row['candidate_id'])} | {_source_label(row['source'])} | score {_fmt_text(score)}\n"
+            f"  signals: {_fmt_text(_shorten_text(str(reasons), 120), fallback='—')}"
         )
     if len(rows) > _MAX_QUEUE_ITEMS:
         lines.append(f"\n…and {len(rows) - _MAX_QUEUE_ITEMS} more")
@@ -115,10 +179,11 @@ def build_candidate_detail_message(
     lines = [
         "🔎 <b>Candidate Detail</b>",
         "",
-        f"<b>ID:</b> <code>{candidate['id']}</code>",
-        f"<b>Source:</b> {_source_label(candidate['source'])}",
-        f"<b>Author:</b> @{meta.get('author_handle')}" if meta.get("author_handle") else "<b>Author:</b> n/a",
-        f"<b>Link:</b> <a href=\"{meta['context_url']}\">View original</a>" if meta.get("context_url") else "<b>Link:</b> n/a",
+        "<b>Overview</b>",
+        f"• <b>ID:</b> {_fmt_inline_code(candidate['id'])}",
+        f"• <b>Source:</b> {_source_label(candidate['source'])}",
+        f"• <b>Author:</b> @{_fmt_text(meta.get('author_handle'))}" if meta.get("author_handle") else "• <b>Author:</b> n/a",
+        f"• <b>Link:</b> <a href=\"{html.escape(meta['context_url'], quote=True)}\">Open source</a>" if meta.get("context_url") else "• <b>Link:</b> n/a",
     ]
 
     if decision:
@@ -166,14 +231,14 @@ def build_deploys_message(rows: list[Any]) -> str:
     if not rows:
         return "📭 No deployments yet."
 
-    lines = [f"🚀 <b>Recent Deployments ({len(rows)})</b>", ""]
+    lines = [f"🚀 <b>Recent Deployments</b>", f"Total: <b>{len(rows)}</b>", ""]
     for row in rows:
         if row["status"] == "deploy_success":
             contract = row["contract_address"] or "n/a"
             tx = row["tx_hash"] or "n/a"
             lines.append(
-                f"✅ <code>{row['candidate_id']}</code> | "
-                f"<code>{contract}</code> | <code>{tx}</code>"
+                f"✅ {_fmt_inline_code(row['candidate_id'])} | "
+                f"{_fmt_inline_code(contract)} | {_fmt_inline_code(tx)}"
             )
             continue
 
@@ -183,14 +248,14 @@ def build_deploys_message(rows: list[Any]) -> str:
             error_message = error_message[:_MAX_ERROR_TEXT] + "…"
         lines.append(
             f"❌ <code>{row['candidate_id']}</code> | {error_code}"
-            + (f" | {error_message}" if error_message else "")
+            + (f" | {_fmt_text(error_message)}" if error_message else "")
         )
 
     return "\n".join(lines)
 
 
 def build_review_keyboard(candidate_id: str) -> Any:
-    """Build inline keyboard for approve/reject."""
+    """Build inline keyboard for operator actions."""
     if not AIOGRAM_AVAILABLE:
         raise ImportError("aiogram is required for keyboard building")
 
@@ -199,7 +264,15 @@ def build_review_keyboard(candidate_id: str) -> Any:
             [
                 InlineKeyboardButton(text="✅ Approve", callback_data=f"approve:{candidate_id}"),
                 InlineKeyboardButton(text="❌ Reject", callback_data=f"reject:{candidate_id}"),
-            ]
+            ],
+            [
+                InlineKeyboardButton(text="🔎 Detail", callback_data=f"detail:{candidate_id}"),
+                InlineKeyboardButton(text="🔄 Refresh", callback_data=f"refresh:{candidate_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="📋 Queue", callback_data="queue"),
+                InlineKeyboardButton(text="🚀 Deploys", callback_data="deploys"),
+            ],
         ]
     )
 
@@ -250,6 +323,10 @@ class TelegramBot:
         self.dp.message.register(self._handle_cancel, Command("cancel"))
         self.dp.callback_query.register(self._handle_approve, F.data.startswith("approve:"))
         self.dp.callback_query.register(self._handle_reject, F.data.startswith("reject:"))
+        self.dp.callback_query.register(self._handle_detail, F.data.startswith("detail:"))
+        self.dp.callback_query.register(self._handle_refresh, F.data.startswith("refresh:"))
+        self.dp.callback_query.register(self._handle_quick_queue, F.data == "queue")
+        self.dp.callback_query.register(self._handle_quick_deploys, F.data == "deploys")
 
     def _is_authorized_chat(self, chat_id: Any) -> bool:
         return str(chat_id) == str(self.chat_id)
@@ -352,18 +429,9 @@ class TelegramBot:
             return
         candidate_id = parts[1].strip()
         try:
-            candidate = self._db.get_candidate(candidate_id)
-            if not candidate:
-                await message.answer(
-                    f"📭 Candidate <code>{candidate_id}</code> not found.",
-                    parse_mode="HTML",
-                )
-                return
-            decision = self._db.get_candidate_decision(candidate_id)
-            review_item = self._db.get_review_item(f"review-{candidate_id}")
-            deployment = self._db.get_latest_deployment_for_candidate(candidate_id)
+            detail_message = await self._render_candidate_detail(candidate_id)
             await message.answer(
-                build_candidate_detail_message(candidate, decision, review_item, deployment),
+                detail_message,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
@@ -426,18 +494,22 @@ class TelegramBot:
         try:
             result = await self.on_claim_fees(token_address)
             if result.status == "claim_success":
-                tx_line = f"\n<b>TX:</b> <code>{result.tx_hash}</code>" if result.tx_hash else ""
+                tx_line = f"\n• <b>TX:</b> {_fmt_inline_code(result.tx_hash)}" if result.tx_hash else ""
                 await message.answer(
-                    "💸 <b>Claim Success</b>\n\n"
-                    f"<b>Token:</b> <code>{token_address}</code>{tx_line}",
+                    "💸 <b>Claim Result</b>\n\n"
+                    "<b>Status</b>\n"
+                    "• <b>Outcome:</b> success\n"
+                    f"• <b>Token:</b> {_fmt_inline_code(token_address)}{tx_line}",
                     parse_mode="HTML",
                 )
             else:
                 await message.answer(
-                    "❌ <b>Claim Failed</b>\n\n"
-                    f"<b>Token:</b> <code>{token_address}</code>\n"
-                    f"<b>Error:</b> {result.error_code or 'unknown'}\n"
-                    f"<b>Message:</b> {result.error_message or 'unknown'}",
+                    "💸 <b>Claim Result</b>\n\n"
+                    "<b>Status</b>\n"
+                    "• <b>Outcome:</b> failed\n"
+                    f"• <b>Token:</b> {_fmt_inline_code(token_address)}\n"
+                    f"• <b>Error:</b> {_fmt_text(result.error_code or 'unknown')}\n"
+                    f"• <b>Message:</b> {_fmt_text(result.error_message or 'unknown')}",
                     parse_mode="HTML",
                 )
         except Exception as exc:
@@ -517,6 +589,107 @@ class TelegramBot:
 
         await callback.answer("Rejected")
 
+    async def _render_candidate_detail(self, candidate_id: str) -> str:
+        if not self._db:
+            return "ℹ️ Database not available."
+        candidate = self._db.get_candidate(candidate_id)
+        if not candidate:
+            return f"📭 Candidate {_fmt_inline_code(candidate_id)} not found."
+        decision = self._db.get_candidate_decision(candidate_id)
+        review_item = self._db.get_review_item(f"review-{candidate_id}")
+        deployment = self._db.get_latest_deployment_for_candidate(candidate_id)
+        return build_candidate_detail_message(candidate, decision, review_item, deployment)
+
+    async def _handle_detail(self, callback: CallbackQuery) -> None:
+        if not callback.data:
+            return
+        if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+        candidate_id = callback.data.split(":", 1)[1]
+        try:
+            text = await self._render_candidate_detail(candidate_id)
+            await callback.message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+            await callback.answer("Detail sent")
+        except Exception as exc:
+            logger.error("Error handling detail callback: %s", exc, exc_info=True)
+            await callback.answer("Detail failed", show_alert=True)
+
+    async def _handle_refresh(self, callback: CallbackQuery) -> None:
+        if not callback.data:
+            return
+        if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+        candidate_id = callback.data.split(":", 1)[1]
+        if not self._db:
+            await callback.answer("Database unavailable", show_alert=True)
+            return
+        try:
+            candidate = self._db.get_candidate(candidate_id)
+            if not candidate:
+                await callback.answer("Candidate not found", show_alert=True)
+                return
+            decision = self._db.get_candidate_decision(candidate_id)
+            if not decision:
+                await callback.answer("Decision not ready", show_alert=True)
+                return
+            try:
+                meta = json.loads(candidate["metadata_json"] or "{}")
+            except Exception:
+                meta = {}
+            updated = build_review_message(
+                candidate_id,
+                "priority_review" if str(decision["decision"]) == "priority_review" else "review",
+                int(decision["score"] or 0),
+                str(decision["reason_codes"] or "").split(",") if decision["reason_codes"] else [],
+                raw_text=candidate["raw_text"],
+                source=candidate["source"],
+                context_url=meta.get("context_url"),
+                author_handle=meta.get("author_handle"),
+                metadata=meta,
+            )
+            await callback.message.edit_text(
+                updated,
+                parse_mode="HTML",
+                reply_markup=build_review_keyboard(candidate_id),
+                disable_web_page_preview=True,
+            )
+            await callback.answer("Refreshed")
+        except Exception as exc:
+            logger.error("Error refreshing review card: %s", exc, exc_info=True)
+            await callback.answer("Refresh failed", show_alert=True)
+
+    async def _handle_quick_queue(self, callback: CallbackQuery) -> None:
+        if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+        if not self._db:
+            await callback.answer("Database unavailable", show_alert=True)
+            return
+        try:
+            rows = self._db.list_pending_reviews()
+            await callback.message.answer(build_queue_message(rows), parse_mode="HTML")
+            await callback.answer("Queue sent")
+        except Exception as exc:
+            logger.error("Error handling quick queue callback: %s", exc, exc_info=True)
+            await callback.answer("Queue failed", show_alert=True)
+
+    async def _handle_quick_deploys(self, callback: CallbackQuery) -> None:
+        if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+        if not self._db:
+            await callback.answer("Database unavailable", show_alert=True)
+            return
+        try:
+            rows = self._db.list_recent_deployments(limit=10)
+            await callback.message.answer(build_deploys_message(rows), parse_mode="HTML")
+            await callback.answer("Deploys sent")
+        except Exception as exc:
+            logger.error("Error handling quick deploys callback: %s", exc, exc_info=True)
+            await callback.answer("Deploys failed", show_alert=True)
+
     # ── notification helpers ──────────────────────────────────────────────────
 
     async def send_review_notification(
@@ -530,6 +703,7 @@ class TelegramBot:
         source: str | None = None,
         context_url: str | None = None,
         author_handle: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> int | None:
         """Send a review notification to Telegram. Returns message_id or None."""
         try:
@@ -542,6 +716,7 @@ class TelegramBot:
                 source=source,
                 context_url=context_url,
                 author_handle=author_handle,
+                metadata=metadata,
             )
             keyboard = build_review_keyboard(candidate_id)
 
@@ -566,9 +741,11 @@ class TelegramBot:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=(
-                    f"⚙️ <b>Preparing Deploy</b>\n\n"
-                    f"<b>Candidate:</b> <code>{candidate_id}</code>\n"
-                    f"Fetching image, uploading to IPFS…"
+                    "⚙️ <b>Deploy Pipeline</b>\n\n"
+                    "<b>Status</b>\n"
+                    "• <b>Step:</b> preparing\n"
+                    f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}\n"
+                    "• <b>Action:</b> fetch image + upload IPFS"
                 ),
                 parse_mode="HTML",
             )
@@ -586,10 +763,12 @@ class TelegramBot:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=(
-                    f"🎉 <b>Deploy Success</b>\n\n"
-                    f"<b>Candidate:</b> <code>{candidate_id}</code>\n"
-                    f"<b>Contract:</b> <code>{contract_address}</code>\n"
-                    f"<b>TX:</b> <code>{tx_hash}</code>"
+                    "🎉 <b>Deploy Result</b>\n\n"
+                    "<b>Status</b>\n"
+                    "• <b>Outcome:</b> success\n"
+                    f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}\n"
+                    f"• <b>Contract:</b> {_fmt_inline_code(contract_address)}\n"
+                    f"• <b>TX:</b> {_fmt_inline_code(tx_hash)}"
                 ),
                 parse_mode="HTML",
             )
@@ -608,10 +787,12 @@ class TelegramBot:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=(
-                    f"❌ <b>Deploy Failed</b>\n\n"
-                    f"<b>Candidate:</b> <code>{candidate_id}</code>\n"
-                    f"<b>Error:</b> {error_code}\n"
-                    f"<b>Message:</b> {error_message}"
+                    "❌ <b>Deploy Result</b>\n\n"
+                    "<b>Status</b>\n"
+                    "• <b>Outcome:</b> failed\n"
+                    f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}\n"
+                    f"• <b>Error:</b> {_fmt_text(error_code)}\n"
+                    f"• <b>Message:</b> {_fmt_text(error_message)}"
                 ),
                 parse_mode="HTML",
             )
