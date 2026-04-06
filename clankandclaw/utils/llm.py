@@ -44,6 +44,11 @@ class CircuitBreaker:
         with self._lock:
             self.failures = 0
 
+    def reset(self):
+        with self._lock:
+            self.failures = 0
+            self.last_failure_time = 0.0
+
     def is_available(self) -> bool:
         with self._lock:
             if self.failures < self.failure_threshold:
@@ -58,52 +63,83 @@ class CircuitBreaker:
 gemini_breaker = CircuitBreaker()
 
 
-async def extract_token_identity_with_llm(text: str) -> TokenIdentity:
-    """Tiered extraction: Flash -> Pro -> Heuristic fallback."""
+async def _call_gemini_api(prompt: str, json_mode: bool = True) -> str:
+    """Unified, resilient, and multi-tier Gemini calling engine."""
     if not gemini_breaker.is_available():
-         return await _extract_heuristic(text)
+         return ""
          
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        return await _extract_heuristic(text)
+        return ""
 
-    prompt = f"Extract 'name' and 'symbol' (ticker) from this text. Return JSON only: {text}"
+    # Tiered execution strategy (Lite -> Flash -> Pro)
+    # v1beta is used as it supports the latest 3.x preview models identified on VPS ListModels
+    tiers = [
+        "models/gemini-3.1-flash-lite-preview",
+        "models/gemini-3-flash-preview",
+        "models/gemini-3.1-pro-preview"
+    ]
     
-    for model in ["gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"]:
+    for model_path in tiers:
         try:
             await gemini_limiter.wait()
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}]
-            }
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            # Note: models/ prefix is included in the ListModels name and required for the URL
+            url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={api_key}"
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(url, json=payload)
-                if resp.status_code == 429: continue
+                
+                if resp.status_code == 429: # Rate Limit
+                     logger.warning(f"Gemini {model_path} Rate Limited (429). Trying next tier...")
+                     continue
+                if resp.status_code == 403: # API Key Restricted
+                     logger.error(f"Gemini {model_path} FORBIDDEN (403). CHECK API KEY.")
+                     gemini_breaker.record_failure()
+                     return ""
+                if resp.status_code == 503: # Overloaded
+                     logger.warning(f"Gemini {model_path} Overloaded (503). Trying next tier...")
+                     continue
+                if resp.status_code == 400: # Bad Request
+                     logger.error(f"Gemini {model_path} 400 BAD REQUEST: {resp.text}")
+                     continue
+                     
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["candidates"][0]["content"]["parts"][0]["text"]
+                
                 gemini_breaker.record_success()
-                obj = json.loads(content)
-                return _clean_best_effort(obj.get("name", "Unknown"))[:50], _clean_best_effort(obj.get("symbol", "TKN"))[:10]
-        except Exception:
+                return content
+                
+        except Exception as exc:
+            logger.warning(f"Gemini call to {model_path} failed: {exc}")
             continue
-            
+
     gemini_breaker.record_failure()
-    return await _extract_heuristic(text)
+    return ""
+
+
+async def extract_token_identity_with_llm(text: str) -> TokenIdentity:
+    """Tiered extraction: Gemini 3.x -> Heuristic fallback."""
+    prompt = f"Extract 'name' and 'symbol' (ticker) from this text. Return JSON only: {text}"
+    content = await _call_gemini_api(prompt)
+    
+    if not content:
+        return await _extract_heuristic(text)
+        
+    try:
+        # Robust JSON cleaning
+        json_match = re.search(r"({.*})", content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+        obj = json.loads(content)
+        return _clean_best_effort(obj.get("name", "Unknown"))[:50], _clean_best_effort(obj.get("symbol", "TKN"))[:10]
+    except Exception:
+        return await _extract_heuristic(text)
 
 
 async def enrich_signal_with_llm(text: str) -> dict[str, Any]:
-    """
-    Unified call for maximum efficiency with multi-tier fallback.
-    Tiers: Flash -> Pro -> Heuristic.
-    """
-    if not gemini_breaker.is_available():
-         return {}
-         
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key or api_key.startswith("YOUR_"):
-        return {}
-        
+    """Unified call for maximum efficiency."""
     prompt = f"""
     Analyze this social media post and return a JSON object with the following fields:
     - name: The official token name (null if not found).
@@ -115,53 +151,27 @@ async def enrich_signal_with_llm(text: str) -> dict[str, Any]:
 
     Text: {text}
     """
+    content = await _call_gemini_api(prompt)
+    if not content: return {}
     
-    # Tiered execution strategy
-    for model in ["gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"]:
-        try:
-            await gemini_limiter.wait()
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}]
-            }
-            
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 429: # Rate Limit
-                     logger.warning(f"Gemini {model} Rate Limited (429). Trying next tier...")
-                     continue
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["candidates"][0]["content"]["parts"][0]["text"]
-                
-                gemini_breaker.record_success()
-                result = json.loads(content)
-                result["ai_model"] = model
-                return result
-                
-        except Exception as exc:
-            logger.warning(f"Gemini {model} failed: {exc}")
-            continue
-
-    # Final logic: record a failure and let the caller potentially use heuristics
-    gemini_breaker.record_failure()
-    return {}
+    try:
+        json_match = re.search(r"({.*})", content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+        return json.loads(content)
+    except Exception:
+        return {}
 
 
 async def _extract_heuristic(text: str) -> TokenIdentity:
-    """
-    Robust Heuristic Fallback Engine (Non-LLM).
-    Used if standard regex fails or LLM is unavailable.
-    """
+    """Robust Heuristic Fallback Engine (Non-LLM)."""
     words = text.split()
     if not words:
         return "Unknown", "TKN"
         
-    # Heuristic 1: Look for ALL-CAPS words of length 3-8 (Ticker candidates)
     tickers = [w.strip("$!?,.") for w in words if w.isupper() and 3 <= len(w.strip("$!?,.")) <= 8]
     symbol = tickers[-1] if tickers else "TKN"
     
-    # Heuristic 2: Look for the first 2-3 words that look like a Name
     ignore = {"deploy", "launch", "make", "create", "token", "contract", "ticker", "symbol"}
     name_parts = []
     for w in words:
@@ -199,7 +209,7 @@ def _run_awaitable(awaitable: Awaitable[TokenIdentity]) -> TokenIdentity:
     def runner() -> None:
         try:
             result["value"] = asyncio.run(awaitable)
-        except BaseException as exc:  # pragma: no cover - passthrough path
+        except BaseException as exc:
             error["value"] = exc
 
     thread = threading.Thread(target=runner, daemon=True)
@@ -212,14 +222,7 @@ def _run_awaitable(awaitable: Awaitable[TokenIdentity]) -> TokenIdentity:
 
 
 async def suggest_token_metadata(theme: str) -> list[dict[str, str]]:
-    """Suggest creative and themed name/ticker pairs with fallback resilience."""
-    if not gemini_breaker.is_available():
-         return []
-         
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return []
-
+    """Suggest creative and themed name/ticker pairs."""
     prompt = f"""
     Suggest 4 creative, trending, and organic-looking meme token ideas for the Base Network.
     Theme/Prompt: '{theme}'
@@ -233,72 +236,28 @@ async def suggest_token_metadata(theme: str) -> list[dict[str, str]]:
     
     Return ONLY a JSON array of objects with 'name' and 'symbol' keys.
     """
+    content = await _call_gemini_api(prompt)
+    if not content: return []
     
-    for model in ["gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"]:
-        try:
-            await gemini_limiter.wait()
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}]
-            }
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 403:
-                     logger.error(f"Gemini {model} FORBIDDEN (403). CHECK API KEY.")
-                     gemini_breaker.record_failure()
-                     return []
-                if resp.status_code == 400:
-                     err_body = resp.text
-                     logger.error(f"Gemini {model} 400 BAD REQUEST: {err_body}")
-                     continue
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["candidates"][0]["content"]["parts"][0]["text"]
-                # Robust JSON cleaning (remove markdown etc)
-                json_match = re.search(r"(\[.*\])", content, re.DOTALL)
-                if json_match:
-                    content = json_match.group(1)
-                
-                gemini_breaker.record_success()
-                return json.loads(content)
-        except Exception as exc:
-            logger.warning(f"AI Metadata Suggestion failed on {model}: {exc}")
-            continue
-            
-    gemini_breaker.record_failure()
-    return []
+    try:
+        json_match = re.search(r"(\[.*\])", content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+        return json.loads(content)
+    except Exception:
+        return []
 
 
 async def suggest_token_description(name: str, symbol: str, theme: str = "") -> str:
-    """Generate a professional description with tiered fallback resilience."""
-    if not gemini_breaker.is_available():
-         return ""
-         
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key: return ""
-
+    """Generate a professional description."""
     prompt = f"""
     Write a short, viral-ready, and professional meme token description for {symbol} ({name}).
     Context: {theme}
     Tone: Degen-friendly, high-conviction, Base network 'moon mission' vibe.
     Constraint: Plain text, 150-250 characters, NO hashtags.
     """
+    content = await _call_gemini_api(prompt)
+    if not content:
+        return f"🚀 {name} (${symbol}) - A community-driven token launching on the Base network. Clank and Claw verified. Join the movement!"
     
-    for model in ["gemini-1.5-flash-latest", "gemini-1.5-flash-8b"]:
-        try:
-            await gemini_limiter.wait()
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 429: continue
-                resp.raise_for_status()
-                data = resp.json()
-                text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                gemini_breaker.record_success()
-                return text.replace("```", "").strip(' "')
-        except Exception:
-            continue
-            
-    gemini_breaker.record_failure()
-    return f"🚀 {name} (${symbol}) - A community-driven token launching on the Base network. Clank and Claw verified. Join the movement!"
+    return content.replace("```", "").strip(' "')

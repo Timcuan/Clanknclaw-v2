@@ -19,22 +19,34 @@ async def test_gemini():
 
     print(f"📡 Testing Gemini with key starting with: {api_key[:10]}...")
     
-    model = "gemini-3.1-flash-lite-preview"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    payload = {
-        "contents": [{"parts": [{"text": "Suggest 1 creative token name and symbol. Return ONLY JSON: {\"name\": \"...\", \"symbol\": \"...\"}"}]}]
-    }
+    # 3-tier strategy mirrors llm.py v0.8.2 logic
+    tiers = [
+        "models/gemini-3.1-flash-lite-preview",
+        "models/gemini-3-flash-preview",
+        "models/gemini-3.1-pro-preview"
+    ]
+    
+    for model_path in tiers:
+        print(f"🔄 Trying model: {model_path}...")
+        # URL construction matches llm.py
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={api_key}"
+        payload = {
+            "contents": [{"parts": [{"text": "Suggest 1 creative token name and symbol. Return ONLY JSON: {\"name\": \"...\", \"symbol\": \"...\"}"}]}]
+        }
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, json=payload)
-            print(f"📊 Status Code: {resp.status_code}")
-            if resp.status_code != 200:
-                print(f"❌ Error Body: {resp.text}")
-            else:
-                print(f"✅ Success: {resp.json()}")
-    except Exception as e:
-        print(f"💥 Exception: {e}")
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, json=payload)
+                print(f"📊 Status Code: {resp.status_code}")
+                if resp.status_code == 200:
+                    print(f"✅ Success: {resp.json()}")
+                    return
+                else:
+                    print(f"❌ Error Body: {resp.text}")
+        except Exception as e:
+            print(f"💥 Exception: {e}")
+            
+    print("💀 ALL TIERS FAILED.")
 
 if __name__ == "__main__":
     asyncio.run(test_gemini())
