@@ -325,6 +325,13 @@ class DeployPreparation:
                 candidate.id,
             )
 
+            # Cross-source token dedup: abort if another source already deployed the same symbol.
+            normalized_symbol = _normalize_token_symbol(token_symbol)
+            if self.db.has_recent_successful_deployment_by_symbol(normalized_symbol):
+                raise DeployPreparationError(
+                    f"token_dedup: {normalized_symbol} was recently deployed from another source, skipping"
+                )
+
             image_started = perf_counter()
             image_uri = await self._prepare_image(candidate, token_name, token_symbol)
             logger.info(

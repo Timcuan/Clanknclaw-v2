@@ -80,11 +80,12 @@ def test_quick_filter_gecko_base_requires_target_source_match():
         observed_at="2026-04-04T00:00:00Z",
         raw_text="hot pool",
         fingerprint="fp-g-1",
-        metadata={"network": "base", "hot_score": 5, "source_match_score": 0},
+        # _evaluate_pool always sets gate_stage="stage3_failed" when base source doesn't match.
+        metadata={"network": "base", "hot_score": 5, "source_match_score": 0, "gate_stage": "stage3_failed"},
     )
     decision = quick_filter(candidate)
     assert decision.allowed is False
-    assert "gecko_base_source_not_target" in decision.reason_codes
+    assert "stage3_failed" in decision.reason_codes
 
 
 def test_quick_filter_gecko_base_allows_when_target_source_matches():

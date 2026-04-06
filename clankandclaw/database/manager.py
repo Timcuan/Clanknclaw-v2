@@ -471,10 +471,27 @@ class DatabaseManager:
         def _op():
             with self._connect() as conn:
                 conn.execute(
-                    "INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at, telegram_message_id) VALUES (?, ?, 'pending', ?, ?, NULL, NULL, NULL)",
+                    "INSERT OR IGNORE INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at, telegram_message_id) VALUES (?, ?, 'pending', ?, ?, NULL, NULL, NULL)",
                     (review_id, candidate_id, _utc_now_iso(), expires_at),
                 )
         self._with_retry(_op)
+
+    def has_recent_successful_deployment_by_symbol(self, token_symbol: str, hours: int = 24) -> bool:
+        """Return True if any candidate with the same symbol was successfully deployed within the last N hours."""
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT dr.id FROM deployment_results dr
+                JOIN signal_candidates sc ON sc.id = dr.candidate_id
+                WHERE dr.status = 'deploy_success'
+                  AND dr.deployed_at >= ?
+                  AND UPPER(TRIM(COALESCE(json_extract(sc.metadata_json, '$.suggested_symbol'), ''))) = UPPER(TRIM(?))
+                LIMIT 1
+                """,
+                (since, token_symbol),
+            ).fetchone()
+            return row is not None
 
     def set_review_telegram_message_id(self, review_id: str, message_id: int) -> None:
         def _op():

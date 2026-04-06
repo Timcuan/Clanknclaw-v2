@@ -1,383 +1,206 @@
 # Clank&Claw MVP
 
-Automated token deployment system that detects promising Base token deploy signals, routes them through a deterministic scoring pipeline, requests Telegram approval, and executes Clanker deploys.
+Signal-driven token deployment service for Base with operator approval, deterministic routing, and production guardrails.
+
+## Why this exists
+
+Clank&Claw is built for teams that need a controlled deployment pipeline, not a one-off bot script:
+
+- Multiple signal sources (X, Farcaster, GeckoTerminal) with normalized ingestion.
+- Deterministic filtering/scoring before anything reaches execution.
+- Human-in-the-loop Telegram approval with runtime operational controls.
+- Safe deploy path with idempotency and dedup guardrails.
+
+## Core capabilities
+
+| Area | Capability |
+|---|---|
+| Ingestion | X, Farcaster (Neynar), GeckoTerminal multi-network polling |
+| Anti-block transport | Stealth HTTP layer (UA/header profile rotation + bounded jitter) |
+| Decisioning | Quick filter, score engine, route selection, review queue locking |
+| Execution | Clanker deploy adapter via Node bridge (`scripts/clanker_deploy.mjs`) |
+| Operator UX | Telegram review cards, approval actions, ops/runtime commands |
+| Persistence | SQLite lifecycle tracking + retention cleanup + runtime settings |
+| Reliability | Worker loop timeout, candidate timeout, bounded queues, retry-on-lock |
+| Safety | Candidate idempotency, symbol dedup window, SSRF-safe image fetching |
 
 ## Architecture
 
-Single async Python service with:
-- **X Detector**: Polls X/Twitter for deploy signals
-- **Farcaster Detector**: Polls Farcaster casts (Bankr/Clanker mentions)
-- **Gecko Detector**: Polls GeckoTerminal new pools (Base/ETH/Solana/BSC)
-- **Pipeline**: Filters, scores, and routes candidates
-- **Telegram Bot**: Operator approval interface
-- **Clanker Deployer**: Executes approved deploys
-- **SQLite**: Lifecycle tracking and persistence
+```mermaid
+flowchart LR
+  X["X Detector"] --> P["Pipeline: filter + score + route"]
+  F["Farcaster Detector"] --> P
+  G["Gecko Detector"] --> P
+  P --> R["Review Queue"]
+  R --> T["Telegram Bot"]
+  T -->|"Approve"| D["Deploy Preparation"]
+  D --> C["Clanker Deployer"]
+  C --> DB["SQLite"]
+  P --> DB
+  T --> DB
+```
+
+## Safety and reliability guardrails
+
+- Candidate idempotency: deploy worker skips when same `candidate_id` already has `deploy_success`.
+- Cross-source symbol dedup (24h): deploy preparation aborts on already-deployed `suggested_symbol`.
+- Idempotent review insert: `INSERT OR IGNORE` for `review_items`.
+- Gecko pool-state eviction prevents unbounded cooldown-map growth.
+- Deploy path timeout controls:
+  - `app.deploy_prepare_timeout_seconds`
+  - `app.deploy_execute_timeout_seconds`
+
+## Enterprise readiness checklist
+
+- Deterministic decisioning before execution.
+- Human approval gate and auditable lifecycle records.
+- Runtime control plane via Telegram commands.
+- Anti-block transport strategy for upstream API stability.
+- Operational runbook (`DEPLOYMENT.md`) for service lifecycle, observability, and incident checks.
 
 ## Requirements
 
-- Python 3.11+
+- Python `3.11+`
+- Node.js + npm (for `clanker-sdk` bridge)
 - SQLite 3
-- Telegram Bot Token
-- Pinata JWT for IPFS uploads
+- Telegram bot token and chat ID
+- Pinata JWT
 - Base RPC endpoint
-- Deployer wallet with private key
+- Funded deployer signer wallet
 
-## Installation
+## Quick start
 
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+# 1) install
+python3.11 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+npm install
 
-3. Copy environment template:
-   ```bash
-   cp .env.example .env
-   ```
+# 2) configure
+cp .env.example .env
+# fill required env vars in .env
 
-4. Configure environment variables in `.env`:
-   - `DEPLOYER_SIGNER_PRIVATE_KEY`: Private key for signing deploy transactions
-   - `TOKEN_ADMIN_ADDRESS`: Address for token admin role
-   - `FEE_RECIPIENT_ADDRESS`: Address for fee collection
-   - `TELEGRAM_BOT_TOKEN`: Telegram bot token from @BotFather
-   - `TELEGRAM_CHAT_ID`: Telegram chat ID for notifications
-   - `PINATA_JWT`: Pinata JWT for IPFS uploads
+# 3) run
+python -m clankandclaw.main
+```
 
-5. Review and adjust `config.yaml` as needed
+For a step-by-step operator flow, use [QUICKSTART.md](QUICKSTART.md).
+For production setup, use [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Configuration
 
-### config.yaml
+Main config is in `config.yaml`.
 
-```yaml
-app:
-  log_level: INFO              # Logging level (DEBUG, INFO, WARNING, ERROR)
-  review_expiry_seconds: 900   # Review item expiration (15 minutes)
-  user_agent: "ClankAndClaw/1.0 (+ops)"  # Consistent API client identity
-  worker_loop_timeout_seconds: 90.0
-  candidate_process_timeout_seconds: 20.0
-  max_pending_notifications: 500
-  deploy_prepare_timeout_seconds: 90.0
-  deploy_execute_timeout_seconds: 180.0
-  cleanup_enabled: true
-  cleanup_interval_seconds: 900.0
-  retention_candidates_days: 3
-  retention_reviews_days: 7
-  retention_deployments_days: 14
-  retention_rewards_days: 30
+### Important sections
 
-x_detector:
-  enabled: true                # Enable X/Twitter polling
-  poll_interval: 30.0          # Polling interval in seconds
-  keywords:                    # Keywords to search for
-    - deploy
-    - launch
-  max_results: 20              # Max results per poll
-  target_handles: ["bankrbot", "clankerdeploy"]  # Mention/focus handles
-  query_terms: ["deploy", "launch", "contract", "ca", "token"]
-  max_process_concurrency: 8
-  max_query_concurrency: 3      # Parallel query tasks per loop
+- `app`: runtime limits, timeouts, retention cleanup.
+- `x_detector`, `farcaster_detector`, `gecko_detector`: source-specific polling and thresholds.
+- `deployment`: deployer and tax settings.
+- `stealth`: anti-detection transport behavior.
+- `telegram`: topic/thread routing and bot integration.
 
-farcaster_detector:
-  enabled: true
-  poll_interval: 35.0
-  api_url: "https://api.neynar.com/v2/farcaster/cast/search/"
-  api_key: ""                 # prefer env: NEYNAR_API_KEY
-  max_results: 20
-  target_handles: ["bankr", "clanker"]
-  query_terms: ["deploy", "launch", "contract", "ca", "token"]
-  request_timeout_seconds: 20.0
-  max_requests_per_minute: 45
-  max_process_concurrency: 8
-  max_query_concurrency: 2      # Parallel Neynar search queries per loop
+### Required environment variables
 
-gecko_detector:
-  enabled: true                # Enable GeckoTerminal polling
-  poll_interval: 25.0          # Polling interval in seconds
-  api_base_url: "https://api.geckoterminal.com/api/v2"
-  networks: ["base", "eth", "solana", "bsc"]  # Runtime priority: base -> solana -> bsc -> eth
-  max_results: 20              # Max pools per network per poll
-  max_pool_age_minutes: 120
-  min_volume_m5_usd: 3000
-  min_volume_m15_usd: 8000
-  min_tx_count_m5: 12
-  min_liquidity_usd: 12000
-  max_requests_per_minute: 40  # Safety guard against API block
-  base_target_sources: ["bankr", "doppler", "zora", "virtual", "uniswapv4", "clanker"]
-  max_process_concurrency: 10
+| Variable | Purpose |
+|---|---|
+| `DEPLOYER_SIGNER_PRIVATE_KEY` | signer private key for deploy tx |
+| `TOKEN_ADMIN_ADDRESS` | token admin role address |
+| `FEE_RECIPIENT_ADDRESS` | reward/fee recipient address |
+| `TELEGRAM_BOT_TOKEN` | bot credential |
+| `TELEGRAM_CHAT_ID` | target chat/group id |
+| `PINATA_JWT` | IPFS upload auth |
+| `BASE_RPC_URL` | Base RPC endpoint |
 
-deployment:
-  platform: clanker            # Deploy platform (only clanker in MVP)
-  tax_bps: 1000               # Tax basis points (1000 = 10%)
-```
+### Optional stealth overrides
 
-Gecko runtime tuning:
-- Hybrid staged gate for momentum capture:
-  - Stage 1: fast spike + freshness shortlist
-  - Stage 2: velocity + liquidity confidence
-  - Stage 3: Base source/factory confidence validation
-- Adaptive anti-block pacing: request interval auto-adjusts on `429/5xx` and recovers when healthy.
-- Cooldown-aware reprocessing prevents spam while allowing significant momentum jumps.
-- Hard-failure resilience:
-  - per-loop timeout guard (detectors auto-recover on hung cycle)
-  - per-candidate processing timeout (prevents worker starvation)
-  - bounded pending notification queue (prevents memory flood under burst)
+- `STEALTH_ENABLED`
+- `STEALTH_ROTATE_EVERY`
+- `STEALTH_JITTER_SIGMA_PCT`
+- `STEALTH_JITTER_MIN_MS`
+- `STEALTH_JITTER_MAX_MS`
 
-### Environment Variables
+## Telegram operations
 
-See `.env.example` for all available environment variables.
+### Runtime controls
 
-**Required:**
-- `DEPLOYER_SIGNER_PRIVATE_KEY`: Private key for signing transactions
-- `TOKEN_ADMIN_ADDRESS`: Token admin wallet address
-- `FEE_RECIPIENT_ADDRESS`: Fee recipient wallet address
-- `TELEGRAM_BOT_TOKEN`: Telegram bot token
-- `TELEGRAM_CHAT_ID`: Telegram chat ID for notifications
-- `PINATA_JWT`: Pinata JWT for IPFS uploads
-- `BASE_RPC_URL`: Base RPC endpoint (e.g., https://mainnet.base.org)
-- Node.js runtime deps installed in this repo (`npm install`)
+- `/control` shows live runtime state
+- `/setmode <review|auto>`
+- `/setbot <on|off>`
+- `/setdeployer <clanker|bankr|both>`
 
-**Optional:**
-- X/Twitter accounts configured via twscrape (see below)
-- `NEYNAR_API_KEY` for Farcaster detector
-- `TELEGRAM_MESSAGE_THREAD_ID` to route bot notifications into a specific Telegram topic/thread
-- Per-category Telegram topic routing:
-  - `TELEGRAM_THREAD_REVIEW_ID`
-  - `TELEGRAM_THREAD_DEPLOY_ID`
-  - `TELEGRAM_THREAD_CLAIM_ID`
-  - `TELEGRAM_THREAD_OPS_ID`
-  - `TELEGRAM_THREAD_ALERT_ID`
+Note: execution support is currently `clanker` only; `bankr` and `both` are stored but fail safely.
 
-### Telegram Topic Routing
+### Wallet controls
 
-For group/forum chats, configure dedicated topic/thread IDs to avoid mixed notifications:
+- `/wallets`
+- `/setsigner <address|private_key|default>`
+- `/setadmin <address|default>`
+- `/setreward <address|default>`
 
-- `review`: new review cards with approve/reject actions
-- `deploy`: deploy preparing/success updates
-- `claim`: claim-fees results
-- `ops`: operational slash-command workflows (`/status`, `/queue`, `/candidate`, `/deploys`)
-- `alert`: deploy failure/error-focused notifications
+### Manual deploy commands
 
-Recommended default thread map:
-- `TELEGRAM_THREAD_REVIEW_ID` = review
-- `TELEGRAM_THREAD_DEPLOY_ID` = deploy
-- `TELEGRAM_THREAD_CLAIM_ID` = claim
-- `TELEGRAM_THREAD_OPS_ID` = ops
-- `TELEGRAM_THREAD_ALERT_ID` = alert
+- `/manualdeploy`
+- `/deploynow <platform> <name> <symbol> <image_or_cid|auto> [description]`
+- `/deployca <platform> <candidate_id>`
 
-Smart bind (default, no manual setup required):
-- If thread IDs are not configured, the bot auto-learns topic routing from operator usage.
-- Learned bindings are persisted in SQLite (`runtime_settings`) and reused after restart.
-- Priority order per category: explicit config/env -> learned binding -> safe fallback (`ops` / last operator thread / chat default).
+## Operations runbook
 
-Runtime wallet controls (no VPS redeploy/restart required):
-- `/wallets` shows current runtime overrides.
-- `/setsigner <address|private_key|default>` sets deployer signer override.
-- `/setadmin <address|default>` sets token admin override.
-- `/setreward <address|default>` sets reward recipient override.
-- Wallet overrides are persisted in SQLite and applied on next deploy request.
-
-Runtime operation controls (minimal scope, fast toggle):
-- `/control` shows live runtime state.
-- `/setmode <review|auto>` toggles manual review vs auto (`priority_review` only).
-- `/setbot <on|off>` toggles non-critical Telegram notifications.
-- `/setdeployer <clanker|bankr|both>` stores deployer mode.
-  - Current execution support: `clanker` only.
-  - `bankr` and `both` are reserved modes and will return explicit failure until Bankr deployer is enabled.
-- Manual deploy commands:
-  - `/manualdeploy` shows direct command examples.
-  - `/deploynow <platform> <name> <symbol> <image_or_cid|auto> [description]` executes immediate manual deploy through the same validation pipeline.
-  - `/deployca <platform> <candidate_id>` forces deploy from an existing candidate row.
-- `image_or_cid` supports `https://...`, `ipfs://<CID>`, raw CID (`Qm...` / `bafy...`), or `auto`.
-
-Storage and payload hygiene optimizations:
-- DB write compaction for oversized `raw_text` and noisy metadata payloads.
-- Metadata heavy keys are pruned and oversized arrays/strings are capped before persistence.
-- Pinata cache is bounded (`PINATA_CACHE_MAX_ENTRIES`) and flushed in batches (`PINATA_CACHE_FLUSH_EVERY`) to reduce disk I/O under burst uploads.
-- Supervisor runs periodic DB retention cleanup for stale rows (`signal_candidates`, `candidate_decisions`, `review_items`, `deployment_results`, `reward_claim_results`).
-
-### X/Twitter Polling Setup
-
-To enable X polling, configure twscrape with authenticated accounts:
-
-```bash
-# Add accounts (username:password:email:email_password)
-twscrape add_accounts accounts.txt username:password:email:email_password
-
-# Or add interactively
-twscrape add_account account1 username password email email_password
-
-# Login to accounts
-twscrape login_accounts
-
-# Verify accounts
-twscrape accounts
-
-# Test search
-twscrape search "deploy token" --limit 5
-```
-
-**Notes:**
-- Use dedicated accounts (not personal)
-- Accounts should be aged (not brand new)
-- May need to solve CAPTCHAs during login
-- Sessions stored in `~/.twscrape/accounts.db`
-- Disable in config.yaml if not using: `x_detector.enabled: false`
-
-## Running
-
-### Development
+### Start service
 
 ```bash
 python -m clankandclaw.main
 ```
 
-### Production
+### Critical verifications
 
 ```bash
-# With proper environment variables set
-python -m clankandclaw.main
+# full test suite
+pytest -q
+
+# check duplicates/idempotency behavior in logs
+sudo journalctl -u clankandclaw | grep -i "already has a successful deployment"
+sudo journalctl -u clankandclaw | grep -i "token_dedup"
 ```
 
-The service will:
-1. Initialize SQLite database
-2. Start all async workers
-3. Begin polling for signals
-4. Send review notifications to Telegram
-5. Execute approved deploys
+### Useful docs
 
-## Testing
+- Production deployment: [DEPLOYMENT.md](DEPLOYMENT.md)
+- Fast setup: [QUICKSTART.md](QUICKSTART.md)
+- Clanker adapter details: [docs/CLANKER_INTEGRATION.md](docs/CLANKER_INTEGRATION.md)
+- Change history: [CHANGELOG.md](CHANGELOG.md)
 
-Run all tests:
-```bash
-pytest
-```
+## Project layout
 
-Run with coverage:
-```bash
-pytest --cov=clankandclaw --cov-report=html
-```
-
-Run specific test file:
-```bash
-pytest tests/core/test_pipeline.py -v
-```
-
-## Project Structure
-
-```
+```text
 clankandclaw/
-├── main.py                    # Entrypoint
-├── config.py                  # Configuration loading
-├── models/
-│   └── token.py              # Pydantic models
-├── database/
-│   └── manager.py            # SQLite persistence
-├── core/
-│   ├── supervisor.py         # Worker lifecycle management
-│   ├── pipeline.py           # Candidate orchestration
-│   ├── filter.py             # Quick filter rules
-│   ├── scorer.py             # Scoring heuristics
-│   ├── router.py             # Platform routing
-│   ├── review_queue.py       # Review locking
-│   ├── detectors/
-│   │   ├── x_detector.py     # X signal normalization
-│   │   ├── farcaster_detector.py # Farcaster signal normalization
-│   │   └── gecko_detector.py # Gecko signal normalization
-│   └── workers/
-│       ├── x_detector_worker.py      # X polling worker
-│       ├── farcaster_detector_worker.py  # Farcaster polling worker
-│       ├── gecko_detector_worker.py  # Gecko polling worker
-│       └── telegram_worker.py        # Telegram bot worker
-├── deployers/
-│   ├── base.py               # Deployer protocol
-│   └── clanker.py            # Clanker implementation
-├── utils/
-│   ├── extraction.py         # Token name/symbol extraction
-│   ├── image_fetcher.py      # Image fetching with SSRF protection
-│   ├── ipfs.py               # Pinata IPFS uploads
-│   └── llm.py                # LLM fallback interface
-└── telegram/
-    └── bot.py                # Telegram message formatting
+  core/            # pipeline, workers, routing, deploy preparation
+  deployers/       # deployer contracts and clanker adapter
+  database/        # sqlite manager and queries
+  telegram/        # bot rendering and actions
+  utils/           # extraction, IPFS, stealth client, parsers
+  models/          # pydantic domain models
 ```
 
-## Security
+## Security posture
 
-### SSRF Protection
+- SSRF-safe image fetch flow with private/local address blocking.
+- Strict data validation with Pydantic and structured parsing.
+- Parameterized SQL and foreign keys for persistence integrity.
+- Secrets isolated in `.env` and runtime environment.
 
-The image fetcher includes comprehensive SSRF protection:
-- Blocks private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-- Blocks localhost and link-local addresses
-- Validates resolved IPs before connection
-- Protects against DNS rebinding attacks
-- Enforces size limits (10MB max)
-- Validates content types
+## Current scope and limits
 
-### Input Validation
+- Production-ready path: `clanker` deploy execution.
+- `bankr`/`both` mode is reserved for future deployer rollout.
+- SQLite is default system of record for MVP operations.
 
-- EVM address validation with regex
-- ISO 8601 datetime validation with timezone awareness
-- Pydantic strict mode prevents extra fields
-- SQL injection protection via parameterized queries
-- Foreign key integrity enforced at database level
+## Repository standards
 
-## Development Status
-
-### Implemented ✅
-
-- Core models and validation
-- SQLite persistence with migrations and foreign keys
-- Filter, scorer, and router logic
-- Detector normalization (X and GeckoTerminal)
-- Clanker payload builder with web3 framework
-- Image fetcher with SSRF protection
-- IPFS upload client (Pinata)
-- Telegram bot with aiogram (inline keyboards, callbacks)
-- Async worker framework with lifecycle management
-- Supervisor with graceful shutdown and signal handling
-- X polling with twscrape integration
-- Farcaster polling integration (Neynar)
-- GeckoTerminal polling with httpx
-- Loop throughput optimizations:
-  - bounded concurrency per detector
-  - non-blocking pipeline execution via `asyncio.to_thread`
-  - HTTP client reuse + retry/backoff for transient errors
-- SQLite runtime optimizations:
-  - WAL + busy timeout
-  - hot-path indexes for queue/deploy queries
-  - retry on transient `database is locked`
-- Deploy preparation pipeline (extraction, image fetch, IPFS upload)
-- Context-aware image selection:
-  - ranked multi-candidate image selection
-  - social avatar/banner de-prioritization
-  - placeholder image fallback to avoid wrong-image deploy
-- Candidate database queries and reconstruction
-- Review queue with locking
-- Approval callback handlers
-- Deploy result notifications
-- Comprehensive test suite (177 tests passing)
-
-### Production Configuration Needed ⚠️
-
-- X account setup for twscrape (30-60 min)
-- Production testing and monitoring (30-60 min)
-- Operational hardening (systemd, alerts, backups)
-
-### Future Enhancements 🔮
-
-- Bankr deployer implementation
-- PostgreSQL migration for better concurrency
-- Distributed locking with Redis
-- Structured logging with context
-- Health check endpoints
-- Metrics and monitoring (Prometheus/Grafana)
-- Multi-deploy fanout
-- Advanced scoring with ML models
+- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Security policy: [SECURITY.md](SECURITY.md)
+- Code of conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
 ## License
 
-Proprietary - All rights reserved
-
-## Support
-
-For issues and questions, contact the development team.
+Proprietary. All rights reserved. See [LICENSE](LICENSE).

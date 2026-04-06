@@ -152,7 +152,9 @@ def test_score_candidate_gecko_confidence_high_and_m1_momentum():
     assert "gecko_spike_m1_m5_strong" in scored.reason_codes
 
 
-def test_score_candidate_gecko_stage_failed_penalized():
+def test_score_candidate_gecko_low_confidence_penalized():
+    # filter.py blocks gate-failed candidates before scorer is called.
+    # A low-confidence, low-signal base pool that passes gates scores below threshold.
     candidate = SignalCandidate(
         id="g-base-3",
         source="gecko",
@@ -167,8 +169,9 @@ def test_score_candidate_gecko_stage_failed_penalized():
             "liquidity_usd": 9000.0,
             "hot_score": 2,
             "confidence_tier": "low",
-            "gate_stage": "stage2_failed",
+            "gate_stage": "stage2_passed",
         },
     )
     scored = score_candidate(candidate)
-    assert "stage2_failed" in scored.reason_codes
+    assert "gecko_confidence_low" in scored.reason_codes
+    assert scored.score < 60

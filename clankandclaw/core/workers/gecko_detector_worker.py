@@ -368,6 +368,17 @@ class GeckoDetectorWorker:
             return False, stats, "stage2_velocity_liquidity"
         return True, stats, "pass"
 
+    def _evict_stale_pool_state(self) -> None:
+        """Remove pool state entries older than 2× the reprocess cooldown to prevent unbounded growth."""
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self._pool_reprocess_cooldown_seconds * 2)
+        stale = [pid for pid, ts in self._pool_processed_at.items() if ts < cutoff]
+        for pid in stale:
+            self._pool_processed_at.pop(pid, None)
+            self._pool_last_hot_score.pop(pid, None)
+            self._pool_last_volume_m5.pop(pid, None)
+        if stale:
+            logger.debug("Evicted %d stale pool state entries", len(stale))
+
     def _should_process_hot_pool(self, pool_id: str, stats: dict[str, Any]) -> bool:
         now = datetime.now(timezone.utc)
         last_processed_at = self._pool_processed_at.get(pool_id)
@@ -426,6 +437,9 @@ class GeckoDetectorWorker:
         processed_count = 0
         skipped_by_gate = 0
         skipped_by_cooldown = 0
+        # Collect all process tasks across all networks before awaiting any of them,
+        # so network fetching isn't blocked by pipeline processing of the previous network.
+        all_process_tasks: list[asyncio.Task[None]] = []
         for network in self.networks:
             try:
                 pools, included = await self._poll_network(stealth, network)
@@ -436,7 +450,6 @@ class GeckoDetectorWorker:
 
             token_index = self._build_token_index(included)
             logger.info("Fetched %s new pools from GeckoTerminal network=%s", len(pools), network)
-            process_tasks: list[asyncio.Task[None]] = []
             for pool in pools:
                 attrs = pool.get("attributes") or {}
                 pool_address = str(attrs.get("address") or "")
@@ -481,12 +494,13 @@ class GeckoDetectorWorker:
                     "source_match_score": stats["source_match_score"],
                     "source_tags_matched": stats["source_tags_matched"],
                 }
-                process_tasks.append(asyncio.create_task(self._process_payload_with_semaphore(payload, context_url)))
-            if process_tasks:
-                await asyncio.gather(*process_tasks)
-                processed_count += len(process_tasks)
+                all_process_tasks.append(asyncio.create_task(self._process_payload_with_semaphore(payload, context_url)))
+        if all_process_tasks:
+            await asyncio.gather(*all_process_tasks)
+            processed_count = len(all_process_tasks)
 
         self._last_poll_time = datetime.now(timezone.utc)
+        self._evict_stale_pool_state()
         logger.info(
             "gecko.loop_ms=%d processed=%d skip_gate=%d skip_cooldown=%d networks=%d rpm_mult=%.2f",
             int((perf_counter() - started) * 1000),

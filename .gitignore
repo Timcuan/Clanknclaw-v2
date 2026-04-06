@@ -96,3 +96,5 @@ dmypy.json
 cython_debug/
 # Local cache
 .pinata_cache.json
+
+.claude/

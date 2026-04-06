@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - consistent `User-Agent` and conservative default headers
   - cooldown/circuit behavior on repeated `403/429/5xx`
   - bounded request pacing for compliant 24/7 operation
+- Centralized `StealthClient` rollout across detector/image-fetch HTTP paths:
+  - browser-like UA/header profile rotation
+  - forced profile rotate on `403/429`
+  - gaussian jitter with bounded min/max delay clamps
 - Shared parsing utilities for detectors/extraction:
   - unified mention/chain/contract/symbol/name hint parsing
   - improved structured symbol/ticker detection (including lowercase and punctuation cleanup)
@@ -102,6 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `/deployca` for force deploy by existing candidate id
   - execution is serialized with lock to avoid concurrent manual deploy race
 - Deploy preparation now accepts direct IPFS image references (`ipfs://CID` or raw CID) without refetch/upload
+- Cross-source symbol dedup guard in deploy preparation:
+  - blocks deploy when `suggested_symbol` already has successful deployment within the last 24 hours
+  - emits explicit `token_dedup` failure reason for operator visibility
 
 ### Changed
 - Deploy preparation image stage now prefers contextual token image candidates over single raw image_url
@@ -109,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Farcaster and X polling now execute query fanout concurrently with bounded semaphores
 - Gecko network polling order now prioritizes gameplay: `base -> solana -> bsc -> eth`
 - Quick filter/scoring layer now consumes Gecko staged metadata (`gate_stage`, `confidence_tier`, `m1` velocity, `spike_ratio_m1_m5`) for faster and cleaner review routing
+- Gecko gate-fail handling is fully centralized in quick filter; scorer no longer applies duplicate gate-stage penalties
+- Gecko poll loop now batches processing tasks across all networks before await, improving fetch-to-process overlap
 - X filter/scoring upgraded to prioritize target-mention intent and engagement bursts
 - Replaced GMGN ingestion path with GeckoTerminal ingestion path in supervisor/config/runtime
 - Pipeline quick filter now handles Gecko hot-pool signals directly (not keyword-only)
@@ -131,6 +140,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevented misconfiguration risk for reward recipient delivery with strict preflight checks
 - Added fail-fast guardrails for invalid SDK success output and missing node modules
 - Removed duplicate slash-command responses caused by cross-posting into ops topic while replying in the source topic
+- Deploy worker idempotency guard now prevents duplicate transaction submission when candidate already has `deploy_success`
+- Review queue insertion now uses idempotent persistence (`INSERT OR IGNORE`) to avoid duplicate review rows under races
+- Gecko detector now evicts stale per-pool cooldown state to prevent unbounded in-memory growth in long-running sessions
 
 ## [0.4.0] - 2026-04-05
 

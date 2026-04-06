@@ -101,7 +101,6 @@ def score_candidate(candidate: SignalCandidate) -> ScoreResult:
         spike_ratio_m1_m5 = float(metadata.get("spike_ratio_m1_m5") or 0.0)
         source_match_score = int(metadata.get("source_match_score") or 0)
         confidence_tier = str(metadata.get("confidence_tier") or "low").lower()
-        gate_stage = str(metadata.get("gate_stage") or "")
 
         volume_m1 = float(volume.get("m1") or 0.0)
         volume_m5 = float(volume.get("m5") or 0.0)
@@ -109,10 +108,6 @@ def score_candidate(candidate: SignalCandidate) -> ScoreResult:
         tx_m1 = int(tx_data.get("m1") or 0)
         tx_m5 = int(tx_data.get("m5") or 0)
         hot_score = int(metadata.get("hot_score") or 0)
-
-        if gate_stage in {"stage1_failed", "stage2_failed", "stage3_failed"}:
-            score -= 30
-            reasons.append(gate_stage)
 
         if volume_m5 >= 15000:
             score += 25

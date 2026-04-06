@@ -76,6 +76,16 @@ class DeployWorker:
 
         logger.info("Starting deploy process for %s", candidate_id)
 
+        # Idempotency: skip if this exact candidate was already deployed successfully.
+        existing = self.db.get_latest_deployment_for_candidate(candidate_id)
+        if existing and existing["status"] == "deploy_success":
+            logger.warning(
+                "Candidate %s already has a successful deployment (tx=%s), skipping duplicate",
+                candidate_id,
+                existing["tx_hash"],
+            )
+            return True
+
         try:
             lookup_started = perf_counter()
             candidate = await self._get_candidate(candidate_id)

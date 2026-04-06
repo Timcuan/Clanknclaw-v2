@@ -212,3 +212,27 @@ async def test_prepare_and_deploy_skips_when_not_running(db):
 
     deployer.deploy.assert_not_awaited()
     telegram.send_deploy_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prepare_and_deploy_idempotent_skips_already_deployed(db, monkeypatch):
+    """Second call for same candidate_id is a no-op if already successfully deployed."""
+    from datetime import datetime, timezone
+
+    db.save_candidate("x-5", "x", "tw-5", "fp-5", "deploy token X symbol X", observed_at="2026-04-05T10:00:00Z")
+    db.save_deployment_result(
+        result_id="dr-1",
+        candidate_id="x-5",
+        status="deploy_success",
+        deployed_at=datetime.now(timezone.utc).isoformat(),
+        tx_hash="0x" + "f" * 64,
+        contract_address="0x" + "d" * 40,
+    )
+
+    worker, _, deployer = make_worker(db)
+    await worker.start()
+
+    result = await worker.prepare_and_deploy("x-5")
+
+    assert result is True
+    deployer.deploy.assert_not_awaited()

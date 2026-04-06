@@ -437,3 +437,41 @@ async def test_prepare_deploy_request_wraps_errors_as_deploy_preparation_error(d
 
     with pytest.raises(DeployPreparationError):
         await prep.prepare_deploy_request(candidate)
+
+
+@pytest.mark.asyncio
+async def test_prepare_deploy_request_rejects_duplicate_symbol(db, monkeypatch):
+    """Cross-source dedup: deploying same symbol twice raises DeployPreparationError."""
+    from datetime import datetime, timezone
+
+    # Seed: a prior successful deployment of MOON from a different candidate
+    db.save_candidate(
+        "gecko-prior", "gecko", "base:0xabc", "fp-gecko",
+        "pool MOON", observed_at="2026-04-05T09:00:00Z",
+        metadata={"suggested_symbol": "MOON"},
+    )
+    db.save_deployment_result(
+        result_id="dr-prior",
+        candidate_id="gecko-prior",
+        status="deploy_success",
+        deployed_at=datetime.now(timezone.utc).isoformat(),
+        tx_hash="0x" + "a" * 64,
+        contract_address="0x" + "b" * 40,
+    )
+
+    # New farcaster candidate for the same token
+    prep, _, _ = make_preparation(db)
+    candidate = make_candidate(
+        id="farcaster-new",
+        raw_text="deploy Moon symbol MOON",
+        suggested_name="Moon",
+        suggested_symbol="MOON",
+    )
+
+    monkeypatch.setattr(
+        "clankandclaw.core.deploy_preparation.fetch_image_bytes",
+        AsyncMock(return_value=b"img"),
+    )
+
+    with pytest.raises(DeployPreparationError, match="token_dedup"):
+        await prep.prepare_deploy_request(candidate)

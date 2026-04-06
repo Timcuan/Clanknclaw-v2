@@ -32,8 +32,6 @@ def quick_filter(candidate: SignalCandidate) -> FilterDecision:
 
         if gate_stage in {"stage1_failed", "stage2_failed", "stage3_failed"}:
             return FilterDecision(False, [gate_stage])
-        if network == "base" and source_match_score < 1:
-            return FilterDecision(False, ["gecko_base_source_not_target"])
 
         strong_momentum = (
             hot_score >= 5

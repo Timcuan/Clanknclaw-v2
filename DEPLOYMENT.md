@@ -1,5 +1,12 @@
 # Deployment Guide
 
+This document is the production runbook for deploying and operating Clank&Claw on a Linux server.
+
+Use it together with:
+- `README.md` for system overview and runtime capabilities
+- `QUICKSTART.md` for local bring-up
+- `CHANGELOG.md` for release-level behavior changes
+
 ## Prerequisites
 
 ### System Requirements
@@ -31,6 +38,11 @@
    - Export private key (keep secure!)
 
 ## Installation on Hetzner
+
+Deployment model:
+- single long-running systemd service
+- Python worker runtime + Node bridge for Clanker deploy execution
+- SQLite as local system-of-record database
 
 ### 1. Server Setup
 
@@ -97,6 +109,16 @@ Install Node.js dependencies:
 
 ```bash
 npm install
+```
+
+Stealth defaults are configured in `config.yaml` under `stealth:`. Optional runtime overrides:
+
+```bash
+STEALTH_ENABLED=true
+STEALTH_ROTATE_EVERY=50
+STEALTH_JITTER_SIGMA_PCT=0.15
+STEALTH_JITTER_MIN_MS=200
+STEALTH_JITTER_MAX_MS=3000
 ```
 
 Review and adjust `config.yaml`:
@@ -260,6 +282,19 @@ sudo journalctl -u clankandclaw -f
 
 # View logs for specific date
 sudo journalctl -u clankandclaw --since "2026-04-05"
+```
+
+Safety log checks after deploy:
+
+```bash
+# Duplicate candidate protection (idempotent no-op)
+sudo journalctl -u clankandclaw | grep -i "already has a successful deployment"
+
+# Cross-source symbol dedup protection
+sudo journalctl -u clankandclaw | grep -i "token_dedup"
+
+# Gecko stale pool-state eviction (debug-level visibility)
+sudo journalctl -u clankandclaw | grep -i "Evicted .* stale pool state entries"
 ```
 
 ### Database Queries
@@ -458,6 +493,21 @@ cat config.yaml | grep -A 12 "gecko_detector"
 # Edit config.yaml and set gecko_detector.enabled: false
 ```
 
+### Stealth Client Tuning
+
+If upstream APIs are returning frequent `403/429`, tune `stealth` in `config.yaml`:
+
+- Decrease `rotate_every` to rotate UA profiles more aggressively.
+- Increase jitter spread with `jitter_sigma_pct`.
+- Widen clamps with `jitter_min_ms` and `jitter_max_ms` for more request timing variance.
+
+After changes:
+
+```bash
+sudo systemctl restart clankandclaw
+sudo journalctl -u clankandclaw -n 120 --no-pager | grep -Ei "gecko|farcaster|429|403"
+```
+
 ### Web3 Deployment Issues
 
 ```bash
@@ -478,6 +528,29 @@ sudo journalctl -u clankandclaw | grep -i "deploy"
 
 # Verify signer key is set
 cat .env | grep DEPLOYER_SIGNER_PRIVATE_KEY
+```
+
+### Duplicate/Skipped Deployment Events
+
+If operators trigger approval twice or a retry overlaps with a completed deploy:
+
+- Deploy worker returns success without re-submitting transaction when candidate already has `deploy_success`.
+- This is expected idempotent behavior and should not be treated as an incident.
+- Verify with:
+
+```bash
+sudo journalctl -u clankandclaw | grep -i "already has a successful deployment"
+sqlite3 /opt/clankandclaw/app/clankandclaw.db "SELECT candidate_id,status,tx_hash,deployed_at FROM deployment_results WHERE candidate_id='<CANDIDATE_ID>' ORDER BY deployed_at DESC LIMIT 3;"
+```
+
+If a new signal attempts to deploy a symbol that was recently deployed from another source:
+
+- Deploy preparation aborts with `token_dedup` within a 24-hour window.
+- Verify with:
+
+```bash
+sudo journalctl -u clankandclaw | grep -i "token_dedup"
+sqlite3 /opt/clankandclaw/app/clankandclaw.db "SELECT sc.id, json_extract(sc.metadata_json,'$.suggested_symbol') AS symbol, dr.status, dr.deployed_at FROM deployment_results dr JOIN signal_candidates sc ON sc.id = dr.candidate_id WHERE dr.status='deploy_success' ORDER BY dr.deployed_at DESC LIMIT 20;"
 ```
 
 ## Security
