@@ -43,11 +43,11 @@ The system is designed for always-on operation: bounded concurrency, timeout-dri
 
 | Area | Capability |
 |---|---|
-| Ingestion | X, Farcaster (Neynar), GeckoTerminal multi-network polling |
+| Ingestion | X, Farcaster Feed (Neynar), GeckoTerminal multi-network polling |
 | Stealth transport | Rotating browser-like UA/header profiles + bounded jitter |
 | Decisioning | Filter, scorer, router, and locked review queue |
-| Execution | Clanker deploy adapter via Node bridge (`scripts/clanker_deploy.mjs`) |
-| Operator plane | Telegram review cards + runtime control commands |
+| Execution | Clanker SDK v4.2.16 logic via Node bridge (`scripts/clanker_deploy.mjs`) |
+| Operator plane | Telegram review cards (10% Tax / b07 Vanity) + runtime commands |
 | Persistence | SQLite lifecycle tracking + retention cleanup + runtime settings |
 | Reliability | Loop/candidate/deploy timeouts, bounded queues, retry-on-lock |
 | Safety | Idempotent deploy flow, cross-source symbol dedup, SSRF-safe image fetch |

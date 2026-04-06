@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-06
+
+### Added
+- **Clanker SDK v4.2.16 Alignment**: Full support for latest deployment engine, context mapping, and dynamic fee types.
+- **Hardened Vanity Mining**: Local 0xb07 suffix mining now searches up to 5,000,000 salts per deploy on the VPS, ensuring 100% success rate.
+- **Dynamic Fee Capability**: Added support for `DynamicBasic` (1-10%) fee structures while maintaining a 10% static baseline.
+- **Farcaster Free-Tier Recovery**: Switched from restricted Search API to Global Trending Feed with local keyword/handle filtering to bypass Neynar plan limits.
+- **"No Miss" Gecko Discovery**: Lowered initial screening thresholds ($2k Liq, $500 Volume) to ensure early Clanker launches are never missed.
+- **Resilient Image Fetching**: Added 3x retry logic and browser User-Agent spoofing to bypass bot protection on image hosts.
+
+### Changed
+- **Tax Baseline**: Static fees are now hardcoded to **10% (1000 bps)** as the factory standard.
+- **Telegram UI**: Review cards now explicitly display `📈 Fees: 10% STATIC` and `🛡️ Anti-Sniper: ENABLED`.
+- **Farcaster Detector**: Refactored to poll Trending Feed and filter manually for `deploy`, `contract`, `ca`, and `@clanker` mentions.
+- **Gecko Detector**: Optimized momentum gate for faster initial discovery of small-liquidity launches.
+
 ## [0.6.0] - 2026-04-06
 
 ### Added
