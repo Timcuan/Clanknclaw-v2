@@ -47,6 +47,24 @@ class TelegramWorker:
         self._bot: TelegramBot | None = None
         self._deploy_preparation: Any = None  # Will be set by supervisor
         self._rewards_claimer: Any = None
+        self._ops_cache_expires_at: float = 0.0
+        self._ops_cache_ttl_seconds: float = 2.0
+        self._ops_cache: dict[str, str] = {
+            "ops.mode": "review",
+            "ops.bot_enabled": "on",
+            "ops.deployer_mode": "clanker",
+        }
+
+    def _refresh_ops_cache_if_needed(self) -> None:
+        now = perf_counter()
+        if now < self._ops_cache_expires_at:
+            return
+        keys = ("ops.mode", "ops.bot_enabled", "ops.deployer_mode")
+        for key in keys:
+            value = self._runtime_get(key)
+            if value is not None:
+                self._ops_cache[key] = str(value).strip().lower()
+        self._ops_cache_expires_at = now + self._ops_cache_ttl_seconds
 
     def _runtime_get(self, key: str) -> str | None:
         if not hasattr(self.db, "get_runtime_setting"):
@@ -58,15 +76,18 @@ class TelegramWorker:
             return None
 
     def _ops_mode(self) -> str:
-        mode = (self._runtime_get("ops.mode") or "review").strip().lower()
+        self._refresh_ops_cache_if_needed()
+        mode = self._ops_cache.get("ops.mode", "review")
         return mode if mode in {"review", "auto"} else "review"
 
     def _bot_enabled(self) -> bool:
-        value = (self._runtime_get("ops.bot_enabled") or "on").strip().lower()
+        self._refresh_ops_cache_if_needed()
+        value = self._ops_cache.get("ops.bot_enabled", "on")
         return value in {"on", "true", "1", "yes"}
 
     def _deployer_mode(self) -> str:
-        mode = (self._runtime_get("ops.deployer_mode") or "clanker").strip().lower()
+        self._refresh_ops_cache_if_needed()
+        mode = self._ops_cache.get("ops.deployer_mode", "clanker")
         return mode if mode in {"clanker", "bankr", "both"} else "clanker"
 
     def set_deploy_preparation(self, deploy_preparation: Any) -> None:
@@ -157,6 +178,23 @@ class TelegramWorker:
 
         try:
             started = perf_counter()
+            if self._ops_mode() == "auto" and review_priority == "priority_review":
+                logger.info("Auto mode active; auto-approving %s", candidate_id)
+                review_id = f"review-{candidate_id}"
+                expires_at = (
+                    datetime.now(timezone.utc) + timedelta(seconds=self.review_expiry_seconds)
+                ).isoformat()
+                self.review_queue.create(review_id, candidate_id, expires_at)
+                try:
+                    await self._handle_approve(candidate_id)
+                except Exception as exc:
+                    logger.error("Auto-approve deploy failed for %s: %s", candidate_id, exc, exc_info=True)
+                return review_id
+
+            if not self._bot_enabled():
+                logger.info("ops.bot_enabled=off; skipping review notification for %s", candidate_id)
+                return None
+
             row = self.db.get_candidate(candidate_id)
             raw_text: str | None = None
             source: str | None = None
@@ -174,23 +212,6 @@ class TelegramWorker:
                 metadata = meta
                 context_url = meta.get("context_url")
                 author_handle = meta.get("author_handle")
-
-            if self._ops_mode() == "auto" and review_priority == "priority_review":
-                logger.info("Auto mode active; auto-approving %s", candidate_id)
-                review_id = f"review-{candidate_id}"
-                expires_at = (
-                    datetime.now(timezone.utc) + timedelta(seconds=self.review_expiry_seconds)
-                ).isoformat()
-                self.review_queue.create(review_id, candidate_id, expires_at)
-                try:
-                    await self._handle_approve(candidate_id)
-                except Exception as exc:
-                    logger.error("Auto-approve deploy failed for %s: %s", candidate_id, exc, exc_info=True)
-                return review_id
-
-            if not self._bot_enabled():
-                logger.info("ops.bot_enabled=off; skipping review notification for %s", candidate_id)
-                return None
 
             message_id = await self._bot.send_review_notification(
                 candidate_id,
