@@ -158,3 +158,69 @@ def test_pinata_client_flushes_cache_in_batches(monkeypatch: pytest.MonkeyPatch,
     client._cache_set(b"d", "QmD", kind="file")
     client._cache_set(b"e", "QmE", kind="file")
     assert save_calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_upload_file_bytes_retries_on_server_error(tmp_path):
+    """upload_file_bytes must retry on 5xx before raising."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from clankandclaw.utils.ipfs import PinataClient
+
+    pinata = PinataClient(jwt="test-jwt", cache_path=str(tmp_path / "cache.json"))
+    call_count = 0
+
+    _dummy_request = httpx.Request("POST", "https://api.pinata.cloud/pinning/pinFileToIPFS")
+
+    async def mock_post(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            resp = httpx.Response(503, text="Service Unavailable")
+            resp.request = _dummy_request
+            return resp
+        resp = httpx.Response(200, json={"IpfsHash": "QmRetried"})
+        resp.request = _dummy_request
+        return resp
+
+    with patch("httpx.AsyncClient") as MockClient:
+        instance = MagicMock()
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=None)
+        instance.post = AsyncMock(side_effect=mock_post)
+        MockClient.return_value = instance
+
+        result = await pinata.upload_file_bytes("img.png", b"bytes", "image/png")
+
+    assert result == "QmRetried"
+    assert call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_upload_file_bytes_does_not_retry_on_4xx(tmp_path):
+    """upload_file_bytes must NOT retry on 4xx client errors."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from clankandclaw.utils.ipfs import PinataClient
+
+    pinata = PinataClient(jwt="test-jwt", cache_path=str(tmp_path / "cache.json"))
+    call_count = 0
+
+    _dummy_request = httpx.Request("POST", "https://api.pinata.cloud/pinning/pinFileToIPFS")
+
+    async def mock_post(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        resp = httpx.Response(401, text="Unauthorized")
+        resp.request = _dummy_request
+        return resp
+
+    with patch("httpx.AsyncClient") as MockClient:
+        instance = MagicMock()
+        instance.__aenter__ = AsyncMock(return_value=instance)
+        instance.__aexit__ = AsyncMock(return_value=None)
+        instance.post = AsyncMock(side_effect=mock_post)
+        MockClient.return_value = instance
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await pinata.upload_file_bytes("img.png", b"bytes", "image/png")
+
+    assert call_count == 1  # No retry on 4xx

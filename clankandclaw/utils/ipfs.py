@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import hashlib
@@ -89,17 +90,31 @@ class PinataClient:
         guessed_type, _ = mimetypes.guess_type(filename)
         final_content_type = content_type or guessed_type or "application/octet-stream"
 
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(
-                f"{self.base_url}/pinFileToIPFS",
-                headers=self._headers(),
-                files={"file": (filename, content, final_content_type)},
-            )
-            response.raise_for_status()
-            payload = response.json()
-            cid = self.normalize_cid(payload["IpfsHash"])
-            self._cache_set(content, cid, kind="file")
-            return cid
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            if attempt > 0:
+                await asyncio.sleep(0.5 * (2 ** attempt))  # 1.0s, 2.0s
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    response = await client.post(
+                        f"{self.base_url}/pinFileToIPFS",
+                        headers=self._headers(),
+                        files={"file": (filename, content, final_content_type)},
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    cid = self.normalize_cid(payload["IpfsHash"])
+                    self._cache_set(content, cid, kind="file")
+                    return cid
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code < 500:
+                    raise  # Don't retry 4xx client errors
+                last_exc = exc
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_exc = exc
+
+        assert last_exc is not None
+        raise last_exc
 
     async def upload_json_metadata(self, metadata: Mapping[str, Any]) -> str:
         canonical_json = json.dumps(dict(metadata), sort_keys=True, separators=(",", ":")).encode("utf-8")
