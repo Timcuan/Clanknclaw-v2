@@ -74,8 +74,7 @@ async def extract_token_identity_with_llm(text: str) -> TokenIdentity:
             await gemini_limiter.wait()
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
             payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json"}
+                "contents": [{"parts": [{"text": prompt}]}]
             }
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, json=payload)
@@ -123,8 +122,7 @@ async def enrich_signal_with_llm(text: str) -> dict[str, Any]:
             await gemini_limiter.wait()
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
             payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json"}
+                "contents": [{"parts": [{"text": prompt}]}]
             }
             
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -241,8 +239,7 @@ async def suggest_token_metadata(theme: str) -> list[dict[str, str]]:
             await gemini_limiter.wait()
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
             payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseMimeType": "application/json"}
+                "contents": [{"parts": [{"text": prompt}]}]
             }
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, json=payload)
