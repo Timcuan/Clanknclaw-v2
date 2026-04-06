@@ -57,3 +57,9 @@ def test_extract_token_identity_prefers_structured_over_cashtag():
     result = extraction.extract_token_identity("deploy token Pepe symbol PEPE $OTHER")
     assert result.name == "Pepe"
     assert result.symbol == "PEPE"
+
+
+def test_extract_token_identity_normalizes_lowercase_symbol_hint():
+    result = extraction.extract_token_identity("deploy token Moon symbol moon")
+    assert result.name == "Moon"
+    assert result.symbol == "MOON"

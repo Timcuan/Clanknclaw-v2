@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - consistent `User-Agent` and conservative default headers
   - cooldown/circuit behavior on repeated `403/429/5xx`
   - bounded request pacing for compliant 24/7 operation
+- Shared parsing utilities for detectors/extraction:
+  - unified mention/chain/contract/symbol/name hint parsing
+  - improved structured symbol/ticker detection (including lowercase and punctuation cleanup)
+  - reduced parser drift between X and Farcaster normalization paths
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`

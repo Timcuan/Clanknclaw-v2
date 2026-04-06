@@ -4,10 +4,13 @@ import re
 from typing import Any
 
 from clankandclaw.models.token import SignalCandidate
-
-_EVM_CA_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
-_SOL_CA_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
-_SYMBOL_RE = re.compile(r"\$([A-Za-z0-9]{2,10})\b")
+from clankandclaw.utils.parsing import (
+    extract_chain_hints,
+    extract_contracts,
+    extract_mentions,
+    extract_name_hint,
+    extract_symbol_hint,
+)
 _TARGET_HANDLES = {"bankr", "clanker"}
 
 
@@ -39,25 +42,14 @@ def normalize_farcaster_event(event: dict, context_url: str) -> SignalCandidate:
     author_handle = event.get("author", {}).get("username")
     lowered = raw_text.lower()
 
-    mentioned_handles = [
-        str(item).lower().lstrip("@")
-        for item in (event.get("mentioned_handles") or [])
-        if str(item).strip()
-    ]
-    inline_handles = [h.lower().lstrip("@") for h in re.findall(r"@([A-Za-z0-9_]{1,30})", raw_text)]
-    mention_set = sorted(set(mentioned_handles + inline_handles))
+    mention_set = extract_mentions(raw_text, event.get("mentioned_handles") or [])
     target_mentions = sorted([h for h in mention_set if h in _TARGET_HANDLES])
     has_target_mention = bool(target_mentions)
 
-    evm_contracts = _EVM_CA_RE.findall(raw_text)
-    sol_contracts = _SOL_CA_RE.findall(raw_text)
-    symbol_match = _SYMBOL_RE.search(raw_text)
-    suggested_symbol = symbol_match.group(1).upper() if symbol_match else None
-
-    chain_hints: list[str] = []
-    for chain in ("base", "sol", "solana", "bsc", "eth", "ethereum"):
-        if re.search(rf"\b{re.escape(chain)}\b", lowered):
-            chain_hints.append(chain)
+    evm_contracts, sol_contracts = extract_contracts(raw_text)
+    suggested_symbol = extract_symbol_hint(raw_text)
+    suggested_name = extract_name_hint(raw_text, suggested_symbol)
+    chain_hints = extract_chain_hints(raw_text)
 
     intent_keywords = ["deploy", "launch", "contract", "ca", "pair", "lp", "mint"]
     intent_score = sum(1 for kw in intent_keywords if re.search(rf"\b{re.escape(kw)}\b", lowered))
@@ -96,6 +88,7 @@ def normalize_farcaster_event(event: dict, context_url: str) -> SignalCandidate:
         raw_text=raw_text,
         author_handle=author_handle,
         context_url=context_url,
+        suggested_name=suggested_name,
         suggested_symbol=suggested_symbol,
         fingerprint=fingerprint,
         metadata=metadata,

@@ -35,3 +35,17 @@ def test_normalize_farcaster_event_falls_back_to_current_utc_time(monkeypatch):
         "https://warpcast.com/~/conversations/fc2",
     )
     assert candidate.observed_at == "2026-04-05T01:02:03Z"
+
+
+def test_normalize_farcaster_event_extracts_name_and_symbol_hints():
+    candidate = normalize_farcaster_event(
+        {
+            "id": "fc3",
+            "text": "@bankr token name: Moon Runner ticker: moon",
+            "author": {"username": "eve"},
+            "mentioned_handles": ["bankr"],
+        },
+        "https://warpcast.com/~/conversations/fc3",
+    )
+    assert candidate.suggested_name == "Moon Runner"
+    assert candidate.suggested_symbol == "MOON"

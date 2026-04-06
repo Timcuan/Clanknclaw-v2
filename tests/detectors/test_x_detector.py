@@ -77,3 +77,15 @@ def test_normalize_x_event_falls_back_to_current_utc_time(monkeypatch):
     )
 
     assert candidate.observed_at == "2026-04-04T01:02:03Z"
+
+
+def test_normalize_x_event_extracts_symbol_without_cashtag():
+    candidate = normalize_x_event(
+        {
+            "id": "5",
+            "text": "deploy token moon symbol pepe",
+            "user": {"username": "dave"},
+        },
+        "https://x.example/5",
+    )
+    assert candidate.suggested_symbol == "PEPE"
