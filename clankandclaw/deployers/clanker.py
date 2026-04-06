@@ -91,13 +91,6 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
             "endingFee": 41_673,    # 4.1673%
             "secondsToDecay": 15,
         }} if deploy_request.sniper_fee_enabled else {}),
-        # Vesting Vault
-        **({"vault": {
-            "percentage": deploy_request.vault_pct,
-            "lockupDuration": (deploy_request.vault_lockup_minutes or 0) * 60,
-            "vestingDuration": (deploy_request.vault_vesting_minutes or 0) * 60,
-            "recipient": deploy_request.token_admin,
-        }} if deploy_request.vault_pct and deploy_request.vault_pct > 0 else {}),
         # Rewards configuration (omitted when disabled)
         **({"rewards": {
             "recipients": [

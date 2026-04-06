@@ -121,9 +121,6 @@ class DeployRequest(BaseModel):
 
     # Advanced SDK v4 Features
     sniper_fee_enabled: bool = True
-    vault_pct: int | None = Field(default=None, ge=0, le=100)
-    vault_lockup_minutes: int | None = Field(default=None, ge=0)
-    vault_vesting_minutes: int | None = Field(default=None, ge=0)
     metadata_x_url: str | None = None
     metadata_telegram_url: str | None = None
 

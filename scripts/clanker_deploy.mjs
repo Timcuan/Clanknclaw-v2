@@ -206,8 +206,6 @@ const deployParams = {
 
   vanity: deployConfig.vanity ?? true,
   sniperFees: deployConfig.sniperFees,
-  vault: deployConfig.vault,
-  devBuy: deployConfig.devBuy,
 }
 
 // Audit logging
