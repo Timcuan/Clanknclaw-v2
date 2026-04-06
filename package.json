@@ -5,7 +5,7 @@
   "description": "Local Node.js runtime dependencies for Clank&Claw Clanker deploy bridge",
   "type": "module",
   "dependencies": {
-    "clanker-sdk": "^4.0.0",
+    "clanker-sdk": "^4.2.16",
     "viem": "^2.23.7"
   }
 }
