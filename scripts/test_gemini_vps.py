@@ -19,7 +19,7 @@ async def test_gemini():
 
     print(f"📡 Testing Gemini with key starting with: {api_key[:10]}...")
     
-    model = "gemini-1.5-flash"
+    model = "gemini-3.1-flash-lite-preview"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     payload = {
         "contents": [{"parts": [{"text": "Suggest 1 creative token name and symbol. Return ONLY JSON: {\"name\": \"...\", \"symbol\": \"...\"}"}]}]
