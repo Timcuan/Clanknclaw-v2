@@ -634,9 +634,22 @@ class TelegramBot:
             "claim": self.thread_claim_id,
             "ops": self.thread_ops_id,
             "alert": self.thread_alert_id,
-        }.get(category)
-        if configured is not None:
+        }
+        if configured.get(category) is not None:
             return
+
+        # NEW: Check if this thread_id is already taken by ANOTHER category
+        # First check hardcoded/env IDs
+        for cat, cid in configured.items():
+            if cid is not None and int(cid) == parsed:
+                return
+
+        # Then check existing dynamic bindings
+        for cat, cid in self._dynamic_thread_bindings.items():
+            if cid == parsed and cat != category:
+                # This ID is already assigned to another category (e.g. 'review')
+                # so don't allow 'ops' to take it.
+                return
 
         previous = self._dynamic_thread_bindings.get(category)
         if previous == parsed:
