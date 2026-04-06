@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shlex
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -16,8 +17,14 @@ if TYPE_CHECKING:
 
 try:
     from aiogram import Bot, Dispatcher, F
-    from aiogram.filters import Command
+    from aiogram.filters import Command, StateFilter
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.state import State, StatesGroup
     from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+    from clankandclaw.utils.llm import enrich_signal_with_llm, suggest_token_metadata, suggest_token_description
+    from clankandclaw.telegram.formatters import (
+        _fmt_text, _fmt_inline_code, _fmt_dashboard_header, _source_label, _network_icon
+    )
     AIOGRAM_AVAILABLE = True
 except ImportError:
     AIOGRAM_AVAILABLE = False
@@ -28,6 +35,9 @@ except ImportError:
     InlineKeyboardButton = Any  # type: ignore
     Message = Any  # type: ignore
     BotCommand = Any  # type: ignore
+    FSMContext = Any  # type: ignore
+    State = Any  # type: ignore
+    StatesGroup = Any  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -48,27 +58,17 @@ _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _PRIVATE_KEY_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
 
 
-def _source_label(source: str | None) -> str:
-    return {
-        "x": "X / Twitter",
-        "farcaster": "Farcaster",
-        "gecko": "GeckoTerminal",
-        "gmgn": "GMGN",
-    }.get(source or "", source or "unknown")
+class ManualDeployStates(StatesGroup):
+    """FSM states for interactive manual deployment."""
+    platform = State()
+    name = State()
+    symbol = State()
+    image = State()
+    description = State()
+    confirm = State()
 
 
-def _fmt_text(value: Any, *, fallback: str = "n/a") -> str:
-    if value is None:
-        return fallback
-    text = str(value).strip()
-    return html.escape(text) if text else fallback
-
-
-def _fmt_inline_code(value: Any, *, fallback: str = "n/a") -> str:
-    if value is None:
-        return fallback
-    text = str(value).strip()
-    return f"<code>{html.escape(text)}</code>" if text else fallback
+# UI Helpers imported from clankandclaw.telegram.formatters
 
 
 def _fmt_num(value: Any, *, digits: int = 0, fallback: str = "n/a") -> str:
@@ -79,6 +79,72 @@ def _fmt_num(value: Any, *, digits: int = 0, fallback: str = "n/a") -> str:
     if digits <= 0:
         return f"{int(num):,}"
     return f"{num:,.{digits}f}"
+
+
+def _build_dashboard_keyboard() -> InlineKeyboardMarkup:
+    """Master Navigation Helper."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Status", callback_data="nav_status"),
+                InlineKeyboardButton(text="📥 Queue", callback_data="nav_queue"),
+            ],
+            [
+                InlineKeyboardButton(text="🛠 Tools", callback_data="nav_tools"),
+                InlineKeyboardButton(text="📂 History", callback_data="nav_deploys"),
+            ],
+            [
+                InlineKeyboardButton(text="🧪 Manual Deploy", callback_data="nav_wizard"),
+                InlineKeyboardButton(text="❓ Help", callback_data="nav_help"),
+            ],
+        ]
+    )
+
+
+def _build_tools_keyboard() -> InlineKeyboardMarkup:
+    """Categorized Action Hub."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔄 Mode", callback_data="nav_tools_mode"),
+                InlineKeyboardButton(text="🤖 Bot", callback_data="nav_tools_bot"),
+                InlineKeyboardButton(text="🏗 Deployer", callback_data="nav_tools_plat"),
+            ],
+            [
+                InlineKeyboardButton(text="💸 Claim", callback_data="nav_tools_claim"),
+                InlineKeyboardButton(text="🔐 Wallets", callback_data="nav_tools_wallets"),
+            ],
+            [
+                InlineKeyboardButton(text="📍 Pair Current", callback_data="nav_tools_pair"),
+                InlineKeyboardButton(text="⚡ Autothread", callback_data="nav_tools_auto"),
+            ],
+            [
+                InlineKeyboardButton(text="↩️ Dashboard", callback_data="nav_control"),
+            ]
+        ]
+    )
+
+
+def _build_category_keyboard(prefix: str) -> InlineKeyboardMarkup:
+    """Generic category picker for pairing/binding."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📑 Review", callback_data=f"{prefix}:review"),
+                InlineKeyboardButton(text="🚀 Deploy", callback_data=f"{prefix}:deploy"),
+            ],
+            [
+                InlineKeyboardButton(text="💸 Claim", callback_data=f"{prefix}:claim"),
+                InlineKeyboardButton(text="⚙️ Ops", callback_data=f"{prefix}:ops"),
+            ],
+            [
+                InlineKeyboardButton(text="🚨 Alert", callback_data=f"{prefix}:alert"),
+            ],
+            [
+                InlineKeyboardButton(text="↩️ Tools", callback_data="nav_tools"),
+            ]
+        ]
+    )
 
 
 def _shorten_text(value: str, limit: int) -> str:
@@ -179,54 +245,60 @@ def build_review_message(
     priority_emoji = "🔥" if review_priority == "priority_review" else "📋"
     source_label = _source_label(source)
     network = _fmt_text(metadata.get("network"), fallback="unknown")
+    dex_id = _fmt_text(metadata.get("dex_id"), fallback="unknown")
     confidence_tier = _fmt_text(metadata.get("confidence_tier"), fallback="n/a")
     gate_stage = _fmt_text(metadata.get("gate_stage"), fallback="n/a")
     liquidity_usd = _fmt_num(metadata.get("liquidity_usd"), digits=2, fallback="0.00")
     volume = metadata.get("volume") or {}
     tx_data = metadata.get("transactions") or {}
+    
     volume_m1 = _fmt_num(volume.get("m1"), digits=2, fallback="0.00")
     volume_m5 = _fmt_num(volume.get("m5"), digits=2, fallback="0.00")
     volume_m15 = _fmt_num(volume.get("m15"), digits=2, fallback="0.00")
+    volume_h1 = _fmt_num(volume.get("h1"), digits=2, fallback="0.00")
+    
     tx_m1 = _fmt_num(tx_data.get("m1"), fallback="0")
     tx_m5 = _fmt_num(tx_data.get("m5"), fallback="0")
+    tx_h1 = _fmt_num(tx_data.get("h1"), fallback="0")
     contracts = [*list(metadata.get("evm_contracts") or []), *list(metadata.get("sol_contracts") or [])]
     contracts = [str(item) for item in contracts if str(item).strip()]
     contract_hint = ", ".join(_fmt_inline_code(item) for item in contracts[:2]) if contracts else "n/a"
     if len(contracts) > 2:
         contract_hint += f" (+{len(contracts) - 2})"
 
-    lines = [
-        f"{priority_emoji} <b>Review Candidate</b>",
-        "",
-        "<b>Overview</b>",
-        f"• <b>ID:</b> {_fmt_inline_code(candidate_id)}",
-        f"<b>Source:</b> {source_label}",
-        f"• <b>Priority:</b> {_fmt_text(review_priority)}",
-        f"• <b>Score:</b> {_fmt_num(score)}",
-        "",
-        "<b>Momentum</b>",
-        f"• <b>Chain:</b> {network}",
-        f"• <b>Confidence:</b> {confidence_tier}",
-        f"• <b>Gate:</b> {gate_stage}",
-        f"• <b>Volume:</b> m1 ${volume_m1} | m5 ${volume_m5} | m15 ${volume_m15}",
-        f"• <b>Tx:</b> m1 {tx_m1} | m5 {tx_m5}",
-        f"• <b>Liquidity:</b> ${liquidity_usd}",
-        "",
-        "<b>Risk / Signals</b>",
-        f"• <b>Contract hints:</b> {contract_hint}",
-        f"• <b>Signals:</b> {_fmt_text(reasons, fallback='—')}",
-    ]
+    net_icon = _network_icon(network)
 
-    if author_handle:
-        lines.append(f"• <b>Author:</b> @{_fmt_text(author_handle, fallback='unknown')}")
+    lines = [
+        f"{priority_emoji} {net_icon} <b>Review:</b> {network.upper()} | {dex_id.upper()}",
+        f"<b>ID:</b> {_fmt_inline_code(candidate_id)} | <b>Score:</b> {_fmt_num(score)}",
+        f"<b>Pri:</b> {_fmt_text(review_priority)} | <b>Conf:</b> {confidence_tier}",
+    ]
+    
+    is_trending = network.lower() in ("solana", "bsc", "sol")
+    if is_trending:
+        lines.append(f"<b>Vol h1:</b> ${volume_h1} | <b>Liq:</b> ${liquidity_usd} | <b>Tx h1:</b> {tx_h1}")
+    else:
+        lines.append(f"<b>Vol:</b> m5 ${volume_m5} | m15 ${volume_m15} | <b>Liq:</b> ${liquidity_usd}")
+        lines.append(f"<b>Tx:</b> m5 {tx_m5}")
+        
+    lines.append(f"<b>Contract:</b> {contract_hint} | <b>Gate:</b> {gate_stage}")
+    lines.append(f"<b>Signals:</b> {_fmt_text(reasons, fallback='—')}")
 
     if context_url:
         safe_url = html.escape(context_url, quote=True)
-        lines.append(f'• <b>Link:</b> <a href="{safe_url}">Open source</a>')
+        lines.append(f'• <b>Source:</b> <a href="{safe_url}">{_source_label(source)}</a>' + (f" (@{_fmt_text(author_handle)})" if author_handle else ""))
+
+    # AI Insight Block
+    if metadata.get("ai_enriched"):
+        bullish = metadata.get("ai_bullish_score", 0)
+        rationale = metadata.get("ai_rationale", "No rationale provided.")
+        mood = "💎" if bullish >= 80 else "🔥" if bullish >= 60 else "⚖️" if bullish >= 40 else "⚠️"
+        lines.append(f"\n{mood} <b>AI INSIGHT | {bullish}% BULLISH</b>")
+        lines.append(f"<i>{_fmt_text(rationale)}</i>")
 
     if raw_text:
-        trimmed = _shorten_text(raw_text, _MAX_RAW_TEXT)
-        lines += ["", "<b>Context Excerpt</b>", f"<blockquote>{_fmt_text(trimmed)}</blockquote>"]
+        trimmed = _shorten_text(raw_text, 60)
+        lines += ["", f"<blockquote>{_fmt_text(trimmed)}</blockquote>"]
 
     return "\n".join(lines)
 
@@ -236,7 +308,7 @@ def build_queue_message(rows: list[Any]) -> str:
     if not rows:
         return "📭 No pending reviews."
 
-    lines = [f"📋 <b>Pending Queue</b>", f"Total: <b>{len(rows)}</b>", ""]
+    lines = [f"Total: <b>{len(rows)}</b>", ""]
     for row in rows[:_MAX_QUEUE_ITEMS]:
         score = row["score"] if row["score"] is not None else "?"
         reasons = row["reason_codes"] or "—"
@@ -264,8 +336,6 @@ def build_candidate_detail_message(
         meta = {}
 
     lines = [
-        "🔎 <b>Candidate Detail</b>",
-        "",
         "<b>Overview</b>",
         f"• <b>ID:</b> {_fmt_inline_code(candidate['id'])}",
         f"• <b>Source:</b> {_source_label(candidate['source'])}",
@@ -318,7 +388,7 @@ def build_deploys_message(rows: list[Any]) -> str:
     if not rows:
         return "📭 No deployments yet."
 
-    lines = [f"🚀 <b>Recent Deployments</b>", f"Total: <b>{len(rows)}</b>", ""]
+    lines = [f"Total: <b>{len(rows)}</b>", ""]
     for row in rows:
         if row["status"] == "deploy_success":
             contract = row["contract_address"] or "n/a"
@@ -345,10 +415,63 @@ def build_review_keyboard(
     candidate_id: str,
     *,
     encode_candidate_id: Callable[[str], str] | None = None,
+    mode: str = "summary",
 ) -> Any:
     """Build inline keyboard for operator actions."""
     if not AIOGRAM_AVAILABLE:
         raise ImportError("aiogram is required for keyboard building")
+
+    if mode == "detail":
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Approve",
+                        callback_data=build_action_callback_data(
+                            "approve",
+                            candidate_id,
+                            encode_candidate_id=encode_candidate_id,
+                        ),
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Reject",
+                        callback_data=build_action_callback_data(
+                            "reject",
+                            candidate_id,
+                            encode_candidate_id=encode_candidate_id,
+                        ),
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Summary",
+                        callback_data=build_action_callback_data(
+                            "refresh",
+                            candidate_id,
+                            encode_candidate_id=encode_candidate_id,
+                        ),
+                    ),
+                    InlineKeyboardButton(
+                        text="🔄 Refresh",
+                        callback_data=build_action_callback_data(
+                            "refresh_detail",
+                            candidate_id,
+                            encode_candidate_id=encode_candidate_id,
+                        ),
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🧪 Edit & Deploy",
+                        callback_data=build_action_callback_data(
+                            "wiz_edit",
+                            candidate_id,
+                            encode_candidate_id=encode_candidate_id,
+                        ),
+                    ),
+                ],
+            ]
+        )
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -389,9 +512,15 @@ def build_review_keyboard(
                 ),
             ],
             [
-                InlineKeyboardButton(text="📋 Queue", callback_data="queue"),
-                InlineKeyboardButton(text="🚀 Deploys", callback_data="deploys"),
-            ],
+                InlineKeyboardButton(
+                    text="🧪 Edit & Deploy",
+                    callback_data=build_action_callback_data(
+                        "wiz_edit",
+                        candidate_id,
+                        encode_candidate_id=encode_candidate_id,
+                    ),
+                ),
+            ]
         ]
     )
 
@@ -410,6 +539,7 @@ class TelegramBot:
         thread_ops_id: int | None = None,
         thread_alert_id: int | None = None,
         db: Any = None,
+        pinata_client: Any = None,
     ):
         if not AIOGRAM_AVAILABLE:
             raise ImportError("aiogram is required for TelegramBot")
@@ -424,6 +554,7 @@ class TelegramBot:
         self.thread_ops_id = thread_ops_id
         self.thread_alert_id = thread_alert_id
         self._db = db  # optional DatabaseManager for operator commands
+        self._pinata = pinata_client
         self._last_operator_thread_id: int | None = None
         self._dynamic_thread_bindings: dict[str, int] = {}
         self._callback_candidate_map: dict[str, str] = {}
@@ -583,6 +714,10 @@ class TelegramBot:
         return None
 
     def _thread_for(self, category: str) -> int | None:
+        """Resolve the target thread for a category with strict priority and fallback."""
+        if not self.chat_id:
+             return None
+             
         mapping = {
             "review": self.thread_review_id,
             "deploy": self.thread_deploy_id,
@@ -590,62 +725,60 @@ class TelegramBot:
             "ops": self.thread_ops_id,
             "alert": self.thread_alert_id,
         }
+        
+        # 1. Configured Env (Priority)
         configured = mapping.get(category)
         if configured is not None:
-            return configured
+             return configured
+             
+        # 2. Dynamic Runtime Setting (DB)
         dynamic = self._dynamic_thread_bindings.get(category)
         if dynamic is not None:
-            return dynamic
-
-        if category in {"deploy", "alert"}:
-            review_thread = mapping.get("review") or self._dynamic_thread_bindings.get("review")
-            if review_thread is not None:
-                return review_thread
-        if category == "claim":
-            ops_thread = mapping.get("ops") or self._dynamic_thread_bindings.get("ops")
-            if ops_thread is not None:
-                return ops_thread
+             return dynamic
+             
+        # 3. Categorical Fallbacks (Logic)
+        if category == "alert":
+             # Alerts fallback to the review area
+             return mapping.get("review") or self._dynamic_thread_bindings.get("review")
+        
+        if category in ("deploy", "claim"):
+             # Deploys/Claims fallback to the ops area
+             return mapping.get("ops") or self._dynamic_thread_bindings.get("ops")
+             
+        # 4. Global Ops (General Area)
         if category != "ops":
-            ops_thread = mapping.get("ops") or self._dynamic_thread_bindings.get("ops")
-            if ops_thread is not None:
-                return ops_thread
+             ops_thread = mapping.get("ops") or self._dynamic_thread_bindings.get("ops")
+             if ops_thread is not None:
+                  return ops_thread
+                  
+        # 5. Default Thread / Chat Root
         return self._resolve_message_thread_id()
 
     async def _send_bot_message(
         self,
-        *,
         text: str,
         parse_mode: str = "HTML",
-        reply_markup: Any | None = None,
-        disable_web_page_preview: bool = False,
+        reply_markup: Any = None,
+        disable_web_page_preview: bool = True,
         message_thread_id: int | None = None,
     ) -> Any:
-        """Send message with bounded retries for transient Telegram API failures."""
-        payload: dict[str, Any] = {
-            "chat_id": self.chat_id,
-            "text": text,
-            "parse_mode": parse_mode,
-        }
-        resolved_thread_id = self._resolve_message_thread_id(message_thread_id)
-        if resolved_thread_id is not None:
-            payload["message_thread_id"] = resolved_thread_id
-        if reply_markup is not None:
-            payload["reply_markup"] = reply_markup
-        if disable_web_page_preview:
-            payload["disable_web_page_preview"] = True
-
-        for attempt in range(3):
-            try:
-                return await self.bot.send_message(**payload)
-            except Exception as exc:
-                retry_after = getattr(exc, "retry_after", None)
-                if retry_after and attempt < 2:
-                    await asyncio.sleep(float(retry_after) + 0.2)
-                    continue
-                if attempt < 2:
-                    await asyncio.sleep(0.4 * (attempt + 1))
-                    continue
-                raise
+        """Shared message sender with robustness guards."""
+        if not self.chat_id:
+             logger.warning("Attempted to send message, but chat_id is missing.")
+             return None
+             
+        try:
+            return await self.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+                disable_web_page_preview=disable_web_page_preview,
+                message_thread_id=message_thread_id,
+            )
+        except Exception as exc:
+            logger.error(f"Telegram API call failed: {exc}", exc_info=True)
+            return None
 
     def _setup_handlers(self) -> None:
         """Setup message and callback handlers."""
@@ -669,17 +802,55 @@ class TelegramBot:
         self.dp.message.register(self._handle_manualdeploy, Command("manualdeploy"))
         self.dp.message.register(self._handle_deploynow, Command("deploynow"))
         self.dp.message.register(self._handle_deployca, Command("deployca"))
-        # Backward-compatible aliases
-        self.dp.message.register(self._handle_queue, Command("candidates"))
-        self.dp.message.register(self._handle_status, Command("stats"))
-        self.dp.message.register(self._handle_deploys, Command("deployments"))
         self.dp.message.register(self._handle_cancel, Command("cancel"))
+        self.dp.message.register(self._handle_setthreshold, Command("setthreshold"))
+        self.dp.message.register(self._handle_panic, Command("panic"))
         self.dp.callback_query.register(self._handle_approve, F.data.startswith("approve:"))
         self.dp.callback_query.register(self._handle_reject, F.data.startswith("reject:"))
         self.dp.callback_query.register(self._handle_detail, F.data.startswith("detail:"))
         self.dp.callback_query.register(self._handle_refresh, F.data.startswith("refresh:"))
-        self.dp.callback_query.register(self._handle_quick_queue, F.data == "queue")
-        self.dp.callback_query.register(self._handle_quick_deploys, F.data == "deploys")
+        self.dp.callback_query.register(self._handle_detail, F.data.startswith("refresh_detail:"))
+        # Master Navigation Callbacks
+        self.dp.callback_query.register(self._handle_nav_status, F.data == "nav_status")
+        self.dp.callback_query.register(self._handle_nav_queue, F.data == "nav_queue")
+        self.dp.callback_query.register(self._handle_nav_deploys, F.data == "nav_deploys")
+        self.dp.callback_query.register(self._handle_nav_control, F.data == "nav_control")
+        self.dp.callback_query.register(self._handle_nav_tools, F.data == "nav_tools")
+        self.dp.callback_query.register(self._handle_nav_tools_mode, F.data == "nav_tools_mode")
+        self.dp.callback_query.register(self._handle_nav_tools_bot, F.data == "nav_tools_bot")
+        self.dp.callback_query.register(self._handle_nav_tools_plat, F.data == "nav_tools_plat")
+        self.dp.callback_query.register(self._handle_nav_tools_claim, F.data == "nav_tools_claim")
+        self.dp.callback_query.register(self._handle_nav_tools_wallets, F.data == "nav_tools_wallets")
+        self.dp.callback_query.register(self._handle_nav_tools_pair, F.data == "nav_tools_pair")
+        self.dp.callback_query.register(self._handle_nav_tools_auto, F.data == "nav_tools_auto")
+        self.dp.callback_query.register(self._handle_exec_pair, F.data.startswith("exec_pair:"))
+        self.dp.callback_query.register(self._handle_exec_setmode, F.data.startswith("exec_mode:"))
+        self.dp.callback_query.register(self._handle_exec_setbot, F.data.startswith("exec_bot:"))
+        self.dp.callback_query.register(self._handle_exec_setplat, F.data.startswith("exec_plat:"))
+        self.dp.callback_query.register(self._handle_exec_claim, F.data.startswith("exec_claim:"))
+        self.dp.callback_query.register(self._handle_nav_help, F.data == "nav_help")
+        # Wizard Handlers
+        self.dp.callback_query.register(self._handle_nav_wizard, F.data == "nav_wizard")
+        self.dp.callback_query.register(self._handle_wizard_platform, ManualDeployStates.platform, F.data.startswith("wiz_plat:"))
+        self.dp.message.register(self._handle_wizard_name, ManualDeployStates.name)
+        self.dp.message.register(self._handle_wizard_symbol, ManualDeployStates.symbol)
+        self.dp.message.register(self._handle_wizard_image, ManualDeployStates.image)
+        self.dp.callback_query.register(self._handle_wizard_image_auto, ManualDeployStates.image, F.data == "wiz_img:auto")
+        self.dp.message.register(self._handle_wizard_description, ManualDeployStates.description)
+        self.dp.callback_query.register(self._handle_wizard_description_skip, ManualDeployStates.description, F.data == "wiz_desc:skip")
+        self.dp.callback_query.register(self._handle_wizard_confirm, ManualDeployStates.confirm, F.data == "wiz_confirm")
+        self.dp.callback_query.register(self._handle_wizard_edit, F.data.startswith("wiz_edit:"))
+        self.dp.callback_query.register(self._handle_wizard_back, F.data == "wiz_back")
+        self.dp.callback_query.register(self._handle_wizard_suggest, F.data == "wiz_suggest")
+        self.dp.callback_query.register(self._handle_wizard_desc_suggest, F.data == "wiz_desc_suggest")
+        self.dp.callback_query.register(self._handle_wizard_apply_suggest, F.data.startswith("wiz_apply_suggest:"))
+        self.dp.callback_query.register(self._handle_wizard_cancel, F.data == "wiz_cancel")
+        self.dp.callback_query.register(self._handle_wizard_cancel, ManualDeployStates.platform, F.data == "wiz_cancel")
+        self.dp.callback_query.register(self._handle_wizard_cancel, ManualDeployStates.name, F.data == "wiz_cancel")
+        self.dp.callback_query.register(self._handle_wizard_cancel, ManualDeployStates.symbol, F.data == "wiz_cancel")
+        self.dp.callback_query.register(self._handle_wizard_cancel, ManualDeployStates.image, F.data == "wiz_cancel")
+        self.dp.callback_query.register(self._handle_wizard_cancel, ManualDeployStates.description, F.data == "wiz_cancel")
+        self.dp.callback_query.register(self._handle_wizard_cancel, ManualDeployStates.confirm, F.data == "wiz_cancel")
 
     def _is_authorized_chat(self, chat_id: Any) -> bool:
         return str(chat_id) == str(self.chat_id)
@@ -688,15 +859,6 @@ class TelegramBot:
         """Publish compact slash menu to Telegram."""
         await self.bot.set_my_commands(
             [
-                BotCommand(command="status", description="Operational status"),
-                BotCommand(command="control", description="Control panel"),
-                BotCommand(command="queue", description="Pending review queue"),
-                BotCommand(command="candidate", description="Candidate detail by ID"),
-                BotCommand(command="deploys", description="Recent deployments"),
-                BotCommand(command="claimfees", description="Claim rewards by token"),
-                BotCommand(command="setmode", description="Set mode review/auto"),
-                BotCommand(command="setbot", description="Set bot on/off"),
-                BotCommand(command="setdeployer", description="Set deployer mode"),
                 BotCommand(command="wallets", description="Show runtime wallet config"),
                 BotCommand(command="setsigner", description="Set deployer signer wallet/key"),
                 BotCommand(command="setadmin", description="Set token admin wallet"),
@@ -707,6 +869,8 @@ class TelegramBot:
                 BotCommand(command="help", description="Usage guide"),
                 BotCommand(command="pair", description="Pair bot to this chat"),
                 BotCommand(command="autothread", description="Auto-create forum topics"),
+                BotCommand(command="setthreshold", description="Set auto-deploy score threshold (0-100)"),
+                BotCommand(command="panic", description="EMERGENCY: Switch to review mode immediately"),
             ]
         )
 
@@ -729,6 +893,22 @@ class TelegramBot:
         current_bindings = dict(self._dynamic_thread_bindings)
         for category, topic_title in build_forum_topic_plan(current_bindings):
             try:
+                # Smart discovery: If we already have an ID, try to 'adapt' it (rename instead of create)
+                existing_id = current_bindings.get(category)
+                if existing_id:
+                    try:
+                        await self.bot.edit_forum_topic(
+                            chat_id=chat_id,
+                            message_thread_id=existing_id,
+                            name=topic_title,
+                        )
+                        created.append(f"{category}:{existing_id}")
+                        continue
+                    except Exception:
+                        # If edit fails, it might be deleted. Fall through to create.
+                        logger.debug(f"Failed to edit topic {existing_id} for {category}, will recreate.")
+
+                # If no ID or topic missing, create new
                 forum_topic = await self.bot.create_forum_topic(
                     chat_id=chat_id,
                     name=topic_title,
@@ -746,11 +926,56 @@ class TelegramBot:
         return created, failures
 
     async def _handle_pair(self, message: Message) -> None:
-        """Pair bot to current chat for easier setup in groups/forum topics."""
+        """Pair bot to current chat or bind current thread to a specific category."""
         self.chat_id = str(message.chat.id)
         self._persist_authorized_chat(self.chat_id)
         thread_id = getattr(message, "message_thread_id", None)
         self._capture_operator_thread(thread_id)
+        
+        args = (message.text or "").strip().split()
+        category = args[1].lower() if len(args) > 1 else None
+        
+        if category:
+             if category not in _THREAD_CATEGORIES:
+                  await message.answer(
+                       _fmt_dashboard_header("Notice", "⚠️") +
+                       f"Invalid category. Use: {', '.join(_THREAD_CATEGORIES)}", 
+                       parse_mode="HTML",
+                       reply_markup=_build_dashboard_keyboard()
+                  )
+                  return
+             
+             if not thread_id:
+                  await message.answer(
+                       _fmt_dashboard_header("Notice", "⚠️") +
+                       "Run <code>/pair &lt;cat&gt;</code> inside a topic.", 
+                       parse_mode="HTML",
+                       reply_markup=_build_dashboard_keyboard()
+                  )
+                  return
+                  
+             # Bind and Rename (Smart Adaptation)
+             self._bind_dynamic_thread(category, thread_id)
+             topic_title = _DEFAULT_FORUM_TOPIC_TITLES.get(category, f"cnc-{category}")
+             try:
+                  await self.bot.edit_forum_topic(chat_id=self.chat_id, message_thread_id=thread_id, name=topic_title)
+                  await message.answer(
+                       _fmt_dashboard_header("Success", "✅") +
+                       f"Bound and renamed topic to <b>{topic_title}</b>.", 
+                       parse_mode="HTML",
+                       reply_markup=_build_dashboard_keyboard()
+                  )
+             except Exception as exc:
+                  logger.warning(f"Failed renaming topic {thread_id} to {topic_title}: {exc}")
+                  await message.answer(
+                       _fmt_dashboard_header("Success", "✅") +
+                       f"Bound to <b>{category}</b> (Rename failed - check permissions)", 
+                       parse_mode="HTML",
+                       reply_markup=_build_dashboard_keyboard()
+                  )
+             return
+
+        # Regular pairing (Ops binding)
         self._bind_dynamic_thread("ops", thread_id)
         created, failures = await self._ensure_forum_topics_bound()
         created_line = ", ".join(created) if created else "none"
@@ -764,12 +989,13 @@ class TelegramBot:
         else:
             failure_block = "\n\n<b>Auto Thread Setup:</b> done"
         await message.answer(
-            "🔗 <b>Paired</b>\n\n"
+            _fmt_dashboard_header("Paired", "🔗") +
             f"• <b>Chat ID:</b> {_fmt_inline_code(self.chat_id)}\n"
             f"• <b>Topics created:</b> {_fmt_text(created_line)}\n"
             "Bot will now accept commands in this chat."
             f"{failure_block}",
             parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard(),
         )
 
     async def _handle_autothread(self, message: Message) -> None:
@@ -778,17 +1004,19 @@ class TelegramBot:
         created, failures = await self._ensure_forum_topics_bound()
         if failures:
             await message.answer(
-                "⚠️ <b>Auto Thread Setup Incomplete</b>\n\n"
+                _fmt_dashboard_header("Auto Thread Setup Incomplete", "⚠️") +
                 f"• <b>Created:</b> {_fmt_text(', '.join(created) if created else 'none')}\n"
                 f"• <b>Errors:</b> {_fmt_text(' | '.join(failures[:5]))}\n\n"
                 "Ensure bot has admin permission <b>Manage Topics</b>.",
                 parse_mode="HTML",
+                reply_markup=_build_dashboard_keyboard(),
             )
             return
         await message.answer(
-            "✅ <b>Auto Thread Setup Complete</b>\n\n"
+            _fmt_dashboard_header("Auto Thread Setup Complete", "✅") +
             f"• <b>Created:</b> {_fmt_text(', '.join(created) if created else 'none')}",
             parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard(),
         )
 
     # ── command handlers ──────────────────────────────────────────────────────
@@ -799,68 +1027,46 @@ class TelegramBot:
         thread_id = getattr(message, "message_thread_id", None)
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("ops", thread_id)
-        await message.answer(
-            "🤖 <b>Clank&Claw Bot</b>\n\n"
-            "Manual review mode is active.\n"
-            "Approve/reject is done per candidate from inline buttons.\n\n"
-            "<b>Commands:</b>\n"
-            "/status — Operational counters\n"
-            "/control — Runtime control panel\n"
-            "/queue — Pending queue\n"
-            "/candidate &lt;id&gt; — Candidate detail\n"
-            "/deploys — Recent deployments\n"
-            "/claimfees &lt;token_address&gt; — Claim token rewards\n"
-            "/setmode &lt;review|auto&gt; — Set review mode\n"
-            "/setbot &lt;on|off&gt; — Toggle bot notifications\n"
-            "/setdeployer &lt;clanker|bankr|both&gt; — Set deployer mode\n"
-            "/wallets — Show runtime wallet config\n"
-            "/setsigner &lt;address|private_key|default&gt; — Set deployer signer\n"
-            "/setadmin &lt;address|default&gt; — Set token admin\n"
-            "/setreward &lt;address|default&gt; — Set reward recipient\n"
-            "/manualdeploy — Show manual deploy command format\n"
-            "/deploynow &lt;platform&gt; &lt;name&gt; &lt;symbol&gt; &lt;image_or_cid|auto&gt; [description]\n"
-            "/deployca &lt;platform&gt; &lt;candidate_id&gt; — Force deploy existing candidate\n"
-            "/help — This help",
-            parse_mode="HTML",
+        
+        if not self.chat_id: 
+             return
+             
+        await self.bot.send_message(
+             chat_id=self.chat_id,
+             text=(
+                  _fmt_dashboard_header("Welcome Operator", "👋") +
+                  "Bot initialized and paired.\n"
+                  "• Use <code>/pair &lt;cat&gt;</code> to custom bind topics.\n"
+                  "• Run <code>/status</code> for dashboard health.\n"
+                  "• Run <code>/help</code> for manual instructions."
+             ),
+             parse_mode="HTML",
+             reply_markup=_build_dashboard_keyboard(),
+             message_thread_id=thread_id,
         )
 
     async def _handle_help(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
-            return
-        thread_id = getattr(message, "message_thread_id", None)
-        self._capture_operator_thread(thread_id)
-        self._bind_dynamic_thread("ops", thread_id)
+             return
         await message.answer(
-            "📚 <b>Help</b>\n\n"
-            "<b>Review Flow</b>\n"
-            "1. New candidate arrives with ✅/❌ buttons\n"
-            "2. Approve → lock + deploy preparation\n"
-            "3. Reject → mark rejected immediately\n\n"
-            "<b>Commands:</b>\n"
-            "/status — Operational counters\n"
-            "/control — Runtime control panel\n"
-            "/queue — Pending queue\n"
-            "/candidate &lt;id&gt; — Candidate detail\n"
-            "/deploys — Recent deployments\n"
-            "/claimfees &lt;token_address&gt; — Claim rewards via Clanker SDK\n"
-            "/setmode &lt;review|auto&gt; — Set review mode\n"
-            "/setbot &lt;on|off&gt; — Toggle bot notifications\n"
-            "/setdeployer &lt;clanker|bankr|both&gt; — Set deployer mode\n"
-            "/wallets — Show runtime wallet config\n"
-            "/setsigner &lt;address|private_key|default&gt; — Set deployer signer\n"
-            "/setadmin &lt;address|default&gt; — Set token admin\n"
-            "/setreward &lt;address|default&gt; — Set reward recipient\n"
-            "/manualdeploy — Show manual deploy command format\n"
-            "/deploynow &lt;platform&gt; &lt;name&gt; &lt;symbol&gt; &lt;image_or_cid|auto&gt; [description]\n"
-            "/deployca &lt;platform&gt; &lt;candidate_id&gt; — Force deploy existing candidate\n"
-            "/cancel &lt;id&gt; — Cancel pending review (manual override)\n"
-            "/help — Command guide",
-            parse_mode="HTML",
+            _fmt_dashboard_header("Command Center", "🛰") +
+             "<b>Operational Flow</b>\n"
+             "• Click <b>Approval/Reject</b> on signals to execute.\n"
+             "• Use <b>🧪 Edit & Deploy</b> to customize metadata.\n"
+             "• Use <b>🛠 Tools</b> for advanced system configuration.\n\n"
+             "<b>Quick Commands</b>\n"
+             "• <code>/status</code>: Real-time bot health.\n"
+             "• <code>/queue</code>: Pending review items.\n"
+             "• <code>/manualdeploy</code>: Launch the Wizard.",
+             parse_mode="HTML",
+             reply_markup=_build_dashboard_keyboard(),
         )
 
-    async def _handle_status(self, message: Message) -> None:
+    async def _handle_status(self, message: Message, state: FSMContext | None = None) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+        if state:
+            await state.clear()
         thread_id = getattr(message, "message_thread_id", None)
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("ops", thread_id)
@@ -868,19 +1074,27 @@ class TelegramBot:
             try:
                 stats = self._db.get_stats()
                 await message.answer(
-                    "✅ <b>Bot Status</b>\n\n"
+                    _fmt_dashboard_header("Bot Status", "📊") +
                     f"Pending reviews: <b>{stats['pending_reviews']}</b>\n"
                     f"Total candidates seen: <b>{stats['total_candidates']}</b>\n"
                     f"Deployed: <b>{stats['deployed']}</b>\n"
                     f"Deploy failures: <b>{stats['deploy_failed']}</b>\n"
-                    f"Rejected: <b>{stats['rejected']}</b>",
+                    f"Rejected: <b>{stats['rejected']}</b>\n\n"
+                    f"📂 <b>Binding Map:</b>\n"
+                    + "\n".join([f"• {c.capitalize()}: {self._dynamic_thread_bindings.get(c, '—')}" for c in _THREAD_CATEGORIES]),
                     parse_mode="HTML",
+                    reply_markup=_build_dashboard_keyboard(),
                 )
                 return
             except Exception as exc:
                 logger.error(f"Error fetching status: {exc}", exc_info=True)
 
-        await message.answer("✅ <b>Bot Status</b>\n\nStatus: Running", parse_mode="HTML")
+        await message.answer(
+             _fmt_dashboard_header("Bot Status", "✅") +
+             "Status: Running", 
+             parse_mode="HTML",
+             reply_markup=_build_dashboard_keyboard()
+        )
 
     async def _handle_queue(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
@@ -889,19 +1103,36 @@ class TelegramBot:
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("ops", thread_id)
         if not self._db:
-            await message.answer("ℹ️ Database not available.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "ℹ️") +
+                 "Database not available.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         try:
             rows = self._db.list_pending_reviews()
             msg = build_queue_message(rows)
-            await message.answer(msg, parse_mode="HTML")
+            await message.answer(
+                _fmt_dashboard_header("Pending Queue", "📥") + msg,
+                parse_mode="HTML",
+                reply_markup=_build_dashboard_keyboard(),
+            )
         except Exception as exc:
             logger.error(f"Error listing queue: {exc}", exc_info=True)
-            await message.answer("⚠️ Error fetching queue.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Error fetching queue.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
 
-    async def _handle_control(self, message: Message) -> None:
+    async def _handle_control(self, message: Message, state: FSMContext | None = None) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+        if state:
+            await state.clear()
+            
         thread_id = getattr(message, "message_thread_id", None)
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("ops", thread_id)
@@ -909,7 +1140,7 @@ class TelegramBot:
         mode = (self._runtime_get("ops.mode") or "review").strip().lower()
         bot_state = (self._runtime_get("ops.bot_enabled") or "on").strip().lower()
         deployer = (self._runtime_get("ops.deployer_mode") or "clanker").strip().lower()
-        auto_rule = (self._runtime_get("ops.auto_rule") or "priority_review_only").strip().lower()
+        auto_threshold = self._runtime_get("ops.auto_threshold") or "90"
 
         mode_view = "🟩 AUTO" if mode == "auto" else "🟦 REVIEW"
         bot_view = "🟢 ON" if bot_state in {"on", "true", "1", "yes"} else "🔴 OFF"
@@ -919,17 +1150,21 @@ class TelegramBot:
         if deployer == "bankr":
             deployer_view = "BANKR (planned)"
 
+        threshold_note = f" (auto-deploys at ≥ {auto_threshold}/100)" if mode == "auto" else ""
+
         await message.answer(
-            "🎛️ <b>Runtime Control</b>\n\n"
-            f"• <b>Mode:</b> {mode_view}\n"
+            _fmt_dashboard_header("Master Dashboard", "⚙️") +
+            f"• <b>Mode:</b> {mode_view}{threshold_note}\n"
             f"• <b>Bot:</b> {bot_view}\n"
-            f"• <b>Deployer:</b> {_fmt_text(deployer_view)}\n"
-            f"• <b>Auto rule:</b> {_fmt_inline_code(auto_rule)}\n\n"
+            f"• <b>Deployer:</b> {_fmt_text(deployer_view)}\n\n"
             "Setters:\n"
             "• <code>/setmode review</code> or <code>/setmode auto</code>\n"
+            "• <code>/setthreshold &lt;50-100&gt;</code> — auto-deploy score floor\n"
             "• <code>/setbot on</code> or <code>/setbot off</code>\n"
-            "• <code>/setdeployer clanker|bankr|both</code>",
+            "• <code>/setdeployer clanker|bankr|both</code>\n"
+            "• <code>/panic</code> — 🚨 Emergency stop",
             parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard(),
         )
 
     async def _handle_setmode(self, message: Message) -> None:
@@ -940,16 +1175,107 @@ class TelegramBot:
         self._bind_dynamic_thread("ops", thread_id)
         parts = (message.text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
-            await message.answer("Usage: /setmode &lt;review|auto&gt;", parse_mode="HTML")
+            # Interactive Helper
+            await self._handle_nav_tools_mode(CallbackQuery(id="0", from_user=message.from_user, chat_instance="0", message=message))
             return
         mode = parts[1].strip().lower()
         if mode not in {"review", "auto"}:
-            await message.answer("⚠️ Invalid mode. Use review or auto.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Invalid mode. Use review or auto.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         if not self._runtime_set("ops.mode", mode):
-            await message.answer("⚠️ Failed saving mode.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Failed saving mode.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
-        await message.answer(f"✅ Mode set to <b>{_fmt_text(mode)}</b>.", parse_mode="HTML")
+        await message.answer(
+             _fmt_dashboard_header("Success", "✅") +
+             f"Mode set to <b>{_fmt_text(mode)}</b>.", 
+             parse_mode="HTML",
+             reply_markup=_build_dashboard_keyboard()
+        )
+
+    async def _handle_setthreshold(self, message: Message) -> None:
+        """Set the minimum score required for Auto-Deploy in Auto mode."""
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+        parts = (message.text or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            current = self._runtime_get("ops.auto_threshold") or "90"
+            await message.answer(
+                 _fmt_dashboard_header("Auto Threshold", "🎯") +
+                 f"Current auto-deploy threshold: <b>{_fmt_inline_code(current)}</b>/100\n\n"
+                 "Usage: <code>/setthreshold &lt;50-100&gt;</code>\n"
+                 "• Candidates scoring <b>≥ threshold</b> are auto-deployed in Auto mode.\n"
+                 "• Lower = more aggressive. Higher = more selective.",
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
+            return
+        try:
+            threshold = int(parts[1].strip())
+            if not (50 <= threshold <= 100):
+                raise ValueError("out of range")
+        except (ValueError, TypeError):
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Invalid threshold. Must be an integer between <b>50</b> and <b>100</b>.",
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
+            return
+        if not self._runtime_set("ops.auto_threshold", str(threshold)):
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Failed saving threshold.",
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
+            return
+        await message.answer(
+             _fmt_dashboard_header("Threshold Updated", "🎯") +
+             f"Auto-deploy threshold set to <b>{threshold}/100</b>.\n"
+             f"Signals scoring ≥ {threshold} will be deployed automatically when in AUTO mode.",
+             parse_mode="HTML",
+             reply_markup=_build_dashboard_keyboard()
+        )
+
+    async def _handle_panic(self, message: Message) -> None:
+        """EMERGENCY: Immediately force Review mode, halting all autonomous deployments."""
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+        # Force mode to review immediately
+        saved = self._runtime_set("ops.mode", "review")
+        if not saved:
+            await message.answer(
+                 _fmt_dashboard_header("PANIC FAILED", "🚨") +
+                 "⚠️ Could not write to database. <b>Manual intervention required.</b>",
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
+            return
+        await message.answer(
+             _fmt_dashboard_header("PANIC MODE ACTIVATED", "🚨") +
+             "🔴 <b>System is now in REVIEW mode.</b>\n\n"
+             "All autonomous deployments have been halted.\n"
+             "Every incoming signal will require <b>manual approval</b>.\n\n"
+             "<i>Run /setmode auto to resume autonomous operation.</i>",
+             parse_mode="HTML",
+             reply_markup=_build_dashboard_keyboard()
+        )
 
     async def _handle_setbot(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
@@ -959,16 +1285,36 @@ class TelegramBot:
         self._bind_dynamic_thread("ops", thread_id)
         parts = (message.text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
-            await message.answer("Usage: /setbot &lt;on|off&gt;", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Usage", "❓") +
+                 "Usage: /setbot &lt;on|off&gt;", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         value = parts[1].strip().lower()
         if value not in {"on", "off"}:
-            await message.answer("⚠️ Invalid value. Use on or off.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Invalid value. Use on or off.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         if not self._runtime_set("ops.bot_enabled", value):
-            await message.answer("⚠️ Failed saving bot state.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Failed saving bot state.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
-        await message.answer(f"✅ Bot notifications set to <b>{_fmt_text(value)}</b>.", parse_mode="HTML")
+        await message.answer(
+             _fmt_dashboard_header("Success", "✅") +
+             f"Bot notifications set to <b>{_fmt_text(value)}</b>.", 
+             parse_mode="HTML",
+             reply_markup=_build_dashboard_keyboard()
+        )
 
     async def _handle_setdeployer(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
@@ -978,21 +1324,38 @@ class TelegramBot:
         self._bind_dynamic_thread("ops", thread_id)
         parts = (message.text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
-            await message.answer("Usage: /setdeployer &lt;clanker|bankr|both&gt;", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Usage", "❓") +
+                 "Usage: /setdeployer &lt;clanker|bankr|both&gt;", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         value = parts[1].strip().lower()
         if value not in {"clanker", "bankr", "both"}:
-            await message.answer("⚠️ Invalid deployer mode.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Invalid deployer mode.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         if not self._runtime_set("ops.deployer_mode", value):
-            await message.answer("⚠️ Failed saving deployer mode.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Failed saving deployer mode.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         note = ""
         if value in {"bankr", "both"}:
             note = "\n⚠️ Bankr execution is not implemented yet; runtime will fallback to clanker."
         await message.answer(
-            f"✅ Deployer mode set to <b>{_fmt_text(value)}</b>.{note}",
+            _fmt_dashboard_header("Success", "✅") +
+            f"Deployer mode set to <b>{_fmt_text(value)}</b>.{note}",
             parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard()
         )
 
     async def _handle_candidate(self, message: Message) -> None:
@@ -1002,11 +1365,21 @@ class TelegramBot:
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("ops", thread_id)
         if not self._db:
-            await message.answer("ℹ️ Database not available.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "ℹ️") +
+                 "Database not available.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         parts = (message.text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
-            await message.answer("Usage: /candidate &lt;candidate_id&gt;", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Usage", "❓") +
+                 "Usage: /candidate &lt;candidate_id&gt;", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         candidate_id = parts[1].strip()
         try:
@@ -1015,10 +1388,16 @@ class TelegramBot:
                 detail_message,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
+                reply_markup=_build_dashboard_keyboard()
             )
         except Exception as exc:
             logger.error(f"Error fetching candidate detail: {exc}", exc_info=True)
-            await message.answer("⚠️ Error fetching candidate detail.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Error fetching candidate detail.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
 
     async def _handle_deploys(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
@@ -1027,15 +1406,29 @@ class TelegramBot:
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("ops", thread_id)
         if not self._db:
-            await message.answer("ℹ️ Database not available.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "ℹ️") +
+                 "Database not available.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         try:
             rows = self._db.list_recent_deployments(limit=10)
             msg = build_deploys_message(rows)
-            await message.answer(msg, parse_mode="HTML")
+            await message.answer(
+                _fmt_dashboard_header("Recent History", "📂") + msg,
+                parse_mode="HTML",
+                reply_markup=_build_dashboard_keyboard(),
+            )
         except Exception as exc:
             logger.error(f"Error fetching deployments: {exc}", exc_info=True)
-            await message.answer("⚠️ Error fetching deployments.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Error fetching deployments.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
 
     async def _handle_cancel(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
@@ -1044,11 +1437,21 @@ class TelegramBot:
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("ops", thread_id)
         if not self._db:
-            await message.answer("ℹ️ Database not available.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "ℹ️") +
+                 "Database not available.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         parts = (message.text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
-            await message.answer("Usage: /cancel &lt;candidate_id&gt;", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Usage", "❓") +
+                 "Usage: /cancel &lt;candidate_id&gt;", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         candidate_id = parts[1].strip()
         review_id = f"review-{candidate_id}"
@@ -1056,17 +1459,26 @@ class TelegramBot:
             ok = self._db.reject_review_item(review_id, "operator_cancel")
             if ok:
                 await message.answer(
-                    f"🚫 Review <code>{candidate_id}</code> cancelled.",
+                    _fmt_dashboard_header("Action Cancelled", "🚫") +
+                    f"Review <code>{candidate_id}</code> cancelled.",
                     parse_mode="HTML",
+                    reply_markup=_build_dashboard_keyboard(),
                 )
             else:
                 await message.answer(
-                    f"⚠️ Could not cancel <code>{candidate_id}</code> — not found or already processed.",
+                    _fmt_dashboard_header("Notice", "⚠️") +
+                    f"Could not cancel <code>{candidate_id}</code> — not found or already processed.",
                     parse_mode="HTML",
+                    reply_markup=_build_dashboard_keyboard()
                 )
         except Exception as exc:
             logger.error(f"Error cancelling review: {exc}", exc_info=True)
-            await message.answer("⚠️ Error cancelling review.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Error cancelling review.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
 
     async def _handle_claimfees(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
@@ -1075,11 +1487,17 @@ class TelegramBot:
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("claim", thread_id)
         if not self.on_claim_fees:
-            await message.answer("⚠️ Claim fees handler is not configured.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Claim fees handler is not configured.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         parts = (message.text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
-            await message.answer("Usage: /claimfees &lt;token_address&gt;", parse_mode="HTML")
+            # Interactive Helper
+            await self._handle_nav_tools_claim(CallbackQuery(id="0", from_user=message.from_user, chat_instance="0", message=message))
             return
         token_address = parts[1].strip()
         try:
@@ -1087,25 +1505,30 @@ class TelegramBot:
             if result.status == "claim_success":
                 tx_line = f"\n• <b>TX:</b> {_fmt_inline_code(result.tx_hash)}" if result.tx_hash else ""
                 claim_msg = (
-                    "💸 <b>Claim Result</b>\n\n"
+                    _fmt_dashboard_header("Claim Result", "💸") +
                     "<b>Status</b>\n"
                     "• <b>Outcome:</b> success\n"
                     f"• <b>Token:</b> {_fmt_inline_code(token_address)}{tx_line}"
                 )
-                await message.answer(claim_msg, parse_mode="HTML")
+                await message.answer(claim_msg, parse_mode="HTML", reply_markup=_build_dashboard_keyboard())
             else:
                 claim_msg = (
-                    "💸 <b>Claim Result</b>\n\n"
+                    _fmt_dashboard_header("Claim Result", "💸") +
                     "<b>Status</b>\n"
                     "• <b>Outcome:</b> failed\n"
                     f"• <b>Token:</b> {_fmt_inline_code(token_address)}\n"
                     f"• <b>Error:</b> {_fmt_text(result.error_code or 'unknown')}\n"
                     f"• <b>Message:</b> {_fmt_text(result.error_message or 'unknown')}"
                 )
-                await message.answer(claim_msg, parse_mode="HTML")
+                await message.answer(claim_msg, parse_mode="HTML", reply_markup=_build_dashboard_keyboard())
         except Exception as exc:
             logger.error("Error in claim fees handler: %s", exc, exc_info=True)
-            await message.answer("⚠️ Claim fees execution failed.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Claim fees execution failed.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
 
     def _runtime_get(self, key: str) -> str | None:
         if not self._db or not hasattr(self._db, "get_runtime_setting"):
@@ -1152,13 +1575,14 @@ class TelegramBot:
         reward_display = reward_runtime or "default (env/config)"
 
         await message.answer(
-            "👛 <b>Runtime Wallet Config</b>\n\n"
+            _fmt_dashboard_header("Wallet Runtime", "👛") +
             f"• <b>Signer/Deployer:</b> {_fmt_inline_code(signer_display)}\n"
             f"• <b>Token Admin:</b> {_fmt_inline_code(admin_display)}\n"
             f"• <b>Reward Recipient:</b> {_fmt_inline_code(reward_display)}\n\n"
             "Use /setsigner, /setadmin, /setreward to update.\n"
             "Use value <code>default</code> to clear override.",
             parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard(),
         )
 
     async def _handle_setsigner(self, message: Message) -> None:
@@ -1170,24 +1594,51 @@ class TelegramBot:
 
         parts = (message.text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
-            await message.answer("Usage: /setsigner &lt;address|private_key|default&gt;", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Usage", "❓") +
+                 "Usage: /setsigner &lt;address|private_key|default&gt;", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         value = parts[1].strip()
         if value.lower() in {"default", "clear", "reset"}:
             if not self._runtime_delete("wallet.deployer_signer"):
-                await message.answer("⚠️ Failed resetting signer override.", parse_mode="HTML")
+                await message.answer(
+                     _fmt_dashboard_header("Notice", "⚠️") +
+                     "Failed resetting signer override.", 
+                     parse_mode="HTML",
+                     reply_markup=_build_dashboard_keyboard()
+                )
                 return
-            await message.answer("✅ Signer override reset to default (env/config).", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Signer Status", "⚙️") +
+                 "Signer override reset to default.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         if not (_is_evm_address(value) or _is_private_key(value)):
-            await message.answer("⚠️ Invalid signer. Use EVM address or 0x private key.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Invalid signer. Use EVM address or 0x private key.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         if not self._runtime_set("wallet.deployer_signer", value):
-            await message.answer("⚠️ Failed saving signer override.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Failed saving signer override.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         await message.answer(
-            f"✅ Signer override updated: {_fmt_inline_code(_mask_sensitive_wallet(value))}",
+            _fmt_dashboard_header("Signer Status", "⚙️") +
+            f"Signer override updated: {_fmt_inline_code(_mask_sensitive_wallet(value))}",
             parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard()
         )
 
     async def _handle_setadmin(self, message: Message) -> None:
@@ -1199,22 +1650,52 @@ class TelegramBot:
 
         parts = (message.text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
-            await message.answer("Usage: /setadmin &lt;address|default&gt;", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Usage", "❓") +
+                 "Usage: /setadmin &lt;address|default&gt;", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         value = parts[1].strip()
         if value.lower() in {"default", "clear", "reset"}:
             if not self._runtime_delete("wallet.token_admin"):
-                await message.answer("⚠️ Failed resetting token admin override.", parse_mode="HTML")
+                await message.answer(
+                     _fmt_dashboard_header("Notice", "⚠️") +
+                     "Failed resetting token admin override.", 
+                     parse_mode="HTML",
+                     reply_markup=_build_dashboard_keyboard()
+                )
                 return
-            await message.answer("✅ Token admin override reset to default (env/config).", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Admin Status", "⚙️") +
+                 "Token admin override reset to default.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         if not _is_evm_address(value):
-            await message.answer("⚠️ Invalid token admin address.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Invalid token admin address.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         if not self._runtime_set("wallet.token_admin", value):
-            await message.answer("⚠️ Failed saving token admin override.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Failed saving token admin override.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
-        await message.answer(f"✅ Token admin updated: {_fmt_inline_code(value)}", parse_mode="HTML")
+        await message.answer(
+             _fmt_dashboard_header("Admin Settings", "⚙️") +
+             f"✅ Token admin updated: {_fmt_inline_code(value)}", 
+             parse_mode="HTML", 
+             reply_markup=_build_dashboard_keyboard()
+        )
 
     async def _handle_setreward(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
@@ -1225,22 +1706,52 @@ class TelegramBot:
 
         parts = (message.text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
-            await message.answer("Usage: /setreward &lt;address|default&gt;", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Usage", "❓") +
+                 "Usage: /setreward &lt;address|default&gt;", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         value = parts[1].strip()
         if value.lower() in {"default", "clear", "reset"}:
             if not self._runtime_delete("wallet.fee_recipient"):
-                await message.answer("⚠️ Failed resetting reward recipient override.", parse_mode="HTML")
+                await message.answer(
+                     _fmt_dashboard_header("Notice", "⚠️") +
+                     "Failed resetting reward recipient override.", 
+                     parse_mode="HTML",
+                     reply_markup=_build_dashboard_keyboard()
+                )
                 return
-            await message.answer("✅ Reward recipient override reset to default (env/config).", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Reward Status", "⚙️") +
+                 "Reward recipient override reset to default.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         if not _is_evm_address(value):
-            await message.answer("⚠️ Invalid reward recipient address.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Invalid reward recipient address.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         if not self._runtime_set("wallet.fee_recipient", value):
-            await message.answer("⚠️ Failed saving reward recipient override.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Failed saving reward recipient override.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
-        await message.answer(f"✅ Reward recipient updated: {_fmt_inline_code(value)}", parse_mode="HTML")
+        await message.answer(
+             _fmt_dashboard_header("Reward Status", "⚙️") +
+             f"Reward recipient updated: {_fmt_inline_code(value)}", 
+             parse_mode="HTML",
+             reply_markup=_build_dashboard_keyboard()
+        )
 
     async def _handle_manualdeploy(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
@@ -1249,18 +1760,16 @@ class TelegramBot:
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("ops", thread_id)
         await message.answer(
-            "🧪 <b>Manual Deploy Guide</b>\n\n"
+            _fmt_dashboard_header("Manual Deploy Guide", "🧪") +
             "<b>Direct Deploy:</b>\n"
-            "<code>/deploynow clanker \"Token Name\" SYMBOL auto optional description</code>\n"
-            "<code>/deploynow clanker \"Token Name\" SYMBOL ipfs://QmCID optional description</code>\n"
-            "<code>/deploynow clanker \"Token Name\" SYMBOL https://example.com/logo.png optional description</code>\n\n"
+            "<code>/deploynow clanker \"Token Name\" SYMBOL auto optional description</code>\n\n"
             "<b>Deploy Existing Candidate:</b>\n"
             "<code>/deployca clanker &lt;candidate_id&gt;</code>\n\n"
             "Notes:\n"
             "• Current executable platform: <b>clanker</b>\n"
-            "• <b>bankr</b>/<b>both</b> are reserved and will be rejected\n"
             "• Name with spaces must use quotes",
             parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard(),
         )
 
     async def _handle_deploynow(self, message: Message) -> None:
@@ -1272,28 +1781,50 @@ class TelegramBot:
         self._bind_dynamic_thread("deploy", thread_id)
         self._bind_dynamic_thread("alert", thread_id)
         if not self.on_manual_deploy:
-            await message.answer("⚠️ Manual deploy handler is not configured.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Manual deploy handler is not configured.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
 
         args = _parse_command_args(message.text or "")
         if len(args) < 4:
             await message.answer(
+                _fmt_dashboard_header("Usage", "❓") +
                 "Usage: /deploynow &lt;platform&gt; &lt;name&gt; &lt;symbol&gt; &lt;image_or_cid|auto&gt; [description]",
                 parse_mode="HTML",
+                reply_markup=_build_dashboard_keyboard()
             )
             return
         platform, token_name, token_symbol, image_ref = args[0], args[1], args[2], args[3]
         description = " ".join(args[4:]).strip() if len(args) > 4 else ""
 
         if platform.strip().lower() not in {"clanker", "bankr", "both"}:
-            await message.answer("⚠️ Invalid platform. Use clanker|bankr|both.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Invalid platform. Use clanker|bankr|both.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
 
         if len(token_name.strip()) < 2 or len(token_symbol.strip()) < 2:
-            await message.answer("⚠️ Token name/symbol too short.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Token name/symbol too short.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
 
-        await message.answer("⏳ Manual deploy started…", parse_mode="HTML")
+        await message.answer(
+             _fmt_dashboard_header("Processing", "⏳") +
+             "Manual deploy started…", 
+             parse_mode="HTML",
+             reply_markup=_build_dashboard_keyboard()
+        )
         try:
             result = await self.on_manual_deploy(
                 platform.strip().lower(),
@@ -1312,22 +1843,28 @@ class TelegramBot:
             success = bool(result.get("success"))
             if success:
                 await message.answer(
-                    "✅ <b>Manual Deploy Success</b>\n\n"
+                    _fmt_dashboard_header("Success", "✅") +
+                    "<b>Manual Deploy Success</b>\n\n"
                     f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}",
                     parse_mode="HTML",
+                    reply_markup=_build_dashboard_keyboard()
                 )
             else:
                 await message.answer(
-                    "❌ <b>Manual Deploy Failed</b>\n\n"
+                    _fmt_dashboard_header("Failure", "❌") +
+                    "<b>Manual Deploy Failed</b>\n\n"
                     f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}",
                     parse_mode="HTML",
+                    reply_markup=_build_dashboard_keyboard()
                 )
         except Exception as exc:
             logger.error("Error in deploynow handler: %s", exc, exc_info=True)
             await message.answer(
-                "⚠️ Manual deploy rejected.\n"
+                _fmt_dashboard_header("Failure", "⚠️") +
+                "Manual deploy rejected.\n"
                 f"Reason: {_fmt_text(str(exc))}",
                 parse_mode="HTML",
+                reply_markup=_build_dashboard_keyboard()
             )
 
     async def _handle_deployca(self, message: Message) -> None:
@@ -1339,21 +1876,38 @@ class TelegramBot:
         self._bind_dynamic_thread("deploy", thread_id)
         self._bind_dynamic_thread("alert", thread_id)
         if not self.on_manual_deploy_candidate:
-            await message.answer("⚠️ Manual candidate deploy handler is not configured.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Manual candidate deploy handler is not configured.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
 
         args = _parse_command_args(message.text or "")
         if len(args) < 2:
-            await message.answer("Usage: /deployca &lt;platform&gt; &lt;candidate_id&gt;", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Usage", "❓") +
+                 "Usage: /deployca &lt;platform&gt; &lt;candidate_id&gt;", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
         platform, candidate_id = args[0], args[1]
         if platform.strip().lower() not in {"clanker", "bankr", "both"}:
-            await message.answer("⚠️ Invalid platform. Use clanker|bankr|both.", parse_mode="HTML")
+            await message.answer(
+                 _fmt_dashboard_header("Notice", "⚠️") +
+                 "Invalid platform. Use clanker|bankr|both.", 
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+            )
             return
 
         await message.answer(
-            f"⏳ Deploying candidate {_fmt_inline_code(candidate_id)}…",
+            _fmt_dashboard_header("Processing", "⏳") +
+            f"Deploying candidate {_fmt_inline_code(candidate_id)}…",
             parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard()
         )
         try:
             result = await self.on_manual_deploy_candidate(
@@ -1369,30 +1923,36 @@ class TelegramBot:
             success = bool(result.get("success"))
             if success:
                 await message.answer(
-                    "✅ <b>Deploy Candidate Success</b>\n\n"
+                    _fmt_dashboard_header("Success", "✅") +
+                    "<b>Deploy Candidate Success</b>\n\n"
                     f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}",
                     parse_mode="HTML",
+                    reply_markup=_build_dashboard_keyboard()
                 )
             else:
                 await message.answer(
-                    "❌ <b>Deploy Candidate Failed</b>\n\n"
+                    _fmt_dashboard_header("Failure", "❌") +
+                    "<b>Deploy Candidate Failed</b>\n\n"
                     f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}",
                     parse_mode="HTML",
+                    reply_markup=_build_dashboard_keyboard()
                 )
         except Exception as exc:
             logger.error("Error in deployca handler: %s", exc, exc_info=True)
             await message.answer(
-                "⚠️ Deploy candidate rejected.\n"
+                _fmt_dashboard_header("Failure", "⚠️") +
+                "Deploy candidate rejected.\n"
                 f"Reason: {_fmt_text(str(exc))}",
                 parse_mode="HTML",
+                reply_markup=_build_dashboard_keyboard()
             )
 
     # ── callback handlers ─────────────────────────────────────────────────────
 
     async def _handle_approve(self, callback: CallbackQuery) -> None:
-        if not callback.data:
+        if not callback.data or not callback.message:
             return
-        if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
+        if not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
         thread_id = getattr(callback.message, "message_thread_id", None)
@@ -1407,15 +1967,18 @@ class TelegramBot:
 
         if self.on_approve:
             try:
-                await self.on_approve(candidate_id)
+                # Update current message to processing state immediately
                 if callback.message:
                     await callback.message.edit_text(
-                        f"✅ <b>Approved</b>\n\n"
-                        f"Candidate <code>{candidate_id}</code> approved.\n"
-                        f"Deploy preparation in progress…",
+                        _fmt_dashboard_header("Approving", "⌛") +
+                        f"Candidate {_fmt_inline_code(candidate_id)} approved.\n"
+                        "Check <b>cnc-deploy</b> for logs.",
                         parse_mode="HTML",
+                        reply_markup=None, # Remove all buttons
                     )
-                await callback.answer("Approved")
+                
+                await self.on_approve(candidate_id)
+                await callback.answer("Approved for Deployment")
                 return
             except ValueError as exc:
                 logger.info("Approve callback stale/already-processed for %s: %s", candidate_id, exc)
@@ -1432,9 +1995,9 @@ class TelegramBot:
         await callback.answer("Approved")
 
     async def _handle_reject(self, callback: CallbackQuery) -> None:
-        if not callback.data:
+        if not callback.data or not callback.message:
             return
-        if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
+        if not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
         thread_id = getattr(callback.message, "message_thread_id", None)
@@ -1447,13 +2010,16 @@ class TelegramBot:
 
         if self.on_reject:
             try:
-                await self.on_reject(candidate_id)
+                # Update current message to rejected state immediately
                 if callback.message:
                     await callback.message.edit_text(
                         f"❌ <b>Rejected</b>\n\n"
-                        f"Candidate <code>{candidate_id}</code> has been rejected.",
+                        f"Candidate {_fmt_inline_code(candidate_id)} has been rejected.",
                         parse_mode="HTML",
+                        reply_markup=None, # Remove all buttons
                     )
+                
+                await self.on_reject(candidate_id)
                 await callback.answer("Rejected")
                 return
             except ValueError as exc:
@@ -1481,10 +2047,17 @@ class TelegramBot:
         deployment = self._db.get_latest_deployment_for_candidate(candidate_id)
         return build_candidate_detail_message(candidate, decision, review_item, deployment)
 
+    def _build_review_keyboard(self, candidate_id: str, mode: str = "summary") -> Any:
+        return build_review_keyboard(
+            candidate_id,
+            encode_candidate_id=self._encode_callback_candidate_id,
+            mode=mode,
+        )
+
     async def _handle_detail(self, callback: CallbackQuery) -> None:
-        if not callback.data:
+        if not callback.data or not callback.message:
             return
-        if not callback.message or not self._is_authorized_chat(callback.message.chat.id):
+        if not self._is_authorized_chat(callback.message.chat.id):
             await callback.answer("Unauthorized", show_alert=True)
             return
         thread_id = getattr(callback.message, "message_thread_id", None)
@@ -1494,11 +2067,790 @@ class TelegramBot:
         candidate_id = self._decode_callback_candidate_id(encoded_candidate_id)
         try:
             text = await self._render_candidate_detail(candidate_id)
-            await callback.message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
-            await callback.answer("Detail sent")
+            await callback.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=self._build_review_keyboard(candidate_id, mode="detail"),
+                disable_web_page_preview=True,
+            )
+            await callback.answer("Detail View")
         except Exception as exc:
             logger.error("Error handling detail callback: %s", exc, exc_info=True)
             await callback.answer("Detail failed", show_alert=True)
+
+    async def _handle_nav_status(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Dashboard Navigation: Quick jump to Status."""
+        if not callback.message:
+            return
+        if not self._is_authorized_chat(callback.message.chat.id):
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+
+        await self._handle_status(callback.message, state)
+        await callback.answer()
+
+    async def _handle_nav_queue(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Dashboard Navigation: Quick jump to Queue."""
+        if not callback.message:
+            return
+        if not self._is_authorized_chat(callback.message.chat.id):
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+            
+        await state.clear()
+        await self._handle_queue(callback.message)
+        await callback.answer()
+
+    async def _handle_nav_deploys(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Dashboard Navigation: Quick jump to Recent Deploys."""
+        if not callback.message:
+             return
+        if not self._is_authorized_chat(callback.message.chat.id):
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+            
+        await state.clear()
+        await self._handle_deploys(callback.message)
+        await callback.answer()
+
+    async def _handle_nav_control(self, callback: CallbackQuery) -> None:
+        """Dashboard Navigation: Quick jump to Dashboard."""
+        if not callback.message:
+             return
+        await self._handle_control(callback.message)
+        await callback.answer()
+
+    async def _handle_nav_tools(self, callback: CallbackQuery) -> None:
+        """Navigation: Show master command hub."""
+        if not callback.message:
+             return
+        await callback.message.edit_text(
+            _fmt_dashboard_header("System Tools", "🛠") +
+            "Direct access to all bot operations and settings:",
+            parse_mode="HTML",
+            reply_markup=_build_tools_keyboard()
+        )
+        await callback.answer()
+
+    async def _handle_nav_tools_mode(self, callback: CallbackQuery) -> None:
+        """Menu: Mode Toggle."""
+        if not callback.message: return
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Select Operating Mode", "🔄") +
+            "• <b>Review:</b> Manual approval required for all signals.\n"
+            "• <b>Auto:</b> High-alpha signals are deployed instantly.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📑 Review Mode", callback_data="exec_mode:review"),
+                    InlineKeyboardButton(text="⚡ Auto Mode", callback_data="exec_mode:auto"),
+                ],
+                [InlineKeyboardButton(text="↩️ Tools", callback_data="nav_tools")]
+            ])
+        )
+        await callback.answer()
+
+    async def _handle_nav_tools_bot(self, callback: CallbackQuery) -> None:
+        """Menu: Bot Toggle."""
+        if not callback.message: return
+        await callback.message.edit_text(
+            _fmt_dashboard_header("System State", "🤖") +
+            "Enable or disable all automated bot interactions:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🟢 Enable Bot", callback_data="exec_bot:on"),
+                    InlineKeyboardButton(text="🔴 Disable Bot", callback_data="exec_bot:off"),
+                ],
+                [InlineKeyboardButton(text="↩️ Tools", callback_data="nav_tools")]
+            ])
+        )
+        await callback.answer()
+
+    async def _handle_nav_tools_plat(self, callback: CallbackQuery) -> None:
+        """Menu: Platform Toggle."""
+        if not callback.message: return
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Select Deployment Platform", "🏗") +
+            "Choose where to execute token launches:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🟦 Clanker", callback_data="exec_plat:clanker"),
+                    InlineKeyboardButton(text="🟧 Bankr", callback_data="exec_plat:bankr"),
+                ],
+                [
+                    InlineKeyboardButton(text="🟩 Both", callback_data="exec_plat:both"),
+                ],
+                [InlineKeyboardButton(text="↩️ Tools", callback_data="nav_tools")]
+            ])
+        )
+        await callback.answer()
+
+    async def _handle_nav_tools_pair(self, callback: CallbackQuery) -> None:
+        """Menu: Pair Current Topic."""
+        if not callback.message: return
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Bind Topic", "📍") +
+            "Select the functional category for this thread:",
+            parse_mode="HTML",
+            reply_markup=_build_category_keyboard("exec_pair")
+        )
+        await callback.answer()
+
+    async def _handle_nav_tools_claim(self, callback: CallbackQuery) -> None:
+        """Menu: Manual Claim Fees with 8-day rolling window."""
+        if not callback.message: return
+        if not self._db:
+             await callback.answer("Database not available", show_alert=True)
+             return
+             
+        try:
+             # Look for recent successful deployments in the last 8 days
+             eight_days_ago = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+             # We assume list_recent_deployments exists or we use a filter
+             rows = self._db.list_recent_deployments(limit=20)
+             success_rows = [r for r in rows if r["status"] == "deploy_success" and r["contract_address"] and r["observed_at"] >= eight_days_ago]
+             
+             if not success_rows:
+                  await callback.message.edit_text(
+                       _fmt_dashboard_header("Fee Claim", "💸") + 
+                       "No successful deployments found in the last 8 days.\n"
+                       "<i>Tokens must be deployed via Clank and Claw to appear here.</i>",
+                       parse_mode="HTML",
+                       reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="↩️ Tools Hub", callback_data="nav_tools")]
+                       ])
+                  )
+                  await callback.answer("No tokens found")
+                  return
+                  
+             keyboard = []
+             for r in success_rows:
+                  label = f"💰 {r['symbol']} ({r['contract_address'][:8]}…)"
+                  keyboard.append([InlineKeyboardButton(text=label, callback_data=f"exec_claim:{r['contract_address']}")])
+             keyboard.append([InlineKeyboardButton(text="↩️ Back", callback_data="nav_tools")])
+             
+             await callback.message.edit_text(
+                  _fmt_dashboard_header("Select Token", "💸") + 
+                  "Choose a recently deployed token to claim accumulated fees:",
+                  parse_mode="HTML",
+                  reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+             )
+             await callback.answer()
+        except Exception as exc:
+             logger.error(f"Error in claim tool: {exc}", exc_info=True)
+             await callback.answer("Claim menu failed", show_alert=True)
+
+    async def _handle_nav_tools_wallets(self, callback: CallbackQuery) -> None:
+        """Action: Show Wallet Status."""
+        if not callback.message: return
+        await self._handle_wallets(callback.message)
+        await callback.answer()
+
+    async def _handle_nav_tools_auto(self, callback: CallbackQuery) -> None:
+        """Action: Run Autothread."""
+        if not callback.message: return
+        await self._handle_autothread(callback.message)
+        await callback.answer()
+
+    async def _handle_exec_pair(self, callback: CallbackQuery) -> None:
+        """Action: Finalize pairing via button."""
+        if not callback.data or not callback.message: return
+        category = callback.data.split(":")[1]
+        thread_id = getattr(callback.message, "message_thread_id", None)
+        
+        # We reuse the logic from _handle_pair but without the arg parsing
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread(category, thread_id)
+        
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Success", "✅") +
+            f"Thread bound to <b>{category.upper()}</b>.",
+            parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard()
+        )
+        await callback.answer(f"Bound to {category}")
+
+    async def _handle_exec_setmode(self, callback: CallbackQuery) -> None:
+        """Action: Finalize mode via button."""
+        if not callback.data or not callback.message: return
+        value = callback.data.split(":")[1]
+        self._runtime_set("ops.mode", value)
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Mode Updated", "✅") +
+            f"Operating mode set to <b>{value.upper()}</b>.",
+            parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard()
+        )
+        await callback.answer(f"Mode: {value}")
+
+    async def _handle_exec_setbot(self, callback: CallbackQuery) -> None:
+        """Action: Finalize bot toggle via button."""
+        if not callback.data or not callback.message: return
+        value = callback.data.split(":")[1]
+        self._runtime_set("ops.bot_enabled", value)
+        status = "ENABLED" if value == "on" else "DISABLED"
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Bot Status", "✅") +
+            f"Automated interactions are now <b>{status}</b>.",
+            parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard()
+        )
+        await callback.answer(f"Bot {status}")
+
+    async def _handle_exec_setplat(self, callback: CallbackQuery) -> None:
+        """Action: Finalize platform via button."""
+        if not callback.data or not callback.message: return
+        value = callback.data.split(":")[1]
+        self._runtime_set("ops.deployer_mode", value)
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Platform Updated", "✅") +
+            f"Execution target set to <b>{value.upper()}</b>.",
+            parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard()
+        )
+        await callback.answer(f"Platform: {value}")
+
+    async def _handle_exec_claim(self, callback: CallbackQuery) -> None:
+        """Action: Finalize claim via button."""
+        if not callback.data or not callback.message: return
+        address = callback.data.split(":")[1]
+        if not self.on_claim_fees:
+             await callback.answer("Claim handler missing", show_alert=True)
+             return
+             
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Claiming", "⌛") +
+            f"Starting claim sequence for <code>{address}</code>...",
+            parse_mode="HTML",
+            reply_markup=None
+        )
+        
+        try:
+            result = await self.on_claim_fees(address)
+            if result.status == "claim_success":
+                 await callback.message.edit_text(
+                     _fmt_dashboard_header("Claim Success", "✅") +
+                     f"Successfully claimed fees for <code>{address}</code>.\n\n"
+                     f"• <b>TX:</b> <code>{result.tx_hash}</code>",
+                     parse_mode="HTML",
+                     reply_markup=_build_dashboard_keyboard()
+                 )
+            else:
+                 await callback.message.edit_text(
+                     _fmt_dashboard_header("Claim Failed", "❌") +
+                     f"Failed claiming fees for <code>{address}</code>.\n"
+                     f"Reason: <i>{result.error_message}</i>",
+                     parse_mode="HTML",
+                     reply_markup=_build_dashboard_keyboard()
+                 )
+        except Exception as exc:
+             await callback.message.edit_text(
+                 _fmt_dashboard_header("Error", "⚠️") + f"Internal error during claim: {exc}",
+                 parse_mode="HTML",
+                 reply_markup=_build_dashboard_keyboard()
+             )
+        await callback.answer()
+
+    async def _handle_nav_help(self, callback: CallbackQuery) -> None:
+        """Dashboard Navigation: Quick jump to Help."""
+        if not callback.message:
+             return
+        await self._handle_help(callback.message)
+        await callback.answer()
+
+    # ── Wizard Handlers ───────────────────────────────────────────────────────
+
+    async def _handle_nav_wizard(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Dashboard Navigation: Start Interactive Manual Deploy Wizard."""
+        if not callback.message:
+             return
+        if not self._is_authorized_chat(callback.message.chat.id):
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+            
+        await state.clear()
+        await state.set_state(ManualDeployStates.platform)
+        
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Platform Choice", "🧪") +
+            "Please select the deployment platform:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🟦 CLANKER", callback_data="wiz_plat:clanker"),
+                        InlineKeyboardButton(text="🟧 BANKR", callback_data="wiz_plat:bankr"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="🟩 BOTH", callback_data="wiz_plat:both"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="❌ Cancel Setup", callback_data="wiz_cancel"),
+                    ]
+                ]
+            )
+        )
+        await callback.answer()
+
+    async def _handle_wizard_edit(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Start Wizard pre-filled from an existing candidate."""
+        if not callback.data or not callback.message:
+            return
+        encoded_id = callback.data.split(":", 1)[1]
+        candidate_id = self._decode_callback_candidate_id(encoded_id)
+        
+        candidate = self._db.get_candidate(candidate_id)
+        if not candidate:
+             await callback.answer("Candidate not found", show_alert=True)
+             return
+             
+        metadata = {}
+        try:
+            metadata = json.loads(candidate["metadata_json"] or "{}")
+        except: pass
+        
+        await state.clear()
+        # Pre-fill data
+        await state.update_data(
+            platform="clanker", # Default
+            name=candidate["suggested_name"] or metadata.get("suggested_name") or "",
+            symbol=candidate["suggested_symbol"] or metadata.get("suggested_symbol") or "",
+            image=metadata.get("image_url") or metadata.get("ipfs_image_uri") or "auto",
+            description=metadata.get("ai_description") or "",
+            candidate_id=candidate_id
+        )
+        
+        # Start at platform step but with pre-filled context
+        await state.set_state(ManualDeployStates.platform)
+        await self._handle_nav_wizard(callback, state)
+        await callback.answer("Editing Candidate...")
+
+    async def _handle_wizard_back(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Navigate back to previous step in the wizard."""
+        if not callback.message:
+             return
+        current_state = await state.get_state()
+        
+        if current_state == ManualDeployStates.name:
+            await state.set_state(ManualDeployStates.platform)
+            await self._handle_nav_wizard(callback, state)
+        elif current_state == ManualDeployStates.symbol:
+            await state.set_state(ManualDeployStates.name)
+            await self._show_wizard_name_step(callback, state)
+        elif current_state == ManualDeployStates.image:
+            await state.set_state(ManualDeployStates.symbol)
+            data = await state.get_data()
+            await callback.message.edit_text(
+                _fmt_dashboard_header("Token Identity", "🧪") +
+                f"• <b>Platform:</b> {data['platform'].upper()}\n"
+                f"• <b>Name:</b> {html.escape(data['name'])}\n\n"
+                "Please type the <b>Token Symbol</b>:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="↩️ Back", callback_data="wiz_back")],
+                    [InlineKeyboardButton(text="❌ Cancel", callback_data="wiz_cancel")]
+                ])
+            )
+        elif current_state == ManualDeployStates.description:
+            await state.set_state(ManualDeployStates.image)
+            data = await state.get_data()
+            await callback.message.edit_text(
+                _fmt_dashboard_header("Visuals", "🧪") +
+                f"• <b>Platform:</b> {data['platform'].upper()}\n"
+                f"• <b>Name:</b> {html.escape(data['name'])}\n"
+                f"• <b>Symbol:</b> {data['symbol']}\n\n"
+                "Please send an <b>Image URL</b> or <b>Photo</b>:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🪄 Auto (AI Image)", callback_data="wiz_img:auto")],
+                    [InlineKeyboardButton(text="↩️ Back", callback_data="wiz_back")],
+                    [InlineKeyboardButton(text="❌ Cancel", callback_data="wiz_cancel")]
+                ])
+            )
+        elif current_state == ManualDeployStates.confirm:
+            await state.set_state(ManualDeployStates.description)
+            await self._show_wizard_desc_step(callback, state)
+        await callback.answer()
+
+    async def _handle_wizard_suggest(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """AI Suggestion for Name or Symbol."""
+        if not callback.message:
+             return
+        data = await state.get_data()
+        
+        # Determine theme from existing name or a default
+        theme = data.get("name") or "trending base meme"
+        await callback.answer("🪄 AI Thinking...", show_alert=False)
+        
+        suggestions = await suggest_token_metadata(theme)
+        if not suggestions:
+             await callback.answer("AI failed to suggest. Try again.", show_alert=True)
+             return
+             
+        keyboard = []
+        for s in suggestions:
+            # We use a special prefix to catch the choice
+            label = f"{s['name']} ({s['symbol']})"
+            keyboard.append([InlineKeyboardButton(text=label, callback_data=f"wiz_apply_suggest:{s['name']}:{s['symbol']}")])
+        
+        keyboard.append([InlineKeyboardButton(text="↩️ Back", callback_data="wiz_back")])
+        keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data="wiz_cancel")])
+        
+        await callback.message.edit_text(
+            _fmt_dashboard_header("AI Suggestions", "🪄") +
+            "Based on the current context, here are some ideas:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        )
+
+    async def _handle_wizard_apply_suggest(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Apply the AI suggestion and move to next step."""
+        if not callback.data or not callback.message:
+            return
+        parts = callback.data.split(":", 2)
+        if len(parts) < 3:
+             return
+        name, symbol = parts[1], parts[2]
+        await state.update_data(name=name, symbol=symbol)
+        
+        # Advance to Image step directly as both are now filled
+        await state.set_state(ManualDeployStates.image)
+        data = await state.get_data()
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Visuals", "🧪") +
+            f"• <b>Name:</b> {html.escape(name)}\n"
+            f"• <b>Symbol:</b> {symbol}\n\n"
+            "Please send an <b>Image URL</b> or <b>Photo</b>:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🪄 Auto (AI Image)", callback_data="wiz_img:auto")],
+                [InlineKeyboardButton(text="↩️ Back", callback_data="wiz_back")],
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="wiz_cancel")]
+            ])
+        )
+        await callback.answer(f"Applied: {symbol}")
+
+    async def _handle_wizard_platform(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Wizard Step 1: Platform Selection."""
+        if not callback.message or not callback.data:
+            return
+        platform = callback.data.split(":")[1]
+        await state.update_data(platform=platform)
+        
+        data = await state.get_data()
+        # Optimization: If we already have Name/Symbol from Edit flow, skip to summary?
+        # No, let's just go to Name step but show the pre-filled value if it exists.
+        
+        await state.set_state(ManualDeployStates.name)
+        existing_name = data.get("name", "")
+        
+        msg_text = (
+            _fmt_dashboard_header("Token Identity", "🧪") +
+            f"• <b>Platform:</b> {platform.upper()}\n\n"
+            "Please type the <b>Token Name</b>:"
+        )
+        if existing_name:
+            msg_text += f"\n(Current: <code>{html.escape(existing_name)}</code>)"
+
+        await callback.message.edit_text(
+            msg_text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🪄 AI Suggest Name", callback_data="wiz_suggest")],
+                    [InlineKeyboardButton(text="↩️ Back", callback_data="wiz_back")],
+                    [InlineKeyboardButton(text="❌ Cancel", callback_data="wiz_cancel")]
+                ]
+            )
+        )
+        await callback.answer()
+
+    async def _handle_wizard_name(self, message: Message, state: FSMContext) -> None:
+        """Wizard Step 2: Capture Token Name."""
+        name = (message.text or "").strip()
+        if not name:
+             await message.answer("⚠️ No text found. Please type the <b>Token Name</b>:", parse_mode="HTML")
+             return
+        if len(name) < 2:
+            await message.answer("⚠️ Name too short. Try again:", parse_mode="HTML")
+            return
+            
+        await state.update_data(name=name)
+        await state.set_state(ManualDeployStates.symbol)
+        await self._show_wizard_symbol_step(message, state)
+
+    async def _show_wizard_name_step(self, message: Message | CallbackQuery, state: FSMContext) -> None:
+        """Render the Name step UI."""
+        data = await state.get_data()
+        existing_name = data.get("name", "")
+        platform = data.get("platform", "clanker")
+        
+        msg_text = (
+            _fmt_dashboard_header("Token Identity", "🧪") +
+            f"• <b>Platform:</b> {platform.upper()}\n\n"
+            "Please type the <b>Token Name</b>:"
+        )
+        if existing_name:
+            msg_text += f"\n(Current: <code>{html.escape(existing_name)}</code>)"
+
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🪄 AI Suggest Name", callback_data="wiz_suggest")],
+                [InlineKeyboardButton(text="↩️ Back", callback_data="wiz_back")],
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="wiz_cancel")]
+            ]
+        )
+        
+        if isinstance(message, CallbackQuery):
+            await message.message.edit_text(msg_text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await message.answer(msg_text, parse_mode="HTML", reply_markup=markup)
+
+    async def _show_wizard_symbol_step(self, message: Message | CallbackQuery, state: FSMContext) -> None:
+        """Render the Symbol step UI."""
+        data = await state.get_data()
+        name = data.get("name", "n/a")
+        existing_symbol = data.get("symbol", "")
+        
+        msg_text = (
+            _fmt_dashboard_header("Token Identity", "🧪") +
+            f"• <b>Platform:</b> {data['platform'].upper()}\n"
+            f"• <b>Name:</b> {html.escape(name)}\n\n"
+            "Please type the <b>Token Symbol</b>:"
+        )
+        if existing_symbol:
+            msg_text += f"\n(Current: <code>{existing_symbol}</code>)"
+
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🪄 AI Suggest Symbol", callback_data="wiz_suggest")],
+                [InlineKeyboardButton(text="↩️ Back", callback_data="wiz_back")],
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="wiz_cancel")]
+            ]
+        )
+        
+        if isinstance(message, CallbackQuery):
+             await message.message.edit_text(msg_text, parse_mode="HTML", reply_markup=markup)
+        else:
+             await message.answer(msg_text, parse_mode="HTML", reply_markup=markup)
+
+    async def _show_wizard_image_step(self, message: Message | CallbackQuery, state: FSMContext) -> None:
+        """Render the Image step UI."""
+        data = await state.get_data()
+        msg_text = (
+            _fmt_dashboard_header("Visuals", "🧪") +
+            f"• <b>Platform:</b> {data['platform'].upper()}\n"
+            f"• <b>Name:</b> {html.escape(data['name'])}\n"
+            f"• <b>Symbol:</b> {data['symbol']}\n\n"
+            "Please send an <b>Image URL</b> or upload a <b>Photo</b>:"
+        )
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🪄 Auto (AI Image)", callback_data="wiz_img:auto")],
+                [InlineKeyboardButton(text="↩️ Back", callback_data="wiz_back")],
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="wiz_cancel")]
+            ]
+        )
+        if isinstance(message, CallbackQuery):
+             await message.message.edit_text(msg_text, parse_mode="HTML", reply_markup=markup)
+        else:
+             await message.answer(msg_text, parse_mode="HTML", reply_markup=markup)
+
+    async def _show_wizard_desc_step(self, message: Message | CallbackQuery, state: FSMContext) -> None:
+        """Render the Description step UI."""
+        data = await state.get_data()
+        msg_text = (
+            _fmt_dashboard_header("Metadata", "🧪") +
+            f"• <b>Symbol:</b> {data['symbol']}\n"
+            f"• <b>Image:</b> 🪄 {data.get('image', 'n/a')}\n\n"
+            "Please type the <b>Token Description</b> (optional):"
+        )
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🪄 AI Generate Desc", callback_data="wiz_desc_suggest")],
+                [InlineKeyboardButton(text="⏭ Skip", callback_data="wiz_desc:skip")],
+                [InlineKeyboardButton(text="↩️ Back", callback_data="wiz_back")],
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="wiz_cancel")]
+            ]
+        )
+        if isinstance(message, CallbackQuery):
+             await message.message.edit_text(msg_text, parse_mode="HTML", reply_markup=markup)
+        else:
+             await message.answer(msg_text, parse_mode="HTML", reply_markup=markup)
+
+    async def _handle_wizard_symbol(self, message: Message, state: FSMContext) -> None:
+        """Wizard Step 3: Capture Token Symbol."""
+        symbol = (message.text or "").strip().upper()
+        if not symbol:
+             await message.answer("⚠️ No text found. Please type the <b>Token Symbol</b>:", parse_mode="HTML")
+             return
+        if len(symbol) < 2:
+            await message.answer("⚠️ Symbol too short. Try again:", parse_mode="HTML")
+            return
+            
+        await state.update_data(symbol=symbol)
+        await state.set_state(ManualDeployStates.image)
+        await self._show_wizard_image_step(message, state)
+
+    async def _handle_wizard_image(self, message: Message, state: FSMContext) -> None:
+        """Wizard Step 4: Capture Token Image (URL or Photo upload)."""
+        image_ref = ""
+        
+        if message.photo:
+             # Handle direct photo upload
+             await message.answer("⏳ Processing photo upload to IPFS...", parse_mode="HTML")
+             try:
+                 photo = message.photo[-1] # Largest version
+                 from io import BytesIO
+                 # We need the bot object which is in self.bot
+                 file_info = await self.bot.get_file(photo.file_id)
+                 downloaded = await self.bot.download_file(file_info.file_path, BytesIO())
+                 
+                 # Upload to Pinata via deploy_preparation helper logic if possible?
+                 # No, let's just use pinata_client directly if available or a mock
+                 if hasattr(self, "_pinata") and self._pinata:
+                      ipfs_hash = await self._pinata.upload_file_bytes(
+                          f"manual_{photo.file_id}.jpg", 
+                          downloaded.getvalue(),
+                          "image/jpeg"
+                      )
+                      image_ref = f"ipfs://{ipfs_hash}"
+                 else:
+                      await message.answer("⚠️ IPFS uploader not configured. Use URL instead.", parse_mode="HTML")
+                      return
+             except Exception as exc:
+                 logger.error(f"Manual photo upload failed: {exc}")
+                 await message.answer(f"❌ Upload failed: {exc}", parse_mode="HTML")
+                 return
+        else:
+             image_ref = (message.text or "").strip()
+
+        if not image_ref:
+            await message.answer("⚠️ Please provide an image. Try again:", parse_mode="HTML")
+            return
+            
+        await state.update_data(image=image_ref)
+        await state.set_state(ManualDeployStates.description)
+        await self._show_wizard_desc_step(message, state)
+
+    async def _handle_wizard_image_auto(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Wizard Step 4: Set Image to 'auto'."""
+        if not callback.message:
+             return
+        await state.update_data(image="auto")
+        await state.set_state(ManualDeployStates.description)
+        await self._show_wizard_desc_step(callback, state)
+        await callback.answer("Image set to AUTO")
+
+    async def _handle_wizard_desc_suggest(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """AI Suggestion for Description."""
+        if not callback.message:
+             return
+        data = await state.get_data()
+        await callback.answer("🪄 AI Writing...", show_alert=False)
+        
+        desc = await suggest_token_description(
+            name=data.get("name", "Unknown"),
+            symbol=data.get("symbol", "TKN"),
+            theme=data.get("name", "")
+        )
+        if not desc:
+             await callback.answer("AI failed to write. Try again.", show_alert=True)
+             return
+             
+        await state.update_data(description=desc)
+        await state.set_state(ManualDeployStates.confirm)
+        await self._show_wizard_preview(callback.message, state)
+        await callback.answer("Description Generated!")
+
+    async def _handle_wizard_description_skip(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Wizard Step 5 Helper: Skip Description."""
+        if not callback.message:
+            return
+        await state.update_data(description="")
+        await state.set_state(ManualDeployStates.confirm)
+        await self._show_wizard_preview(callback.message, state)
+        await callback.answer()
+
+    async def _handle_wizard_description(self, message: Message, state: FSMContext) -> None:
+        """Wizard Step 5: Capture Description."""
+        description = (message.text or "").strip()
+        await state.update_data(description=description)
+        await state.set_state(ManualDeployStates.confirm)
+        await self._show_wizard_preview(message, state)
+
+    async def _show_wizard_preview(self, message: Message | CallbackQuery, state: FSMContext) -> None:
+        """Final Wizard Preview Card."""
+        data = await state.get_data()
+        await message.answer(
+            _fmt_dashboard_header("Preview Deployment", "🚀") +
+            f"• <b>Platform:</b> {data['platform'].upper()}\n"
+            f"• <b>Name:</b> {_fmt_inline_code(data['name'])}\n"
+            f"• <b>Symbol:</b> {_fmt_inline_code(data['symbol'])}\n"
+            f"• <b>Image:</b> <code>{html.escape(data['image'][:30])}...</code>\n"
+            f"• <b>Desc:</b> {_fmt_text(data['description'])}\n\n"
+            "Confirm deployment strategy and launch?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🚀 Launch Deployment", callback_data="wiz_confirm")],
+                    [InlineKeyboardButton(text="↩️ Back", callback_data="wiz_back")],
+                    [InlineKeyboardButton(text="❌ Cancel Setup", callback_data="wiz_cancel")]
+                ]
+            )
+        )
+
+    async def _handle_wizard_confirm(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Final Wizard Trigger: Execute Deployment."""
+        if not callback.message:
+             return
+        data = await state.get_data()
+        await state.clear()
+        
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Deployment Started", "⌛") +
+            f"Manual deployment for <b>{data['name']}</b> has been triggered.\n"
+            "Check <b>cnc-deploy</b> for logs.",
+            parse_mode="HTML",
+        )
+        
+        if self.on_manual_deploy:
+            try:
+                await self.on_manual_deploy(
+                    data["platform"],
+                    data["name"],
+                    data["symbol"],
+                    data["image"],
+                    data["description"],
+                    {
+                        "chat_id": callback.message.chat.id,
+                        "user_id": getattr(callback.from_user, "id", None),
+                    }
+                )
+            except Exception as exc:
+                logger.error(f"Wizard deploy error: {exc}", exc_info=True)
+                await callback.message.answer(
+                    _fmt_dashboard_header("Deployment Failed", "❌") + 
+                    f"Reason: {_fmt_text(str(exc))}",
+                    parse_mode="HTML",
+                    reply_markup=_build_dashboard_keyboard()
+                )
+        await callback.answer()
+
+    async def _handle_wizard_cancel(self, callback: CallbackQuery, state: FSMContext) -> None:
+        """Wizard Cancel Handler: Reset FSM and show Dashboard."""
+        if not callback.message:
+            return
+        await state.clear()
+        await callback.message.edit_text(
+            _fmt_dashboard_header("Setup Cancelled", "🚫") +
+            "Manual deployment wizard was dismissed.",
+            parse_mode="HTML",
+            reply_markup=_build_dashboard_keyboard()
+        )
+        await callback.answer("Cancelled")
 
     async def _handle_refresh(self, callback: CallbackQuery) -> None:
         if not callback.data:
@@ -1538,13 +2890,18 @@ class TelegramBot:
                 author_handle=meta.get("author_handle"),
                 metadata=meta,
             )
+            
+            # Add a "last updated" line at the very end
+            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            updated += f"\n\n<i>Refreshed: {timestamp} UTC</i>"
+
             await callback.message.edit_text(
                 updated,
                 parse_mode="HTML",
-                reply_markup=self._build_review_keyboard(candidate_id),
+                reply_markup=self._build_review_keyboard(candidate_id, mode="summary"),
                 disable_web_page_preview=True,
             )
-            await callback.answer("Refreshed")
+            await callback.answer("Refreshed Summary")
         except Exception as exc:
             logger.error("Error refreshing review card: %s", exc, exc_info=True)
             await callback.answer("Refresh failed", show_alert=True)

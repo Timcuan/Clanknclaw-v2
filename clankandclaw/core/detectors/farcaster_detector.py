@@ -11,6 +11,7 @@ from clankandclaw.utils.parsing import (
     extract_name_hint,
     extract_symbol_hint,
 )
+from clankandclaw.utils.llm import enrich_signal_with_llm
 _TARGET_HANDLES = {"bankr", "clanker"}
 
 
@@ -79,6 +80,34 @@ def normalize_farcaster_event(event: dict, context_url: str) -> SignalCandidate:
         metadata["sol_contracts"] = sorted(set(sol_contracts))
     if chain_hints:
         metadata["chain_hints"] = sorted(set(chain_hints))
+
+    # Capture cast images correctly (Farcaster uses 'embeds')
+    embed_urls = []
+    embeds = event.get("embeds") or []
+    for item in embeds:
+        if not isinstance(item, dict):
+             continue
+        url = item.get("url")
+        if url and isinstance(url, str):
+            embed_urls.append(url)
+    
+    if embed_urls:
+        metadata["image_url"] = embed_urls[0]
+        metadata["image_candidates"] = embed_urls
+
+    if intent_score > 0 or evm_contracts or sol_contracts:
+        # Optimal: Only enrich via LLM if there's a basic signal threshold
+        # Using a background task if possible, but here we're in a sync-like normalization-returning flow.
+        # However, detectors are usually called by an async worker.
+        # Let's make this normalization aware of async enrichment.
+        # Wait, SignalCandidate normalization is often just a formatter.
+        # Usually, the 'collector' calls this. 
+        # I will leave the enrichment call to be handled by the 'pipeline' or 'collector' instead of inside
+        # this pure formatter, to keep the normalization 'efficient'. 
+        
+        # ACTUALLY: Let's do it here for 'effectiveness' as it's the central normalization point.
+        # But wait, normalize_farcaster_event is not async. 
+        pass
 
     return SignalCandidate(
         id=f"farcaster-{event['id']}",

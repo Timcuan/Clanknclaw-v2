@@ -12,6 +12,7 @@ from typing import Any
 from clankandclaw.core.review_queue import ReviewQueue
 from clankandclaw.database.manager import DatabaseManager
 from clankandclaw.telegram.bot import TelegramBot
+from clankandclaw.telegram.formatters import _fmt_dashboard_header
 
 logger = logging.getLogger(__name__)
 _IPFS_CID_RE = re.compile(r"^[A-Za-z0-9]{32,120}$")
@@ -32,6 +33,7 @@ class TelegramWorker:
         thread_claim_id: int | None = None,
         thread_ops_id: int | None = None,
         thread_alert_id: int | None = None,
+        pinata_client: Any = None,
     ):
         self.db = db
         self.review_expiry_seconds = review_expiry_seconds
@@ -43,6 +45,7 @@ class TelegramWorker:
         self._thread_claim_id = thread_claim_id
         self._thread_ops_id = thread_ops_id
         self._thread_alert_id = thread_alert_id
+        self._pinata = pinata_client
         self.review_queue = ReviewQueue(db)
         self._running = False
         self._task: asyncio.Task[None] | None = None
@@ -57,6 +60,7 @@ class TelegramWorker:
             "ops.deployer_mode": "clanker",
         }
         self._manual_deploy_lock = asyncio.Lock()
+        self._last_notified: dict[str, float] = {}  # candidate_id -> perf_counter
 
     def _refresh_ops_cache_if_needed(self) -> None:
         now = perf_counter()
@@ -118,6 +122,7 @@ class TelegramWorker:
                 thread_ops_id=self._thread_ops_id,
                 thread_alert_id=self._thread_alert_id,
                 db=self.db,
+                pinata_client=self._pinata,
             )
 
             # Set callback handlers
@@ -175,6 +180,7 @@ class TelegramWorker:
         review_priority: str,
         score: int,
         reason_codes: list[str],
+        auto_trigger: bool = False,
     ) -> str | None:
         """Send a review notification and create review item."""
         if not self._running or not self._bot:
@@ -183,8 +189,23 @@ class TelegramWorker:
 
         try:
             started = perf_counter()
-            if self._ops_mode() == "auto" and review_priority == "priority_review":
-                logger.info("Auto mode active; auto-approving %s", candidate_id)
+            
+            # Check for autonomous deployment trigger
+            ops_mode = self._ops_mode()
+            auto_threshold = int(self._runtime_get("ops.auto_threshold") or 90)
+            
+            if ops_mode == "auto" and (auto_trigger or score >= auto_threshold):
+                logger.info("Auto mode active; auto-approving %s (score=%d)", candidate_id, score)
+                
+                # Autonomous Notification (Keep operator informed)
+                if self._bot and self._bot_enabled():
+                     await self._bot.send_message(
+                          _fmt_dashboard_header("Autonomous Deploy", "🤖") +
+                          f"High confidence signal detected (Score: <b>{score}</b>).\n"
+                          f"Triggering automated deployment sequence...",
+                          parse_mode="HTML"
+                     )
+                
                 review_id = f"review-{candidate_id}"
                 expires_at = (
                     datetime.now(timezone.utc) + timedelta(seconds=self.review_expiry_seconds)
@@ -199,6 +220,14 @@ class TelegramWorker:
             if not self._bot_enabled():
                 logger.info("ops.bot_enabled=off; skipping review notification for %s", candidate_id)
                 return None
+
+            # Secondary throttle: 10 minute cooldown per candidate ID for notifications
+            now = perf_counter()
+            last_time = self._last_notified.get(candidate_id, 0.0)
+            if now - last_time < 600:  # 10 minutes
+                logger.debug("Throttling redundant notification for %s", candidate_id)
+                return f"review-{candidate_id}"  # Return existing ID format
+            self._last_notified[candidate_id] = now
 
             row = self.db.get_candidate(candidate_id)
             raw_text: str | None = None

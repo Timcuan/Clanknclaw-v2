@@ -55,22 +55,17 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
         "messageId": deploy_request.source_event_id or deploy_request.candidate_id,
         "id": deploy_request.candidate_id,
     }
-    if deploy_request.author_handle:
-        context["authorHandle"] = deploy_request.author_handle
-    if deploy_request.context_url:
-        context["contextUrl"] = deploy_request.context_url
-    if deploy_request.raw_context_excerpt:
-        context["excerpt"] = deploy_request.raw_context_excerpt
 
+    # Build metadata: description is key for Clanker v4 deployment standards
+    description = deploy_request.metadata_description or deploy_request.raw_context_excerpt or ""
     metadata: dict[str, Any] = {"description": description}
-    if deploy_request.context_url:
-        metadata["external_url"] = deploy_request.context_url
 
     config = {
         "name": deploy_request.token_name,
         "symbol": deploy_request.token_symbol,
         "image": deploy_request.image_uri,
         "metadata": metadata,
+        "vanity": True,  # Generate 0xb07 suffix
         **({"tokenAdmin": deploy_request.token_admin} if deploy_request.token_admin_enabled else {}),
         "context": context,
         # Pool: pairedToken is passed through; tick/positions computed by Node.js script
@@ -380,6 +375,7 @@ class ClankerDeployer:
                 tmp_file = f.name
 
             env = os.environ.copy()
+            env["DEBUG"] = "true"
             env["NODE_PATH"] = str(node_modules)
             env["BASE_RPC_URL"] = self.rpc_url
             signer_value = (deploy_request.signer_wallet or "").strip()
@@ -387,6 +383,9 @@ class ClankerDeployer:
                 env["DEPLOYER_SIGNER_PRIVATE_KEY"] = signer_value
 
             logger.info(f"Deploying {deploy_request.token_symbol!r} via Clanker SDK v4")
+            if os.path.exists(tmp_file):
+                with open(tmp_file, "r") as f:
+                    logger.info(f"Deployment Payload: {f.read()}")
 
             proc = await asyncio.create_subprocess_exec(
                 "node", str(script_path), tmp_file,
@@ -416,7 +415,11 @@ class ClankerDeployer:
             exit_code = proc.returncode or 0
 
             if stderr:
-                logger.debug(f"SDK stderr: {stderr[:500]}")
+                for line in stderr.splitlines():
+                    if "[CNC-DEBUG]" in line:
+                        logger.info(f"SDK DEBUG: {line}")
+                    else:
+                        logger.debug(f"SDK stderr: {line[:500]}")
 
             return parse_sdk_output(stdout, stderr, exit_code, deploy_request.candidate_id)
 

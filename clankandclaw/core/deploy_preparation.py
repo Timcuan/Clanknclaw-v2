@@ -46,6 +46,8 @@ def _normalize_token_name(raw_name: str) -> str:
     name = re.sub(r"\s+", " ", name).strip()
     if len(name) < 2:
         raise ValueError("normalized token_name is too short")
+    if name.isdigit() and len(name) >= 4:
+        raise ValueError(f"normalized token_name {name!r} looks like an ID")
     return name[:50]
 
 
@@ -56,6 +58,8 @@ def _normalize_token_symbol(raw_symbol: str) -> str:
     symbol = _SYMBOL_ALLOWED_CHARS_RE.sub("", symbol)
     if len(symbol) < 2:
         raise ValueError("normalized token_symbol is too short")
+    if symbol.isdigit() and len(symbol) >= 4:
+        raise ValueError(f"normalized token_symbol {symbol!r} looks like an ID")
     return symbol[:10]
 
 
@@ -74,17 +78,18 @@ def _build_natural_description(
     candidate: SignalCandidate,
     excerpt: str,
 ) -> str:
-    source_hint = "social signal" if candidate.source == "x" else "new launch signal"
-    base_sentence = (
-        f"{token_name} ({token_symbol}) is a Base community token derived from a {source_hint}."
-    )
+    # Optimal: Prioritize AI-generated professional description
+    ai_desc = candidate.metadata.get("ai_description")
+    if ai_desc and isinstance(ai_desc, str) and len(ai_desc) > 10:
+        return ai_desc[:200]
+        
+    source_hint = "social signal" if candidate.source == "x" else "launch data"
+    base_sentence = f"{token_name} ({token_symbol}) on Base."
     parts = [base_sentence]
-    if candidate.author_handle:
-        parts.append(f"Initial narrative was observed from @{candidate.author_handle}.")
     if excerpt:
-        parts.append(f"Context: {excerpt}.")
+        parts.append(excerpt)
     description = " ".join(parts).strip()
-    return description[:280]
+    return description[:200]
 
 
 def _optimize_image_for_ipfs(raw_image: bytes) -> tuple[bytes, str, str]:
@@ -150,18 +155,24 @@ def _build_image_candidates(candidate: SignalCandidate, token_name: str, token_s
         full = f"{host}{path}"
         score = 0
 
+        # High-Value Identifiers
         if any(path.endswith(ext) for ext in _IMAGE_EXT_HINTS):
-            score += 8
+            score += 10
         if symbol and symbol in full:
-            score += 24
+            score += 40  # Massive boost for symbol matches (e.g. 'ticker.png')
         if name_tokens and any(token in full for token in name_tokens):
-            score += 16
+            score += 24  # Strong boost for name tokens
+        if "logo" in full or "icon" in full or "token" in full:
+            score += 20  # Strong signal for deliberate icon assets
+        
+        # Source-Specific Context
         if "ipfs" in full:
-            score += 6
-        if "logo" in full:
-            score += 8
+            score += 10
+        
+        # CRITICAL: Penalty for Non-Contextual Images (Profile/Banners)
         if candidate.source in {"x", "farcaster"} and any(hint in full for hint in _IMAGE_BAD_HINTS):
-            score -= 50
+            score -= 150  # Overwhelming penalty for profile images
+            
         return score
 
     return sorted(deduped, key=_score, reverse=True)
@@ -387,15 +398,34 @@ class DeployPreparation:
             raise _step_error("prepare_deploy_request", exc) from exc
 
     async def _extract_token_identity(self, candidate: SignalCandidate) -> tuple[str, str]:
-        """Extract token name and symbol from candidate."""
-        if candidate.suggested_name and candidate.suggested_symbol:
-            return candidate.suggested_name, candidate.suggested_symbol
+        """Extract token name and symbol from candidate, ensuring they are not numeric IDs."""
+        name = candidate.suggested_name
+        symbol = candidate.suggested_symbol
+        
+        # If suggested fields look like IDs, force a fallback
+        if name and name.isdigit() and len(name) >= 4:
+            name = None
+        if symbol and symbol.isdigit() and len(symbol) >= 4:
+            symbol = None
+            
+        if name and symbol:
+            return name, symbol
 
         try:
             result = extract_token_identity(candidate.raw_text)
-            return result.name, result.symbol
+            extracted_name = result.name
+            extracted_symbol = result.symbol
+            
+            # Double check extracted values
+            if extracted_name and extracted_name.isdigit() and len(extracted_name) >= 4:
+                extracted_name = "Unknown"
+            if extracted_symbol and extracted_symbol.isdigit() and len(extracted_symbol) >= 4:
+                extracted_symbol = "TKN"
+                
+            return extracted_name or name or "Unknown", extracted_symbol or symbol or "TKN"
         except Exception as exc:
-            raise _step_error("extract_identity", exc) from exc
+            logger.warning("extract_identity failed, using best-effort: %s", exc)
+            return name or "Unknown", symbol or "TKN"
 
     async def _prepare_image(self, candidate: SignalCandidate, token_name: str, token_symbol: str) -> str:
         """Fetch image and upload to IPFS."""

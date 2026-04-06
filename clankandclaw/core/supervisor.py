@@ -76,6 +76,7 @@ class Supervisor:
             thread_claim_id=self.config.telegram.thread_claim_id,
             thread_ops_id=self.config.telegram.thread_ops_id,
             thread_alert_id=self.config.telegram.thread_alert_id,
+            pinata_client=pinata,
         )
         self._workers["telegram"] = telegram
         telegram.set_rewards_claimer(rewards_claimer)

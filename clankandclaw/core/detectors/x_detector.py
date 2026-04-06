@@ -90,15 +90,29 @@ def normalize_x_event(event: dict, context_url: str) -> SignalCandidate:
     if sol_contracts:
         metadata["sol_contracts"] = sorted(set(sol_contracts))
     metadata["has_contract"] = bool(evm_contracts or sol_contracts)
-    # Capture tweet image if present (first media item)
-    media = event.get("media") or []
-    if media and isinstance(media, list) and media[0].get("url"):
-        metadata["image_url"] = media[0]["url"]
-        metadata["image_candidates"] = [
-            item.get("url")
-            for item in media
-            if isinstance(item, dict) and isinstance(item.get("url"), str)
-        ]
+    # Capture tweet images correctly (handle common API variants)
+    media_objs = []
+    # 1. Extended Entities (often contains high-res)
+    ext_ent = event.get("extended_entities", {}) 
+    media_objs.extend(ext_ent.get("media") or [])
+    # 2. Standard Entities
+    media_objs.extend(event.get("entities", {}).get("media") or [])
+    # 3. Direct media field (often provided by wrappers)
+    media_objs.extend(event.get("media") or [])
+
+    image_urls = []
+    seen_urls = set()
+    for item in media_objs:
+        if not isinstance(item, dict):
+             continue
+        url = item.get("media_url_https") or item.get("media_url") or item.get("url")
+        if url and isinstance(url, str) and url not in seen_urls:
+            image_urls.append(url)
+            seen_urls.add(url)
+
+    if image_urls:
+        metadata["image_url"] = image_urls[0]
+        metadata["image_candidates"] = image_urls
 
     return SignalCandidate(
         id=f"x-{event['id']}",

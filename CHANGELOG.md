@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-06
+
+### Added
+
+#### 🤖 AI Intelligence Layer (Gemini Flash — Tiered Resilience)
+- **Multi-tier LLM fallback** in `clankandclaw/utils/llm.py`:
+  - Tier 1: `gemini-1.5-flash-latest` (primary)
+  - Tier 2: `gemini-1.5-flash-8b` (Flash Lite fallback — **no Pro model ever used**)
+  - Tier 3: Local Heuristic Engine (0-cost regex extraction — guaranteed output)
+- **Circuit Breaker** (`CircuitBreaker` class): tracks consecutive API failures; triggers 5-minute cooldown after 3 failures, then auto-recovers
+- **Global Rate Limiter** (`AsyncRateLimiter` in `clankandclaw/utils/limiter.py`): token-bucket throttle to prevent burst costs during high-volume market events
+- **Static template fallback** for `suggest_token_description` — always returns a viable description even when all LLM tiers are unavailable
+- `suggest_token_metadata`, `suggest_token_description`, `extract_token_identity_with_llm` all upgraded with full Flash→Flash-8b→Heuristic fallback chain
+
+#### ⚡ AI Optimization & Cost Control
+- **Triple-Gate AI Gatekeeper** (`should_perform_ai_enrichment` in `clankandclaw/core/pipeline.py`):
+  - Gate 1: Verified contract address found → always enrich
+  - Gate 2: `intent_score ≥ 8` → always enrich
+  - Gate 3: `intent_score ≥ 4` AND (`likes ≥ 5` OR `replies ≥ 3`) → enrich with social proof
+  - All others: **skip LLM, use heuristics only** (estimated 60-80% AI cost reduction)
+- Gatekeeper integrated into both `x_detector_worker.py` and `farcaster_detector_worker.py`
+
+#### 🛡 Autonomous Mode Control
+- **Router upgrade** (`clankandclaw/core/router.py`):
+  - Score ≥ 90 → `auto_deploy` decision + `auto_trigger=True`
+  - Score ≥ 80 → `priority_review` (human review still required)
+  - Score ≥ 60 → `review`
+  - Score < 60 → `skip`
+- **`auto_trigger` flag** propagated through `ScoredCandidate` model → `pipeline.py` → `database/manager.py` (`candidate_decisions` table)
+- **Configurable auto-deploy threshold** (`ops.auto_threshold`, default `90`):
+  - `TelegramWorker.send_review_notification` now reads threshold from runtime settings
+  - Auto-deploy only fires when `mode=auto` AND `(auto_trigger OR score >= threshold)`
+  - Candidates below threshold route to review queue even in Auto mode
+- **Autonomous operator notifications**: when auto-deploying, always sends `🤖 Autonomous Deploy` card to Telegram so operators are never blindsided
+- **New Telegram commands**:
+  - `/setthreshold <50-100>` — tune the minimum score for auto-deploy (validated integer)
+  - `/panic` — 🚨 emergency kill-switch: instantly forces `review` mode, halts all autonomous deployments
+- `/status` enhanced to show active threshold: `🟩 AUTO (auto-deploys at ≥ 90/100)`
+
+#### 🧪 Manual Deployment Wizard (Zero-Typing UX)
+- Full FSM-based interactive wizard via `ManualDeployStates` states
+- `🪄 AI Meta Suggestions` — generates name/symbol pairs on-demand via Gemini
+- `🪄 AI Description` — generates professional marketing copy for any token
+- **`↩️ Back` navigation** on every wizard step including the final Preview card
+- Safe-text extraction on all wizard handlers: prevents crashes from photo/sticker inputs
+- Wizard preview card now shows truncated image URL via `html.escape`
+
+#### 🔧 Shared UI Infrastructure
+- New `clankandclaw/telegram/formatters.py` — centralized Telegram formatting utilities:
+  - `_fmt_text`, `_fmt_inline_code`, `_fmt_dashboard_header`, `_source_label`, `_network_icon`
+  - Used by both `bot.py` (interactive) and `telegram_worker.py` (background) for consistent premium aesthetics
+
+### Changed
+- `ScoredCandidate` model now includes `decision: Literal["skip", "review", "priority_review", "auto_deploy"]` and `auto_trigger: bool` fields
+- `save_candidate_and_decision` DB method signature extended with `review_priority` and `auto_trigger` params
+- `candidate_decisions` SQLite table now has `review_priority` and `auto_trigger` columns (auto-migrated via `ALTER TABLE ADD COLUMN`)
+- Fee Claim handler (`_handle_nav_tools_claim`) now filters by 8-day rolling window and wraps in full `try/except` with graceful "no results" UI
+- All LLM model calls strictly use Flash-tier only — Gemini Pro **never called**
+- `/status` refreshed to show auto-threshold info and `/panic` command hint
+
+### Fixed
+- Removed hardcoded `gemini-flash-latest` (non-existent model alias) and replaced with correct `gemini-1.5-flash-latest`
+- `_handle_wizard_name` and `_handle_wizard_symbol` now guard against empty-string input (media/sticker inputs during text-only states)
+- `_handle_wizard_back` (confirm → description) no longer crashes with dangling `except` clause orphaned from previous mangled edit
+- `_fmt_num` restored after accidental removal during formatter migration
+- `timedelta` added to `datetime` imports in `bot.py` (was only `datetime, timezone`)
+
+
 ### TODO
 - X account configuration for twscrape
 - Node.js runtime setup (`npm install`) on target host

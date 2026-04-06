@@ -274,10 +274,24 @@ class DatabaseManager:
                         decision TEXT NOT NULL,
                         reason_codes TEXT NOT NULL,
                         recommended_platform TEXT NOT NULL,
+                        review_priority TEXT NOT NULL DEFAULT 'review',
+                        auto_trigger INTEGER NOT NULL DEFAULT 0,
                         FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
                     );
                     """
                 )
+                cd_columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(candidate_decisions)").fetchall()
+                }
+                if "review_priority" not in cd_columns:
+                    conn.execute(
+                        "ALTER TABLE candidate_decisions ADD COLUMN review_priority TEXT NOT NULL DEFAULT 'review'"
+                    )
+                if "auto_trigger" not in cd_columns:
+                    conn.execute(
+                        "ALTER TABLE candidate_decisions ADD COLUMN auto_trigger INTEGER NOT NULL DEFAULT 0"
+                    )
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS review_items (
@@ -393,6 +407,8 @@ class DatabaseManager:
         decision: str,
         reason_codes: list[str],
         recommended_platform: str,
+        review_priority: str = "review",
+        auto_trigger: bool = False,
         observed_at: str = "",
         metadata: dict | None = None,
     ) -> None:
@@ -420,15 +436,18 @@ class DatabaseManager:
                     )
                     conn.execute(
                         """
-                        INSERT INTO candidate_decisions (candidate_id, score, decision, reason_codes, recommended_platform)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO candidate_decisions 
+                            (candidate_id, score, decision, reason_codes, recommended_platform, review_priority, auto_trigger)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(candidate_id) DO UPDATE SET
                             score = excluded.score,
                             decision = excluded.decision,
                             reason_codes = excluded.reason_codes,
-                            recommended_platform = excluded.recommended_platform
+                            recommended_platform = excluded.recommended_platform,
+                            review_priority = excluded.review_priority,
+                            auto_trigger = excluded.auto_trigger
                         """,
-                        (candidate_id, score, decision, ",".join(reason_codes), recommended_platform),
+                        (candidate_id, score, decision, ",".join(reason_codes), recommended_platform, review_priority, 1 if auto_trigger else 0),
                     )
                     conn.commit()
                 except Exception:

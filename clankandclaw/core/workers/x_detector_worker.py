@@ -9,7 +9,8 @@ from time import perf_counter
 from typing import Any
 
 from clankandclaw.core.detectors.x_detector import normalize_x_event
-from clankandclaw.core.pipeline import process_candidate
+from clankandclaw.utils.llm import enrich_signal_with_llm
+from clankandclaw.core.pipeline import process_candidate, should_perform_ai_enrichment
 from clankandclaw.database.manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -252,11 +253,29 @@ class XDetectorWorker:
             oldest = self._seen_tweet_ids.popleft()
             self._seen_tweet_id_set.discard(oldest)
         return True
-
     async def process_event(self, event: dict[str, Any], context_url: str) -> None:
         """Process a single X event through the pipeline."""
         try:
             candidate = normalize_x_event(event, context_url)
+            
+            # Optimal: Only enrich via LLM if Gatekeeper allows
+            if should_perform_ai_enrichment(candidate):
+                enrichment = await enrich_signal_with_llm(candidate.raw_text)
+                if enrichment:
+                    # Update metadata with AI Insights
+                    candidate.metadata.update({
+                        "ai_enriched": True,
+                        "ai_bullish_score": enrichment.get("bullish_score"),
+                        "ai_rationale": enrichment.get("ai_rationale"),
+                        "ai_description": enrichment.get("suggested_description"),
+                        "ai_is_genuine": enrichment.get("is_genuine_launch"),
+                    })
+                    # Override suggested name/symbol if AI found better ones
+                    if enrichment.get("name"):
+                         candidate.suggested_name = enrichment["name"]
+                    if enrichment.get("symbol"):
+                         candidate.suggested_symbol = enrichment["symbol"]
+
             loop = asyncio.get_running_loop()
             scored = await asyncio.wait_for(
                 loop.run_in_executor(

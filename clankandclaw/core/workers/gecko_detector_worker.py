@@ -103,6 +103,7 @@ class GeckoDetectorWorker:
         self._pool_processed_at: dict[str, datetime] = {}
         self._pool_last_hot_score: dict[str, int] = {}
         self._pool_last_volume_m5: dict[str, float] = {}
+        self._pool_last_notified_at: dict[str, datetime] = {}
         self._stealth_config = stealth_config or StealthConfig()
         self._last_request_at: datetime | None = None
         self._stealth: StealthClient | None = None
@@ -204,7 +205,9 @@ class GeckoDetectorWorker:
             self._circuit_open_until = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=180)
 
     async def _poll_network(self, stealth: StealthClient, network: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        url = f"{self.api_base_url}/networks/{network}/new_pools"
+        profile = self._profile_for_network(network)
+        mode = profile.get("scan_mode", "new_pools")
+        url = f"{self.api_base_url}/networks/{network}/{mode}"
         for attempt in range(3):
             await self._respect_rate_limit(stealth)
             response = await stealth.get(url, params={"page": 1})
@@ -232,20 +235,37 @@ class GeckoDetectorWorker:
         return token_index
 
     def _extract_base_token(self, pool: dict[str, Any], token_index: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """Extract base token attributes, identifying the candidate token (not the native/quote one)."""
         rel = (pool.get("relationships") or {}).get("base_token") or {}
         token_data = rel.get("data") or {}
         token_id = str(token_data.get("id") or "")
+        
         if token_id and token_id in token_index:
             return token_index[token_id]
+            
+        # Fallback: if not in index, look for any token in pool attributes that isn't WETH/SOL
+        attrs = pool.get("attributes") or {}
+        pname = str(attrs.get("name") or "").lower()
+        if " / " in pname:
+            parts = pname.split(" / ")
+            # If we know the network, we might know the common quote token name
+            # but for now, we just return {} if relationship lookup failed
+            
         return {}
 
     def _profile_for_network(self, network: str) -> dict[str, float]:
         # Chain-specific gameplay profile for momentum detection.
-        profiles: dict[str, dict[str, float]] = {
-            "base": {"min_volume_m5_usd": 2500.0, "min_volume_m15_usd": 7000.0, "min_tx_count_m5": 10.0, "min_liquidity_usd": 9000.0, "max_pool_age_minutes": 120.0, "min_hot_points": 4.0, "require_target_source": 1.0},
-            "solana": {"min_volume_m5_usd": 9000.0, "min_volume_m15_usd": 22000.0, "min_tx_count_m5": 24.0, "min_liquidity_usd": 18000.0, "max_pool_age_minutes": 90.0, "min_hot_points": 4.0, "require_target_source": 0.0},
-            "bsc": {"min_volume_m5_usd": 7000.0, "min_volume_m15_usd": 17000.0, "min_tx_count_m5": 20.0, "min_liquidity_usd": 16000.0, "max_pool_age_minutes": 120.0, "min_hot_points": 4.0, "require_target_source": 0.0},
-            "eth": {"min_volume_m5_usd": 12000.0, "min_volume_m15_usd": 30000.0, "min_tx_count_m5": 28.0, "min_liquidity_usd": 40000.0, "max_pool_age_minutes": 90.0, "min_hot_points": 4.0, "require_target_source": 0.0},
+        profiles: dict[str, dict[str, float | list[str] | str]] = {
+            "base": {"min_volume_m5_usd": 2500.0, "min_volume_m15_usd": 7000.0, "min_tx_count_m5": 10.0, "min_liquidity_usd": 9000.0, "max_pool_age_minutes": 120.0, "min_hot_points": 4.0, "require_target_source": 1.0, "scan_mode": "new_pools"},
+            "solana": {
+                "min_volume_h1_usd": 100000.0, "min_tx_count_h1": 200.0, "min_liquidity_usd": 35000.0, "max_pool_age_minutes": 1440.0, "min_hot_points": 3.0, "require_target_source": 1.0, "scan_mode": "trending_pools",
+                "required_dex_ids": ["raydium", "raydium-clmm", "meteora", "orca", "fluxbeam", "lifinity-v2"]
+            },
+            "bsc": {
+                "min_volume_h1_usd": 80000.0, "min_tx_count_h1": 150.0, "min_liquidity_usd": 25000.0, "max_pool_age_minutes": 1440.0, "min_hot_points": 3.0, "require_target_source": 1.0, "scan_mode": "trending_pools",
+                "required_dex_ids": ["pancakeswap_v2", "pancakeswap_v3", "pancakeswap_v4", "uniswap_v3"]
+            },
+            "eth": {"min_volume_m5_usd": 15000.0, "min_volume_m15_usd": 40000.0, "min_tx_count_m5": 25.0, "min_liquidity_usd": 50000.0, "max_pool_age_minutes": 90.0, "min_hot_points": 4.0, "require_target_source": 1.0, "scan_mode": "new_pools"},
         }
         base = {
             "min_volume_m5_usd": self.min_volume_m5_usd,
@@ -278,39 +298,76 @@ class GeckoDetectorWorker:
         volume_m1 = _to_float(volume.get("m1"))
         volume_m5 = _to_float(volume.get("m5"))
         volume_m15 = _to_float(volume.get("m15"))
+        volume_h1 = _to_float(volume.get("h1"))
+        
         tx_count_m1 = _to_int(tx_m1.get("buys")) + _to_int(tx_m1.get("sells"))
         tx_count_m5 = _to_int(tx_m5.get("buys")) + _to_int(tx_m5.get("sells"))
+        tx_count_h1 = _to_int(tx_data.get("h1", {}).get("buys")) + _to_int(tx_data.get("h1", {}).get("sells"))
+        
         liquidity_usd = _to_float(attrs.get("reserve_in_usd"))
         age_minutes = _pool_age_minutes(attrs.get("pool_created_at"))
-        spike_ratio = (volume_m5 / volume_m15) if volume_m15 > 0 else 0.0
-        spike_ratio_m1_m5 = (volume_m1 / volume_m5) if volume_m5 > 0 else 0.0
-        base_source_match_score, base_source_tags = self._base_source_match(attrs) if network == "base" else (0, [])
-        min_volume_m1 = max(400.0, float(profile["min_volume_m5_usd"]) * 0.2)
-        min_tx_count_m1 = max(3, int(float(profile["min_tx_count_m5"]) * 0.4))
+        dex_id = str(attrs.get("dex_id") or "").lower()
+        
+        mode = profile.get("scan_mode", "new_pools")
+        is_trending_mode = mode == "trending_pools"
+        
+        # Optimize Source Matching: always search DEX id and token name for alpha tags
+        base_source_match_score, base_source_tags = self._base_source_match(attrs)
+        
+        min_volume_m1 = max(400.0, float(profile.get("min_volume_m5_usd") or 1.0) * 0.2)
+        min_tx_count_m1 = max(3, int(float(profile.get("min_tx_count_m5") or 1.0) * 0.4))
 
         has_m1_signal = volume_m1 > 0 or tx_count_m1 > 0
         # Stage 1: early spike/freshness gate to catch momentum quickly.
-        stage1_fast_spike = (
-            age_minutes <= float(profile["max_pool_age_minutes"])
-            and (
-                (
-                    has_m1_signal
-                    and (
-                        (volume_m1 >= min_volume_m1 and tx_count_m1 >= min_tx_count_m1)
-                        or (volume_m5 >= float(profile["min_volume_m5_usd"]) * 0.8 and spike_ratio_m1_m5 >= 0.2)
-                    )
-                )
-                or (
-                    not has_m1_signal
-                    and volume_m5 >= float(profile["min_volume_m5_usd"])
-                    and tx_count_m5 >= int(float(profile["min_tx_count_m5"]) * 0.7)
-                )
-            )
-        )
+        # Stage 1: trending gate for SOL/BSC vs fast-spike gate for snipes
+        if is_trending_mode:
+             # Mandatory H1 thresholds for Solana/BSC trending pools
+             stage1_fast_spike = (
+                 volume_h1 >= float(profile.get("min_volume_h1_usd", 1.0))
+                 and tx_count_h1 >= float(profile.get("min_tx_count_h1", 1.0))
+                 and liquidity_usd >= float(profile["min_liquidity_usd"])
+             )
+        else:
+             stage1_fast_spike = (
+                 age_minutes <= float(profile["max_pool_age_minutes"])
+                 and (
+                     (
+                         has_m1_signal
+                         and (
+                             (volume_m1 >= min_volume_m1 and tx_count_m1 >= min_tx_count_m1)
+                             or (volume_m5 >= float(profile["min_volume_m5_usd"]) * 0.8 and spike_ratio_m1_m5 >= 0.2)
+                         )
+                     )
+                     or (
+                         not has_m1_signal
+                         and volume_m5 >= float(profile["min_volume_m5_usd"])
+                         and tx_count_m5 >= int(float(profile["min_tx_count_m5"]) * 0.7)
+                     )
+                 )
+             )
+        
+        # Bonding / Graduation Gate: reject if DEX is not whitelisted (prevents pump-fun/four-meme noise)
+        required_dex_ids = profile.get("required_dex_ids")
+        if required_dex_ids and dex_id not in required_dex_ids:
+             stage1_fast_spike = False
+             
+        # Hardened filtering: reject if social proof is missing but required
+        if float(profile.get("require_target_source", 0.0)) > 0 and base_source_match_score <= 0:
+             stage1_fast_spike = False
+
+        # Anti-Wash Filter: reject if volume is suspiciously high compared to liquidity (ratio > 2.5) for snipes
+        if not is_trending_mode and liquidity_usd > 0 and volume_m5 / liquidity_usd > 2.5:
+             stage1_fast_spike = False
+             
+        # Bot-Pump Filter: reject if 80%+ volume happened in the last 60 seconds (extreme spike) for snipes
+        if not is_trending_mode and spike_ratio_m1_m5 > 0.8:
+             stage1_fast_spike = False
+             
         if not stage1_fast_spike:
             stats = {
-                "volume": {"m1": volume_m1, "m5": volume_m5, "m15": volume_m15},
-                "transactions": {"m1": tx_count_m1, "m5": tx_count_m5},
+                "dex_id": dex_id,
+                "volume": {"m1": volume_m1, "m5": volume_m5, "m15": volume_m15, "h1": volume_h1},
+                "transactions": {"m1": tx_count_m1, "m5": tx_count_m5, "h1": tx_count_h1},
                 "liquidity_usd": liquidity_usd,
                 "pool_created_at": attrs.get("pool_created_at"),
                 "pool_age_minutes": age_minutes,
@@ -325,20 +382,26 @@ class GeckoDetectorWorker:
             return False, stats, "stage1_spike_freshness"
 
         hot_score = 0
-        if volume_m5 >= float(profile["min_volume_m5_usd"]):
-            hot_score += 1
-        if volume_m15 >= float(profile["min_volume_m15_usd"]):
-            hot_score += 1
-        if tx_count_m5 >= int(profile["min_tx_count_m5"]):
-            hot_score += 1
-        if liquidity_usd >= float(profile["min_liquidity_usd"]):
-            hot_score += 1
-        if age_minutes <= float(profile["max_pool_age_minutes"]):
-            hot_score += 1
-        if spike_ratio >= 0.45:
-            hot_score += 1
-        if tx_count_m1 >= min_tx_count_m1:
-            hot_score += 1
+        if is_trending_mode:
+            # Trending scoring: primarily driven by volume and tx count
+            if volume_h1 >= float(profile["min_volume_h1_usd"]): hot_score += 2
+            if tx_count_h1 >= float(profile["min_tx_count_h1"]): hot_score += 1
+            if liquidity_usd >= float(profile["min_liquidity_usd"]): hot_score += 1
+        else:
+            if volume_m5 >= float(profile["min_volume_m5_usd"]):
+                hot_score += 1
+            if volume_m15 >= float(profile["min_volume_m15_usd"]):
+                hot_score += 1
+            if tx_count_m5 >= int(profile["min_tx_count_m5"]):
+                hot_score += 1
+            if liquidity_usd >= float(profile["min_liquidity_usd"]):
+                hot_score += 1
+            if age_minutes <= float(profile["max_pool_age_minutes"]):
+                hot_score += 1
+            if spike_ratio >= 0.45:
+                hot_score += 1
+            if tx_count_m1 >= min_tx_count_m1:
+                hot_score += 1
 
         confidence_tier = "low"
         if hot_score >= int(profile["min_hot_points"]) + 2:
@@ -382,26 +445,40 @@ class GeckoDetectorWorker:
     def _should_process_hot_pool(self, pool_id: str, stats: dict[str, Any]) -> bool:
         now = datetime.now(timezone.utc)
         last_processed_at = self._pool_processed_at.get(pool_id)
+        last_notified_at = self._pool_last_notified_at.get(pool_id)
         current_hot_score = int(stats.get("hot_score") or 0)
         current_volume_m5 = float((stats.get("volume") or {}).get("m5") or 0.0)
+        
         if not last_processed_at:
             self._pool_processed_at[pool_id] = now
             self._pool_last_hot_score[pool_id] = current_hot_score
             self._pool_last_volume_m5[pool_id] = current_volume_m5
+            self._pool_last_notified_at[pool_id] = now
             return True
 
         elapsed = (now - last_processed_at).total_seconds()
+        
+        # Mandatory notification cooldown: 15 minutes
+        notification_elapsed = (now - (last_notified_at or now - timedelta(days=1))).total_seconds()
+        if notification_elapsed < 900:  # 15 minutes
+             return False
+
         prev_hot_score = self._pool_last_hot_score.get(pool_id, 0)
         prev_volume_m5 = self._pool_last_volume_m5.get(pool_id, 0.0)
+        
+        # Significant jump: Score +4 OR Volume 3.0x
         significant_jump = (
-            current_hot_score >= prev_hot_score + 2
-            or (prev_volume_m5 > 0 and current_volume_m5 >= prev_volume_m5 * 1.6)
+            current_hot_score >= prev_hot_score + 4
+            or (prev_volume_m5 > 0 and current_volume_m5 >= prev_volume_m5 * 3.0)
         )
+        
         if elapsed >= self._pool_reprocess_cooldown_seconds or significant_jump:
             self._pool_processed_at[pool_id] = now
             self._pool_last_hot_score[pool_id] = current_hot_score
             self._pool_last_volume_m5[pool_id] = current_volume_m5
+            self._pool_last_notified_at[pool_id] = now
             return True
+            
         return False
 
     def _build_context_url(self, network: str, attrs: dict[str, Any]) -> str:
@@ -470,8 +547,25 @@ class GeckoDetectorWorker:
                 self._seen_pool_ids.append(pool_id)
 
                 token_data = self._extract_base_token(pool, token_index)
-                token_name = str(token_data.get("name") or attrs.get("name") or "Unknown").strip()
-                token_symbol = str(token_data.get("symbol") or "???").strip().upper()
+                
+                # Critical fix: prefer token-specific name/symbol, fallback to pool name, 
+                # but AVOID using "Unknown" or pool address as the name if possible.
+                token_name = (token_data.get("name") or attrs.get("name") or "").strip()
+                token_symbol = (token_data.get("symbol") or "").strip().upper()
+                
+                if not token_name or " / " in token_name:
+                    # If it's a pool name like "TKN / WETH", try to extract parts
+                    if " / " in token_name:
+                        parts = token_name.split(" / ")
+                        token_name = parts[0].strip()
+                        if not token_symbol:
+                            token_symbol = token_name[:10].upper()
+                    else:
+                        token_name = "Unknown"
+                
+                if not token_symbol:
+                    token_symbol = "???"
+
                 context_url = self._build_context_url(network, attrs)
 
                 payload = {

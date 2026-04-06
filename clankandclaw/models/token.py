@@ -68,10 +68,11 @@ class ScoredCandidate(BaseModel):
 
     candidate_id: str
     score: int
-    decision: Literal["skip", "review", "priority_review"]
+    decision: Literal["skip", "review", "priority_review", "auto_deploy"]
     reason_codes: list[str]
     recommended_platform: Literal["clanker"]
     review_priority: Literal["review", "priority_review"]
+    auto_trigger: bool = False
 
 
 class ReviewItem(BaseModel):

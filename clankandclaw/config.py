@@ -63,13 +63,13 @@ class GeckoDetectorSection(BaseModel):
     networks: list[str] = Field(default_factory=lambda: ["base", "eth", "solana", "bsc"])
     max_results: int = 20
     max_pool_age_minutes: int = 120
-    min_volume_m5_usd: float = 3000.0
-    min_volume_m15_usd: float = 8000.0
-    min_tx_count_m5: int = 12
-    min_liquidity_usd: float = 12000.0
+    min_volume_m5_usd: float = 6000.0  # Increased for noise filtering
+    min_volume_m15_usd: float = 18000.0
+    min_tx_count_m5: int = 15
+    min_liquidity_usd: float = 25000.0  # Safe starting point across chains
     max_requests_per_minute: int = 40
     request_timeout_seconds: float = 20.0
-    base_target_sources: list[str] = Field(default_factory=lambda: ["bankr", "doppler", "zora", "virtual", "uniswapv4", "clanker"])
+    base_target_sources: list[str] = Field(default_factory=lambda: ["bankr", "doppler", "zora", "virtual", "uniswapv4", "clanker", "raydium", "meteora", "orca", "pancakeswap", "aerodrome", "camelot", "v3", "uniswapv3"])
     max_process_concurrency: int = 10
 
 

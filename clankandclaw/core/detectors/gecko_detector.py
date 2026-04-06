@@ -35,12 +35,18 @@ def normalize_gecko_payload(payload: dict, context_url: str) -> SignalCandidate:
     image_url = (
         token_data.get("image_url")
         or token_data.get("logo")
+        or token_data.get("logo_url")
         or token_data.get("image")
         or token_data.get("logo_uri")
+        or token_data.get("thumb")
+        or token_data.get("large")
         or None
     )
     suggested_name = (token_data.get("name") or "").strip()[:50] or None
     suggested_symbol = (token_data.get("symbol") or "").strip()[:10].upper() or None
+    description = (token_data.get("description") or "").strip()
+    websites = token_data.get("websites") or []
+    socials = token_data.get("socials") or {}
 
     metadata: dict[str, Any] = {"collector_mode": "direct_geckoterminal"}
     if context_url:
@@ -53,9 +59,16 @@ def normalize_gecko_payload(payload: dict, context_url: str) -> SignalCandidate:
         metadata["suggested_name"] = suggested_name
     if suggested_symbol:
         metadata["suggested_symbol"] = suggested_symbol
+    if description:
+        metadata["description"] = description
+    if websites:
+        metadata["websites"] = websites
+    if socials:
+        metadata["socials"] = socials
     for key in (
         "network",
         "dex",
+        "dex_id",
         "volume",
         "transactions",
         "liquidity_usd",

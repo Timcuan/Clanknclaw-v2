@@ -12,7 +12,8 @@ import httpx
 
 from clankandclaw.config import StealthConfig
 from clankandclaw.core.detectors.farcaster_detector import normalize_farcaster_event
-from clankandclaw.core.pipeline import process_candidate
+from clankandclaw.utils.llm import enrich_signal_with_llm
+from clankandclaw.core.pipeline import process_candidate, should_perform_ai_enrichment
 from clankandclaw.database.manager import DatabaseManager
 from clankandclaw.utils.stealth_client import StealthClient
 
@@ -213,10 +214,28 @@ class FarcasterDetectorWorker:
             return response
         self._on_request_failure()
         return response
-
     async def process_event(self, event: dict[str, Any], context_url: str) -> None:
         try:
             candidate = normalize_farcaster_event(event, context_url)
+            
+            # Optimal: Only enrich via LLM if Gatekeeper allows
+            if should_perform_ai_enrichment(candidate):
+                enrichment = await enrich_signal_with_llm(candidate.raw_text)
+                if enrichment:
+                    # Update metadata with AI Insights
+                    candidate.metadata.update({
+                        "ai_enriched": True,
+                        "ai_bullish_score": enrichment.get("bullish_score"),
+                        "ai_rationale": enrichment.get("ai_rationale"),
+                        "ai_description": enrichment.get("suggested_description"),
+                        "ai_is_genuine": enrichment.get("is_genuine_launch"),
+                    })
+                    # Override suggested name/symbol if AI found better ones
+                    if enrichment.get("name"):
+                         candidate.suggested_name = enrichment["name"]
+                    if enrichment.get("symbol"):
+                         candidate.suggested_symbol = enrichment["symbol"]
+
             loop = asyncio.get_running_loop()
             scored = await asyncio.wait_for(
                 loop.run_in_executor(

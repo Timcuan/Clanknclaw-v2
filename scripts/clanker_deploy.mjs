@@ -137,7 +137,7 @@ const deployParams = {
   chainId: base.id,
 
   metadata: deployConfig.metadata || {
-    description: `${deployConfig.name} — deployed via Clank&Claw`,
+    description: `${deployConfig.name} — automated deployment`,
   },
 
   context: deployConfig.context || {
@@ -162,8 +162,12 @@ const deployParams = {
     }],
   },
 
-  vanity: false,
-  amount: 0n,
+  vanity: deployConfig.vanity ?? true,
+}
+
+// Audit logging
+if (process.env.DEBUG === 'true') {
+  console.error('[CNC-DEBUG] deployParams:', JSON.stringify(deployParams, null, 2))
 }
 
 // Execute deployment

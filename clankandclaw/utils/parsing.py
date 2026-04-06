@@ -8,8 +8,13 @@ from typing import Iterable
 _EVM_CA_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 _SOL_CA_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
 _CASHTAG_RE = re.compile(r"\$([A-Za-z0-9]{2,12})\b")
-_PARENS_TICKER_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9 _-]{1,48})\s*\(([A-Za-z0-9]{2,12})\)")
-_SYMBOL_HINT_RE = re.compile(r"\b(?:symbol|ticker)\s*[:=-]?\s*\$?([A-Za-z0-9_-]{2,16})\b", flags=re.IGNORECASE)
+# Support Name (TICKER), Name [TICKER], Name {TICKER}, Name - TICKER, Name: TICKER
+_TICKER_SEP_RE = re.compile(
+    r"\b([A-Za-z][A-Za-z0-9 _-]{1,48})\s*[\(\[\{:-]\s*\$?([A-Za-z0-9]{2,12})\s*[\)\]\}]?\b"
+)
+_SYMBOL_HINT_RE = re.compile(
+    r"\b(?:symbol|ticker|ca|contract)\s*[:=-]?\s*\$?([A-Za-z0-9_-]{2,16})\b", flags=re.IGNORECASE
+)
 _TOKEN_NAME_RE = re.compile(
     r"\btoken\s+(?:name\s*)?[:=-]?\s*([A-Za-z][A-Za-z0-9 _-]{1,48})",
     flags=re.IGNORECASE,
@@ -28,8 +33,10 @@ _CHAIN_HINTS = {
 
 
 def _clean_name(value: str) -> str:
-    cleaned = re.sub(r"\b(?:symbol|ticker)\b.*$", "", value, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\r\n-_:;,.!@#$%^&*()[]{}<>")
+    cleaned = re.sub(r"\b(?:symbol|ticker|ca|contract)\b.*$", "", value, flags=re.IGNORECASE)
+    # Remove emojis and special chars at ends
+    cleaned = re.sub(r"[^\x00-\x7F]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\r\n-_:;,.!@#$%^&*()[]{}<>|/\\")
     return cleaned[:50]
 
 
@@ -63,8 +70,13 @@ def extract_chain_hints(raw_text: str) -> list[str]:
 def extract_contracts(raw_text: str) -> tuple[list[str], list[str]]:
     evm_contracts = sorted(set(_EVM_CA_RE.findall(raw_text)))
     sol_candidates = _SOL_CA_RE.findall(raw_text)
-    # Reduce false-positives by requiring at least one digit for Solana-style addresses.
-    sol_contracts = sorted(set(token for token in sol_candidates if any(ch.isdigit() for ch in token)))
+    # Reduce false-positives by requiring at least one digit and excluding Base64-like suffixes
+    sol_contracts = sorted(
+        set(
+            token for token in sol_candidates 
+            if any(ch.isdigit() for ch in token) and len(token) >= 32
+        )
+    )
     return evm_contracts, sol_contracts
 
 
@@ -75,9 +87,9 @@ def extract_symbol_hint(raw_text: str) -> str | None:
         if symbol:
             return symbol
 
-    parens_match = _PARENS_TICKER_RE.search(raw_text)
-    if parens_match:
-        symbol = _clean_symbol(parens_match.group(2))
+    ticker_match = _TICKER_SEP_RE.search(raw_text)
+    if ticker_match:
+        symbol = _clean_symbol(ticker_match.group(2))
         if symbol:
             return symbol
 
@@ -90,10 +102,10 @@ def extract_symbol_hint(raw_text: str) -> str | None:
 
 
 def extract_name_hint(raw_text: str, symbol_hint: str | None = None) -> str | None:
-    parens_match = _PARENS_TICKER_RE.search(raw_text)
-    if parens_match:
-        if not symbol_hint or _clean_symbol(parens_match.group(2)) == symbol_hint:
-            name = _clean_name(parens_match.group(1))
+    ticker_match = _TICKER_SEP_RE.search(raw_text)
+    if ticker_match:
+        if not symbol_hint or _clean_symbol(ticker_match.group(2)) == symbol_hint:
+            name = _clean_name(ticker_match.group(1))
             if name:
                 return name
 
