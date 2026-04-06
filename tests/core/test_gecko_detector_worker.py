@@ -1,6 +1,7 @@
 """Tests for GeckoDetectorWorker."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -33,7 +34,23 @@ def make_worker(db: DatabaseManager) -> GeckoDetectorWorker:
     )
 
 
+def make_worker_with_networks(db: DatabaseManager, networks: list[str]) -> GeckoDetectorWorker:
+    return GeckoDetectorWorker(
+        db=db,
+        poll_interval=25.0,
+        api_base_url="https://api.geckoterminal.com/api/v2",
+        networks=networks,
+        max_results=5,
+        min_volume_m5_usd=1000,
+        min_volume_m15_usd=2000,
+        min_tx_count_m5=4,
+        min_liquidity_usd=5000,
+        max_requests_per_minute=120,
+    )
+
+
 def make_pool(address: str = "0xdeadbeef") -> dict:
+    created_at = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
     return {
         "id": f"base_{address}",
         "type": "pool",
@@ -41,7 +58,7 @@ def make_pool(address: str = "0xdeadbeef") -> dict:
             "address": address,
             "name": "Moon / WETH",
             "dex_id": "clanker",
-            "pool_created_at": "2026-04-05T11:58:00Z",
+            "pool_created_at": created_at,
             "reserve_in_usd": "15000",
             "volume_usd": {"m5": "5000", "m15": "9000"},
             "transactions": {"m5": {"buys": 5, "sells": 3}},
@@ -73,6 +90,20 @@ async def test_gecko_worker_starts_and_stops(db):
     assert worker._running is True
     await worker.stop()
     assert worker._running is False
+
+
+def test_network_priority_orders_base_first(db):
+    worker = make_worker_with_networks(db, ["eth", "solana", "base", "bsc"])
+    assert worker.networks == ["base", "solana", "bsc", "eth"]
+
+
+def test_evaluate_pool_stage1_fallback_without_m1_data(db):
+    worker = make_worker(db)
+    attrs = make_pool("0xstage1")["attributes"]
+    is_hot, stats, reason = worker._evaluate_pool("base", attrs)
+    assert is_hot is True
+    assert reason == "pass"
+    assert stats["volume"]["m1"] == 0.0
 
 
 @pytest.mark.asyncio

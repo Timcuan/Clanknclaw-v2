@@ -61,7 +61,10 @@ def normalize_gecko_payload(payload: dict, context_url: str) -> SignalCandidate:
         "liquidity_usd",
         "pool_created_at",
         "spike_ratio",
+        "spike_ratio_m1_m5",
         "hot_score",
+        "confidence_tier",
+        "gate_stage",
         "source_match_score",
         "source_tags_matched",
     ):

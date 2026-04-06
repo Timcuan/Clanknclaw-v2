@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `max_process_concurrency` for X/Farcaster/Gecko workers
   - `max_query_concurrency` for X/Farcaster query fanout
   - loop latency telemetry (`x.loop_ms`, `farcaster.loop_ms`, `gecko.loop_ms`)
+- GeckoTerminal hybrid momentum gate:
+  - stage-1 fast spike/freshness shortlist
+  - stage-2 velocity/liquidity scoring
+  - stage-3 Base source/factory confidence validation
+- Gecko adaptive anti-block pacing (dynamic request interval multiplier + degraded mode)
+- Gecko cooldown-aware reprocessing to avoid duplicate spam while allowing significant surge re-evaluation
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`
@@ -54,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deploy preparation image stage now prefers contextual token image candidates over single raw image_url
 - X worker now captures richer media URL candidates for downstream image selection
 - Farcaster and X polling now execute query fanout concurrently with bounded semaphores
+- Gecko network polling order now prioritizes gameplay: `base -> solana -> bsc -> eth`
 - X filter/scoring upgraded to prioritize target-mention intent and engagement bursts
 - Replaced GMGN ingestion path with GeckoTerminal ingestion path in supervisor/config/runtime
 - Pipeline quick filter now handles Gecko hot-pool signals directly (not keyword-only)

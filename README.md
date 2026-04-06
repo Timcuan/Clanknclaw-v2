@@ -82,7 +82,7 @@ gecko_detector:
   enabled: true                # Enable GeckoTerminal polling
   poll_interval: 25.0          # Polling interval in seconds
   api_base_url: "https://api.geckoterminal.com/api/v2"
-  networks: ["base", "eth", "solana", "bsc"]
+  networks: ["base", "eth", "solana", "bsc"]  # Runtime priority: base -> solana -> bsc -> eth
   max_results: 20              # Max pools per network per poll
   max_pool_age_minutes: 120
   min_volume_m5_usd: 3000
@@ -97,6 +97,14 @@ deployment:
   platform: clanker            # Deploy platform (only clanker in MVP)
   tax_bps: 1000               # Tax basis points (1000 = 10%)
 ```
+
+Gecko runtime tuning:
+- Hybrid staged gate for momentum capture:
+  - Stage 1: fast spike + freshness shortlist
+  - Stage 2: velocity + liquidity confidence
+  - Stage 3: Base source/factory confidence validation
+- Adaptive anti-block pacing: request interval auto-adjusts on `429/5xx` and recovers when healthy.
+- Cooldown-aware reprocessing prevents spam while allowing significant momentum jumps.
 
 ### Environment Variables
 
