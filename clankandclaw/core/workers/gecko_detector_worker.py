@@ -299,6 +299,10 @@ class GeckoDetectorWorker:
         volume_m5 = _to_float(volume.get("m5"))
         volume_m15 = _to_float(volume.get("m15"))
         volume_h1 = _to_float(volume.get("h1"))
+
+        # Momentum ratios — used for spike detection and bot-pump filtering
+        spike_ratio_m1_m5 = (volume_m1 / volume_m5) if volume_m5 > 0 else 0.0   # fraction of m5 vol in last 1m
+        spike_ratio = (volume_m5 / volume_m15) if volume_m15 > 0 else 0.0        # m5-to-m15 velocity
         
         tx_count_m1 = _to_int(tx_m1.get("buys")) + _to_int(tx_m1.get("sells"))
         tx_count_m5 = _to_int(tx_m5.get("buys")) + _to_int(tx_m5.get("sells"))
