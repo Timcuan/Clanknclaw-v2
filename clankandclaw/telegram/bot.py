@@ -297,7 +297,9 @@ def build_review_message(
         lines.append(f"<i>{_fmt_text(rationale)}</i>")
 
     # Protection & Advanced Features
-    protection_line = "🛡️ <b>Anti-Sniper:</b> ENABLED (15s decay)"
+    fee_type = metadata.get("fee_type", "static").lower()
+    fee_label = "10% STATIC" if fee_type == "static" else "1-10% DYNAMIC"
+    protection_line = f"🛡️ <b>Anti-Sniper:</b> ENABLED (15s decay) | 📈 <b>Fees:</b> {fee_label}"
     lines.append(f"\n{protection_line}")
 
     if raw_text:
