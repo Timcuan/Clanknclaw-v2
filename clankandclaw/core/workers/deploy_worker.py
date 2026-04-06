@@ -70,6 +70,8 @@ class DeployWorker:
         logger.info("Deploy worker stopped")
 
     def _get_candidate_lock(self, candidate_id: str) -> asyncio.Lock:
+        # Single-threaded asyncio: no preemption between the check and the insert,
+        # so this dict access is race-free without additional locking.
         if candidate_id not in self._candidate_locks:
             self._candidate_locks[candidate_id] = asyncio.Lock()
         return self._candidate_locks[candidate_id]
@@ -82,7 +84,9 @@ class DeployWorker:
 
         lock = self._get_candidate_lock(candidate_id)
         async with lock:
-            return await self._prepare_and_deploy_locked(candidate_id)
+            result = await self._prepare_and_deploy_locked(candidate_id)
+        self._candidate_locks.pop(candidate_id, None)
+        return result
 
     async def _prepare_and_deploy_locked(self, candidate_id: str) -> bool:
         """Execute deployment logic for a candidate (must be called with candidate lock held)."""

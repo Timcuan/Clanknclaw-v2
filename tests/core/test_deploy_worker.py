@@ -254,11 +254,16 @@ async def test_concurrent_deploys_same_candidate_only_deploy_once(tmp_path):
     )
 
     deploy_call_count = 0
+    peak_concurrent = 0
+    active = 0
 
     async def slow_deploy(req):
-        nonlocal deploy_call_count
+        nonlocal deploy_call_count, active, peak_concurrent
+        active += 1
+        peak_concurrent = max(peak_concurrent, active)
         deploy_call_count += 1
         await asyncio.sleep(0.05)
+        active -= 1
         return DeployResult(
             deploy_request_id="x-concurrent",
             status="deploy_success",
@@ -298,3 +303,4 @@ async def test_concurrent_deploys_same_candidate_only_deploy_once(tmp_path):
 
     assert all(r is True for r in results)
     assert deploy_call_count == 1
+    assert peak_concurrent == 1  # lock prevented concurrent entry
