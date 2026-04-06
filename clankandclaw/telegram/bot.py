@@ -37,6 +37,13 @@ _MAX_ERROR_TEXT = 80
 _MAX_REASONS = 6
 _MAX_CALLBACK_DATA = 64
 _THREAD_CATEGORIES = ("review", "deploy", "claim", "ops", "alert")
+_DEFAULT_FORUM_TOPIC_TITLES: dict[str, str] = {
+    "review": "cnc-review",
+    "deploy": "cnc-deploy",
+    "claim": "cnc-claim",
+    "ops": "cnc-ops",
+    "alert": "cnc-alert",
+}
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _PRIVATE_KEY_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
 
@@ -136,6 +143,19 @@ def build_action_callback_data(
             f"callback_data too long ({len(callback_data)} > {_MAX_CALLBACK_DATA}) for action={action}"
         )
     return callback_data
+
+
+def build_forum_topic_plan(existing_thread_bindings: dict[str, int] | None = None) -> list[tuple[str, str]]:
+    """Return categories/topics that still need to be created for forum setup."""
+    existing_thread_bindings = existing_thread_bindings or {}
+    plan: list[tuple[str, str]] = []
+    for category in _THREAD_CATEGORIES:
+        title = _DEFAULT_FORUM_TOPIC_TITLES.get(category, f"cnc-{category}")
+        existing = existing_thread_bindings.get(category)
+        if isinstance(existing, int) and existing > 0:
+            continue
+        plan.append((category, title))
+    return plan
 
 
 def build_review_message(
@@ -631,6 +651,7 @@ class TelegramBot:
         """Setup message and callback handlers."""
         self.dp.message.register(self._handle_start, Command("start"))
         self.dp.message.register(self._handle_pair, Command("pair"))
+        self.dp.message.register(self._handle_autothread, Command("autothread"))
         self.dp.message.register(self._handle_help, Command("help"))
         self.dp.message.register(self._handle_status, Command("status"))
         self.dp.message.register(self._handle_control, Command("control"))
@@ -685,8 +706,44 @@ class TelegramBot:
                 BotCommand(command="deployca", description="Deploy existing candidate"),
                 BotCommand(command="help", description="Usage guide"),
                 BotCommand(command="pair", description="Pair bot to this chat"),
+                BotCommand(command="autothread", description="Auto-create forum topics"),
             ]
         )
+
+    async def _ensure_forum_topics_bound(self) -> tuple[list[str], list[str]]:
+        """Create forum topics when needed and bind thread IDs to runtime settings."""
+        chat_id = self.chat_id
+        if not chat_id:
+            return [], ["chat is not configured"]
+
+        failures: list[str] = []
+        created: list[str] = []
+        try:
+            chat = await self.bot.get_chat(chat_id)
+        except Exception as exc:
+            return [], [f"cannot fetch chat metadata: {exc}"]
+
+        if str(getattr(chat, "type", "")) != "supergroup" or not bool(getattr(chat, "is_forum", False)):
+            return [], ["paired chat is not a forum supergroup"]
+
+        current_bindings = dict(self._dynamic_thread_bindings)
+        for category, topic_title in build_forum_topic_plan(current_bindings):
+            try:
+                forum_topic = await self.bot.create_forum_topic(
+                    chat_id=chat_id,
+                    name=topic_title,
+                )
+                thread_id = int(getattr(forum_topic, "message_thread_id", 0) or 0)
+                if thread_id <= 0:
+                    failures.append(f"{category}: topic created but no thread id returned")
+                    continue
+                self._bind_dynamic_thread(category, thread_id)
+                current_bindings[category] = thread_id
+                created.append(f"{category}:{thread_id}")
+            except Exception as exc:
+                failures.append(f"{category}: {exc}")
+
+        return created, failures
 
     async def _handle_pair(self, message: Message) -> None:
         """Pair bot to current chat for easier setup in groups/forum topics."""
@@ -695,10 +752,42 @@ class TelegramBot:
         thread_id = getattr(message, "message_thread_id", None)
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("ops", thread_id)
+        created, failures = await self._ensure_forum_topics_bound()
+        created_line = ", ".join(created) if created else "none"
+        if failures:
+            failures_text = "\n".join(f"• {_fmt_text(item)}" for item in failures[:5])
+            failure_block = (
+                "\n\n<b>Auto Thread Setup:</b> partial/failed\n"
+                f"{failures_text}\n"
+                "Tip: grant bot admin permission to <b>Manage Topics</b>, then run <code>/autothread</code>."
+            )
+        else:
+            failure_block = "\n\n<b>Auto Thread Setup:</b> done"
         await message.answer(
             "🔗 <b>Paired</b>\n\n"
             f"• <b>Chat ID:</b> {_fmt_inline_code(self.chat_id)}\n"
-            "Bot will now accept commands in this chat.",
+            f"• <b>Topics created:</b> {_fmt_text(created_line)}\n"
+            "Bot will now accept commands in this chat."
+            f"{failure_block}",
+            parse_mode="HTML",
+        )
+
+    async def _handle_autothread(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        created, failures = await self._ensure_forum_topics_bound()
+        if failures:
+            await message.answer(
+                "⚠️ <b>Auto Thread Setup Incomplete</b>\n\n"
+                f"• <b>Created:</b> {_fmt_text(', '.join(created) if created else 'none')}\n"
+                f"• <b>Errors:</b> {_fmt_text(' | '.join(failures[:5]))}\n\n"
+                "Ensure bot has admin permission <b>Manage Topics</b>.",
+                parse_mode="HTML",
+            )
+            return
+        await message.answer(
+            "✅ <b>Auto Thread Setup Complete</b>\n\n"
+            f"• <b>Created:</b> {_fmt_text(', '.join(created) if created else 'none')}",
             parse_mode="HTML",
         )
 

@@ -5,6 +5,7 @@ import pytest
 from clankandclaw.telegram.bot import (
     AIOGRAM_AVAILABLE,
     _parse_command_args,
+    build_forum_topic_plan,
     build_action_callback_data,
     build_candidate_detail_message,
     build_deploys_message,
@@ -236,6 +237,25 @@ def test_resolve_authorized_chat_id_prefers_runtime_pairing():
 def test_resolve_authorized_chat_id_falls_back_to_configured():
     assert resolve_authorized_chat_id("1558397457", None) == "1558397457"
     assert resolve_authorized_chat_id("1558397457", "   ") == "1558397457"
+
+
+def test_build_forum_topic_plan_includes_all_when_empty():
+    plan = build_forum_topic_plan({})
+    assert plan == [
+        ("review", "cnc-review"),
+        ("deploy", "cnc-deploy"),
+        ("claim", "cnc-claim"),
+        ("ops", "cnc-ops"),
+        ("alert", "cnc-alert"),
+    ]
+
+
+def test_build_forum_topic_plan_skips_bound_categories():
+    plan = build_forum_topic_plan({"ops": 123, "review": 456})
+    categories = [category for category, _ in plan]
+    assert "ops" not in categories
+    assert "review" not in categories
+    assert "deploy" in categories
 
 
 @pytest.mark.skipif(not AIOGRAM_AVAILABLE, reason="aiogram not installed")
