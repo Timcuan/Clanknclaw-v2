@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from clankandclaw.config import AppConfig, TelegramSection, load_config
+from clankandclaw.config import AppConfig, TelegramSection, load_config, StealthConfig
 
 
 def test_load_config_reads_yaml_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -133,3 +133,43 @@ def test_load_config_rejects_non_mapping_yaml_root(tmp_path: Path, monkeypatch: 
     monkeypatch.setenv("FEE_RECIPIENT_ADDRESS", "0x0000000000000000000000000000000000000002")
     with pytest.raises(ValueError, match="YAML root must be a mapping"):
         load_config(config_file)
+
+
+def _wallets_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEPLOYER_SIGNER_PRIVATE_KEY", "0x" + "a" * 64)
+    monkeypatch.setenv("TOKEN_ADMIN_ADDRESS", "0x" + "b" * 40)
+    monkeypatch.setenv("FEE_RECIPIENT_ADDRESS", "0x" + "c" * 40)
+
+
+def test_stealth_config_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _wallets_env(monkeypatch)
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("")
+    config = load_config(cfg_path)
+    assert config.stealth.enabled is True
+    assert config.stealth.rotate_every == 50
+    assert config.stealth.jitter_sigma_pct == 0.15
+    assert config.stealth.jitter_min_ms == 200
+    assert config.stealth.jitter_max_ms == 3000
+
+
+def test_stealth_config_yaml_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _wallets_env(monkeypatch)
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("stealth:\n  enabled: false\n  rotate_every: 10\n")
+    config = load_config(cfg_path)
+    assert config.stealth.enabled is False
+    assert config.stealth.rotate_every == 10
+
+
+def test_stealth_config_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _wallets_env(monkeypatch)
+    monkeypatch.setenv("STEALTH_ENABLED", "false")
+    monkeypatch.setenv("STEALTH_ROTATE_EVERY", "25")
+    monkeypatch.setenv("STEALTH_JITTER_MIN_MS", "500")
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("")
+    config = load_config(cfg_path)
+    assert config.stealth.enabled is False
+    assert config.stealth.rotate_every == 25
+    assert config.stealth.jitter_min_ms == 500

@@ -67,6 +67,13 @@ deployment:
   # clanker_node_modules_path: "/path/to/node_modules"  # override via CLANKER_NODE_MODULES_PATH
   # node_script_path: "/path/to/scripts/clanker_deploy.mjs"  # override via NODE_SCRIPT_PATH env var
 
+stealth:
+  enabled: true
+  rotate_every: 50        # rotate UA after this many requests
+  jitter_sigma_pct: 0.15  # gaussian σ as fraction of base wait interval
+  jitter_min_ms: 200      # floor on jitter delay (ms)
+  jitter_max_ms: 3000     # ceiling on jitter delay (ms)
+
 # Telegram credentials (prefer env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
 telegram:
   bot_token: ""

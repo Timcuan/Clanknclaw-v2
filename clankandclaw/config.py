@@ -23,6 +23,14 @@ class AppSection(BaseModel):
     retention_rewards_days: int = 30
 
 
+class StealthConfig(BaseModel):
+    enabled: bool = True
+    rotate_every: int = 50
+    jitter_sigma_pct: float = 0.15
+    jitter_min_ms: int = 200
+    jitter_max_ms: int = 3000
+
+
 class XDetectorSection(BaseModel):
     enabled: bool = True
     poll_interval: float = 30.0
@@ -101,6 +109,7 @@ class AppConfig(BaseModel):
     gecko_detector: GeckoDetectorSection = Field(default_factory=GeckoDetectorSection)
     deployment: DeploymentSection = Field(default_factory=DeploymentSection)
     telegram: TelegramSection = Field(default_factory=TelegramSection)
+    stealth: StealthConfig = Field(default_factory=StealthConfig)
     wallets: WalletSection
 
 
@@ -179,6 +188,19 @@ def load_config(path: Path) -> AppConfig:
         raw["farcaster_detector"] = {}
     if os.getenv("NEYNAR_API_KEY"):
         raw["farcaster_detector"]["api_key"] = os.getenv("NEYNAR_API_KEY")
+
+    if "stealth" not in raw:
+        raw["stealth"] = {}
+    if os.getenv("STEALTH_ENABLED"):
+        raw["stealth"]["enabled"] = os.getenv("STEALTH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+    if os.getenv("STEALTH_ROTATE_EVERY"):
+        raw["stealth"]["rotate_every"] = int(os.getenv("STEALTH_ROTATE_EVERY", "50"))
+    if os.getenv("STEALTH_JITTER_SIGMA_PCT"):
+        raw["stealth"]["jitter_sigma_pct"] = float(os.getenv("STEALTH_JITTER_SIGMA_PCT", "0.15"))
+    if os.getenv("STEALTH_JITTER_MIN_MS"):
+        raw["stealth"]["jitter_min_ms"] = int(os.getenv("STEALTH_JITTER_MIN_MS", "200"))
+    if os.getenv("STEALTH_JITTER_MAX_MS"):
+        raw["stealth"]["jitter_max_ms"] = int(os.getenv("STEALTH_JITTER_MAX_MS", "3000"))
 
     wallets = {
         "deployer_signer_private_key": os.getenv("DEPLOYER_SIGNER_PRIVATE_KEY"),
