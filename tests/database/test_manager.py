@@ -285,6 +285,18 @@ def test_runtime_settings_delete(tmp_path):
     assert db.get_runtime_setting("wallet.token_admin") is None
 
 
+def test_complete_review_item_transitions_from_deploying(tmp_path):
+    db = DatabaseManager(tmp_path / "state.db")
+    db.initialize()
+    db.save_candidate("sig-1", "x", "tweet-1", "fp-1", "deploy pepe")
+    db.create_review_item("review-1", "sig-1", "2099-01-01T00:00:00Z")
+    assert db.lock_review_item("review-1", "tester") is True
+    assert db.complete_review_item("review-1", success=True, locked_by="tester") is True
+    row = db.get_review_item("review-1")
+    assert row is not None
+    assert row["status"] == "approved"
+
+
 def test_database_manager_compacts_oversized_raw_text_and_metadata(tmp_path):
     db = DatabaseManager(tmp_path / "state.db")
     db.initialize()
@@ -324,11 +336,15 @@ def test_cleanup_old_records_removes_stale_data_safely(tmp_path):
 
     db.save_candidate("old-free", "x", "tweet-1", "fp-1", "old free", observed_at=old, metadata={})
     db.save_candidate("old-linked", "x", "tweet-2", "fp-2", "old linked", observed_at=old, metadata={})
+    db.save_candidate("old-approved", "x", "tweet-4", "fp-4", "old approved", observed_at=old, metadata={})
     db.save_candidate("fresh-free", "x", "tweet-3", "fp-3", "fresh free", observed_at=fresh, metadata={})
     db.save_decision("old-free", 10, "skip", ["x"], "clanker")
     db.save_decision("old-linked", 10, "skip", ["x"], "clanker")
     db.create_review_item("review-old", "old-linked", expires_at=old)
     db.reject_review_item("review-old", "tester")
+    db.create_review_item("review-old-approved", "old-approved", expires_at=old)
+    db.lock_review_item("review-old-approved", "tester")
+    db.complete_review_item("review-old-approved", success=True, locked_by="tester")
     db.save_deployment_result(
         result_id="dep-old",
         candidate_id="old-linked",
@@ -353,5 +369,6 @@ def test_cleanup_old_records_removes_stale_data_safely(tmp_path):
     )
     assert summary["signal_candidates"] >= 1
     assert db.get_candidate("old-free") is None
+    assert db.get_candidate("old-approved") is not None
     assert db.get_candidate("fresh-free") is not None
     assert db.get_candidate("old-linked") is not None

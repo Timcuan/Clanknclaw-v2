@@ -733,7 +733,7 @@ class TelegramBot:
             return
         note = ""
         if value in {"bankr", "both"}:
-            note = "\n⚠️ Bankr execution is not implemented yet; deploy will fail until enabled."
+            note = "\n⚠️ Bankr execution is not implemented yet; runtime will fallback to clanker."
         await message.answer(
             f"✅ Deployer mode set to <b>{_fmt_text(value)}</b>.{note}",
             parse_mode="HTML",

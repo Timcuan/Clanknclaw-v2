@@ -68,11 +68,11 @@ class DeployWorker:
         self._running = False
         logger.info("Deploy worker stopped")
 
-    async def prepare_and_deploy(self, candidate_id: str) -> None:
+    async def prepare_and_deploy(self, candidate_id: str) -> bool:
         """Prepare and execute deployment for an approved candidate."""
         if not self._running:
             logger.warning("Deploy worker not running")
-            return
+            return False
 
         logger.info("Starting deploy process for %s", candidate_id)
 
@@ -128,6 +128,7 @@ class DeployWorker:
                         deploy_result.tx_hash or "unknown",
                         deploy_result.contract_address or "unknown",
                     )
+                return True
             else:
                 logger.error(
                     f"Deploy failed for {candidate_id}: "
@@ -139,6 +140,7 @@ class DeployWorker:
                         deploy_result.error_code or "unknown",
                         deploy_result.error_message or "Unknown error",
                     )
+                return False
 
         except DeployPreparationError as exc:
             logger.error("Deploy preparation failed for %s: %s", candidate_id, exc)
@@ -148,6 +150,7 @@ class DeployWorker:
                     "preparation_failed",
                     str(exc),
                 )
+            return False
         except Exception as exc:
             logger.error("Deploy failed for %s: %s", candidate_id, exc, exc_info=True)
             if self._telegram_worker:
@@ -156,6 +159,7 @@ class DeployWorker:
                     "deploy_failed",
                     str(exc),
                 )
+            return False
 
     async def _get_candidate(self, candidate_id: str) -> SignalCandidate | None:
         """Get candidate from database."""

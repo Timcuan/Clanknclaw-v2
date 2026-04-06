@@ -267,17 +267,21 @@ class TelegramWorker:
             try:
                 deployer_mode = self._deployer_mode()
                 if deployer_mode != "clanker":
-                    raise RuntimeError(
-                        f"deployer_mode={deployer_mode} is not implemented yet; set deployer_mode=clanker"
+                    logger.warning(
+                        "deployer_mode=%s not implemented yet; falling back to clanker for %s",
+                        deployer_mode,
+                        candidate_id,
                     )
                 # Notify that preparation has started
                 if self._bot and self._bot_enabled():
                     await self._bot.send_deploy_preparing(candidate_id)
 
                 logger.info(f"Starting deploy preparation for {candidate_id}")
-                await self._deploy_preparation.prepare_and_deploy(candidate_id)
+                deploy_success = await self._deploy_preparation.prepare_and_deploy(candidate_id)
+                self.db.complete_review_item(review_id, success=bool(deploy_success), locked_by="telegram")
             except Exception as exc:
                 logger.error(f"Deploy preparation failed: {exc}", exc_info=True)
+                self.db.complete_review_item(review_id, success=False, locked_by="telegram")
                 if self._bot:
                     await self._bot.send_deploy_failure(
                         candidate_id,

@@ -177,7 +177,7 @@ async def test_send_review_notification_auto_mode_priority_triggers_deploy_witho
     bot = make_mock_bot()
     worker = make_worker(db)
     deploy_prep = MagicMock()
-    deploy_prep.prepare_and_deploy = AsyncMock()
+    deploy_prep.prepare_and_deploy = AsyncMock(return_value=True)
     worker.set_deploy_preparation(deploy_prep)
     db.set_runtime_setting("ops.mode", "auto")
     with patch("clankandclaw.core.workers.telegram_worker.TelegramBot", return_value=bot):
@@ -187,6 +187,9 @@ async def test_send_review_notification_auto_mode_priority_triggers_deploy_witho
     assert review_id == "review-x-1"
     deploy_prep.prepare_and_deploy.assert_awaited_once_with("x-1")
     bot.send_review_notification.assert_not_awaited()
+    row = db.get_review_item("review-x-1")
+    assert row is not None
+    assert row["status"] == "approved"
 
 
 @pytest.mark.asyncio
@@ -215,14 +218,14 @@ async def test_handle_approve_locks_review_and_triggers_deploy(db):
     await worker.send_review_notification("x-1", "review", 70, [])
 
     deploy_prep = MagicMock()
-    deploy_prep.prepare_and_deploy = AsyncMock()
+    deploy_prep.prepare_and_deploy = AsyncMock(return_value=True)
     worker.set_deploy_preparation(deploy_prep)
 
     await worker._handle_approve("x-1")
 
     deploy_prep.prepare_and_deploy.assert_awaited_once_with("x-1")
     row = db.get_review_item("review-x-1")
-    assert row["status"] == "deploying"
+    assert row["status"] == "approved"
     assert row["locked_by"] == "telegram"
 
 
@@ -247,7 +250,7 @@ async def test_handle_approve_prevents_double_approval(db):
     await worker.send_review_notification("x-1", "review", 70, [])
 
     deploy_prep = MagicMock()
-    deploy_prep.prepare_and_deploy = AsyncMock()
+    deploy_prep.prepare_and_deploy = AsyncMock(return_value=True)
     worker.set_deploy_preparation(deploy_prep)
 
     await worker._handle_approve("x-1")  # first approval — OK
@@ -259,7 +262,7 @@ async def test_handle_approve_prevents_double_approval(db):
 
 
 @pytest.mark.asyncio
-async def test_handle_approve_fails_when_deployer_mode_not_supported(db):
+async def test_handle_approve_falls_back_to_clanker_when_deployer_mode_not_supported(db):
     bot = make_mock_bot()
     worker = make_worker(db)
     db.set_runtime_setting("ops.deployer_mode", "bankr")
@@ -268,12 +271,30 @@ async def test_handle_approve_fails_when_deployer_mode_not_supported(db):
 
     await worker.send_review_notification("x-1", "review", 70, [])
     deploy_prep = MagicMock()
-    deploy_prep.prepare_and_deploy = AsyncMock()
+    deploy_prep.prepare_and_deploy = AsyncMock(return_value=True)
     worker.set_deploy_preparation(deploy_prep)
 
     await worker._handle_approve("x-1")
-    deploy_prep.prepare_and_deploy.assert_not_awaited()
-    bot.send_deploy_failure.assert_awaited()
+    deploy_prep.prepare_and_deploy.assert_awaited_once_with("x-1")
+    bot.send_deploy_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_approve_marks_review_rejected_on_deploy_failure(db):
+    bot = make_mock_bot()
+    worker = make_worker(db)
+    with patch("clankandclaw.core.workers.telegram_worker.TelegramBot", return_value=bot):
+        await worker.start()
+
+    await worker.send_review_notification("x-1", "review", 70, [])
+    deploy_prep = MagicMock()
+    deploy_prep.prepare_and_deploy = AsyncMock(return_value=False)
+    worker.set_deploy_preparation(deploy_prep)
+
+    await worker._handle_approve("x-1")
+    row = db.get_review_item("review-x-1")
+    assert row is not None
+    assert row["status"] == "rejected"
 
 
 # ── _handle_reject ────────────────────────────────────────────────────────────

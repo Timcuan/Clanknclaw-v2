@@ -514,6 +514,25 @@ class DatabaseManager:
                 return cur.rowcount == 1
         return bool(self._with_retry(_op))
 
+    def complete_review_item(self, review_id: str, *, success: bool, locked_by: str = "system") -> bool:
+        """Finalize a deploying review item as approved/rejected."""
+        now = _utc_now_iso()
+        final_status = "approved" if success else "rejected"
+
+        def _op() -> bool:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE review_items
+                    SET status = ?, locked_by = ?, locked_at = ?
+                    WHERE id = ? AND status = 'deploying'
+                    """,
+                    (final_status, locked_by, now, review_id),
+                )
+                return cur.rowcount == 1
+
+        return bool(self._with_retry(_op))
+
     def list_pending_reviews(self) -> list[sqlite3.Row]:
         now = _utc_now_iso()
         with self._connect() as conn:
@@ -688,7 +707,7 @@ class DatabaseManager:
                         """
                         DELETE FROM review_items
                         WHERE (
-                            status IN ('rejected', 'expired')
+                            status IN ('approved', 'rejected', 'expired')
                             AND created_at < ?
                         )
                         OR (
