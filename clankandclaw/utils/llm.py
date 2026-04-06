@@ -246,13 +246,14 @@ async def suggest_token_metadata(theme: str) -> list[dict[str, str]]:
             }
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, json=payload)
-                if resp.status_code == 429:
-                     logger.warning(f"Gemini {model} rate limited (429).")
-                     continue
                 if resp.status_code == 403:
                      logger.error(f"Gemini {model} FORBIDDEN (403). CHECK API KEY.")
                      gemini_breaker.record_failure()
                      return []
+                if resp.status_code == 400:
+                     err_body = resp.text
+                     logger.error(f"Gemini {model} 400 BAD REQUEST: {err_body}")
+                     continue
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["candidates"][0]["content"]["parts"][0]["text"]
