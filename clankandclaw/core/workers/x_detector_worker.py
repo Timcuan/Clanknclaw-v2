@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections import deque
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
 from typing import Any
 
@@ -46,6 +47,10 @@ class XDetectorWorker:
         self._query_semaphore = asyncio.Semaphore(self.max_query_concurrency)
         self._notify_semaphore = asyncio.Semaphore(8)
         self._notification_tasks: set[asyncio.Task[Any]] = set()
+        self._pipeline_executor = ThreadPoolExecutor(
+            max_workers=self.max_process_concurrency,
+            thread_name_prefix="xcc-x-pipeline",
+        )
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         """Set the telegram worker for sending notifications."""
@@ -88,6 +93,7 @@ class XDetectorWorker:
                 pass
         if self._notification_tasks:
             await asyncio.gather(*list(self._notification_tasks), return_exceptions=True)
+        await asyncio.to_thread(self._pipeline_executor.shutdown, True)
         logger.info("X detector worker stopped")
 
     async def _run(self) -> None:
@@ -232,7 +238,13 @@ class XDetectorWorker:
         """Process a single X event through the pipeline."""
         try:
             candidate = normalize_x_event(event, context_url)
-            scored = await asyncio.to_thread(process_candidate, self.db, candidate)
+            loop = asyncio.get_running_loop()
+            scored = await loop.run_in_executor(
+                self._pipeline_executor,
+                process_candidate,
+                self.db,
+                candidate,
+            )
             
             if scored.decision in ("review", "priority_review"):
                 logger.info(

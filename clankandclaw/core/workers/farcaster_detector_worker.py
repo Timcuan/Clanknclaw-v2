@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections import deque
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from time import perf_counter
 from typing import Any
 
@@ -52,6 +53,10 @@ class FarcasterDetectorWorker:
         self._query_semaphore = asyncio.Semaphore(self.max_query_concurrency)
         self._notify_semaphore = asyncio.Semaphore(8)
         self._notification_tasks: set[asyncio.Task[Any]] = set()
+        self._pipeline_executor = ThreadPoolExecutor(
+            max_workers=self.max_process_concurrency,
+            thread_name_prefix="xcc-farcaster-pipeline",
+        )
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         self._telegram_worker = telegram_worker
@@ -83,6 +88,7 @@ class FarcasterDetectorWorker:
             self._http_client = None
         if self._notification_tasks:
             await asyncio.gather(*list(self._notification_tasks), return_exceptions=True)
+        await asyncio.to_thread(self._pipeline_executor.shutdown, True)
         logger.info("Farcaster detector worker stopped")
 
     async def _run(self) -> None:
@@ -148,7 +154,13 @@ class FarcasterDetectorWorker:
     async def process_event(self, event: dict[str, Any], context_url: str) -> None:
         try:
             candidate = normalize_farcaster_event(event, context_url)
-            scored = await asyncio.to_thread(process_candidate, self.db, candidate)
+            loop = asyncio.get_running_loop()
+            scored = await loop.run_in_executor(
+                self._pipeline_executor,
+                process_candidate,
+                self.db,
+                candidate,
+            )
             if scored.decision in ("review", "priority_review"):
                 logger.info("Candidate %s scored %s -> %s", candidate.id, scored.score, scored.decision)
                 if self._telegram_worker:

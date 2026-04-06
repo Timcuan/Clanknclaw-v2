@@ -15,13 +15,15 @@ class DatabaseManager:
         self.path = Path(path)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=10.0)
+        conn = sqlite3.connect(self.path, timeout=10.0, cached_statements=256)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA busy_timeout = 10000")
         conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA wal_autocheckpoint = 1000")
+        conn.execute("PRAGMA cache_size = -4000")
         return conn
 
     def _with_retry(self, fn):
@@ -284,15 +286,17 @@ class DatabaseManager:
         metadata: dict | None = None,
     ) -> None:
         metadata_json = json.dumps(metadata or {})
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO signal_candidates
-                    (id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (candidate_id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json),
-            )
+        def _op():
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO signal_candidates
+                        (id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (candidate_id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json),
+                )
+        self._with_retry(_op)
 
     def save_candidate_and_decision(
         self,
@@ -354,11 +358,13 @@ class DatabaseManager:
         reason_codes: list[str],
         recommended_platform: str,
     ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO candidate_decisions (candidate_id, score, decision, reason_codes, recommended_platform) VALUES (?, ?, ?, ?, ?)",
-                (candidate_id, score, decision, ",".join(reason_codes), recommended_platform),
-            )
+        def _op():
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO candidate_decisions (candidate_id, score, decision, reason_codes, recommended_platform) VALUES (?, ?, ?, ?, ?)",
+                    (candidate_id, score, decision, ",".join(reason_codes), recommended_platform),
+                )
+        self._with_retry(_op)
 
     def get_candidate_decision(self, candidate_id: str) -> Optional[sqlite3.Row]:
         with self._connect() as conn:
@@ -376,18 +382,22 @@ class DatabaseManager:
             ).fetchone()
 
     def create_review_item(self, review_id: str, candidate_id: str, expires_at: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at, telegram_message_id) VALUES (?, ?, 'pending', ?, ?, NULL, NULL, NULL)",
-                (review_id, candidate_id, _utc_now_iso(), expires_at),
-            )
+        def _op():
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at, telegram_message_id) VALUES (?, ?, 'pending', ?, ?, NULL, NULL, NULL)",
+                    (review_id, candidate_id, _utc_now_iso(), expires_at),
+                )
+        self._with_retry(_op)
 
     def set_review_telegram_message_id(self, review_id: str, message_id: int) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE review_items SET telegram_message_id = ? WHERE id = ?",
-                (message_id, review_id),
-            )
+        def _op():
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE review_items SET telegram_message_id = ? WHERE id = ?",
+                    (message_id, review_id),
+                )
+        self._with_retry(_op)
 
     def get_review_item(self, review_id: str) -> Optional[sqlite3.Row]:
         with self._connect() as conn:
@@ -398,35 +408,25 @@ class DatabaseManager:
 
     def lock_review_item(self, review_id: str, locked_by: str) -> bool:
         now = _utc_now_iso()
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT status, expires_at FROM review_items WHERE id = ?",
-                (review_id,),
-            ).fetchone()
-            if row is None or row["status"] != "pending":
-                return False
-            if row["expires_at"] < now:
-                return False
-            cur = conn.execute(
-                "UPDATE review_items SET status = 'deploying', locked_by = ?, locked_at = ? WHERE id = ? AND status = 'pending' AND expires_at >= ?",
-                (locked_by, now, review_id, now),
-            )
-        return cur.rowcount == 1
+        def _op() -> bool:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "UPDATE review_items SET status = 'deploying', locked_by = ?, locked_at = ? WHERE id = ? AND status = 'pending' AND expires_at >= ?",
+                    (locked_by, now, review_id, now),
+                )
+                return cur.rowcount == 1
+        return bool(self._with_retry(_op))
 
     def reject_review_item(self, review_id: str, locked_by: str) -> bool:
         now = _utc_now_iso()
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT status, expires_at FROM review_items WHERE id = ?",
-                (review_id,),
-            ).fetchone()
-            if row is None or row["status"] != "pending":
-                return False
-            cur = conn.execute(
-                "UPDATE review_items SET status = 'rejected', locked_by = ?, locked_at = ? WHERE id = ? AND status = 'pending'",
-                (locked_by, now, review_id),
-            )
-        return cur.rowcount == 1
+        def _op() -> bool:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "UPDATE review_items SET status = 'rejected', locked_by = ?, locked_at = ? WHERE id = ? AND status = 'pending'",
+                    (locked_by, now, review_id),
+                )
+                return cur.rowcount == 1
+        return bool(self._with_retry(_op))
 
     def list_pending_reviews(self) -> list[sqlite3.Row]:
         now = _utc_now_iso()
@@ -456,22 +456,24 @@ class DatabaseManager:
         error_message: str | None = None,
         latency_ms: int = 0,
     ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO deployment_results
-                    (id, candidate_id, status, tx_hash, contract_address, error_code, error_message, latency_ms, deployed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    status = excluded.status,
-                    tx_hash = excluded.tx_hash,
-                    contract_address = excluded.contract_address,
-                    error_code = excluded.error_code,
-                    error_message = excluded.error_message,
-                    latency_ms = excluded.latency_ms
-                """,
-                (result_id, candidate_id, status, tx_hash, contract_address, error_code, error_message, latency_ms, deployed_at),
-            )
+        def _op():
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO deployment_results
+                        (id, candidate_id, status, tx_hash, contract_address, error_code, error_message, latency_ms, deployed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        status = excluded.status,
+                        tx_hash = excluded.tx_hash,
+                        contract_address = excluded.contract_address,
+                        error_code = excluded.error_code,
+                        error_message = excluded.error_message,
+                        latency_ms = excluded.latency_ms
+                    """,
+                    (result_id, candidate_id, status, tx_hash, contract_address, error_code, error_message, latency_ms, deployed_at),
+                )
+        self._with_retry(_op)
 
     def list_recent_deployments(self, limit: int = 10) -> list[sqlite3.Row]:
         with self._connect() as conn:
@@ -502,21 +504,23 @@ class DatabaseManager:
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO reward_claim_results
-                    (id, token_address, status, tx_hash, error_code, error_message, claimed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    status = excluded.status,
-                    tx_hash = excluded.tx_hash,
-                    error_code = excluded.error_code,
-                    error_message = excluded.error_message,
-                    claimed_at = excluded.claimed_at
-                """,
-                (result_id, token_address, status, tx_hash, error_code, error_message, claimed_at),
-            )
+        def _op():
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO reward_claim_results
+                        (id, token_address, status, tx_hash, error_code, error_message, claimed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        status = excluded.status,
+                        tx_hash = excluded.tx_hash,
+                        error_code = excluded.error_code,
+                        error_message = excluded.error_message,
+                        claimed_at = excluded.claimed_at
+                    """,
+                    (result_id, token_address, status, tx_hash, error_code, error_message, claimed_at),
+                )
+        self._with_retry(_op)
 
     def get_stats(self) -> dict:
         with self._connect() as conn:
