@@ -82,3 +82,35 @@ async def test_supervisor_respects_farcaster_detector_disabled(test_db):
     assert "x_detector" in names
     assert "gecko_detector" in names
     await supervisor.stop()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_loop_uses_run_in_executor(tmp_path):
+    """cleanup_old_records must be called via run_in_executor, not directly."""
+    import asyncio
+    from unittest.mock import patch
+
+    db = DatabaseManager(tmp_path / "test.db")
+    db.initialize()
+
+    executor_calls: list = []
+
+    loop = asyncio.get_running_loop()
+
+    async def tracking_run_in_executor(executor, fn, *args):
+        executor_calls.append(fn)
+        return fn(*args) if callable(fn) else {}
+
+    sup = Supervisor(make_config(), db)
+    sup._running = True
+
+    with patch.object(loop, "run_in_executor", side_effect=tracking_run_in_executor):
+        task = asyncio.create_task(sup._run_cleanup_loop())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    assert len(executor_calls) > 0

@@ -372,3 +372,31 @@ def test_cleanup_old_records_removes_stale_data_safely(tmp_path):
     assert db.get_candidate("old-approved") is not None
     assert db.get_candidate("fresh-free") is not None
     assert db.get_candidate("old-linked") is not None
+
+
+def test_with_retry_uses_exponential_backoff(tmp_path):
+    """_with_retry must sleep exponentially on locked-db errors."""
+    from unittest.mock import patch
+    import sqlite3
+    from clankandclaw.database.manager import DatabaseManager
+
+    db = DatabaseManager(tmp_path / "test.db")
+    db.initialize()
+
+    call_count = 0
+
+    def flaky():
+        nonlocal call_count
+        call_count += 1
+        if call_count < 4:
+            raise sqlite3.OperationalError("database is locked")
+        return "ok"
+
+    sleep_calls: list[float] = []
+    with patch("clankandclaw.database.manager.sleep", side_effect=lambda t: sleep_calls.append(t)):
+        result = db._with_retry(flaky)
+
+    assert result == "ok"
+    assert len(sleep_calls) == 3
+    assert sleep_calls[1] > sleep_calls[0]
+    assert sleep_calls[2] > sleep_calls[1]

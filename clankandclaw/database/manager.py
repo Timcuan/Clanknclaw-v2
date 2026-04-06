@@ -100,14 +100,14 @@ class DatabaseManager:
         return conn
 
     def _with_retry(self, fn):
-        attempts = 3
+        attempts = 5
         for attempt in range(attempts):
             try:
                 return fn()
             except sqlite3.OperationalError as exc:
                 if "database is locked" not in str(exc).lower() or attempt == attempts - 1:
                     raise
-                sleep(0.05 * (attempt + 1))
+                sleep(0.1 * (2 ** attempt))  # 0.1, 0.2, 0.4, 0.8 seconds
 
     def _existing_tables(self, conn: sqlite3.Connection) -> set[str]:
         rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()

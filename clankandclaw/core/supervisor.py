@@ -248,15 +248,19 @@ class Supervisor:
             loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
 
     async def _run_cleanup_loop(self) -> None:
+        import functools
         interval = max(60.0, float(self.config.app.cleanup_interval_seconds))
+        loop = asyncio.get_running_loop()
         while self._running:
             try:
-                summary = self.db.cleanup_old_records(
+                cleanup_fn = functools.partial(
+                    self.db.cleanup_old_records,
                     retention_candidates_days=self.config.app.retention_candidates_days,
                     retention_reviews_days=self.config.app.retention_reviews_days,
                     retention_deployments_days=self.config.app.retention_deployments_days,
                     retention_rewards_days=self.config.app.retention_rewards_days,
                 )
+                summary = await loop.run_in_executor(None, cleanup_fn)
                 if any(summary.values()):
                     logger.info("db.cleanup %s", summary)
             except asyncio.CancelledError:
