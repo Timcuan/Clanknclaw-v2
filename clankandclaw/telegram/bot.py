@@ -390,28 +390,48 @@ def build_candidate_detail_message(
 
 
 def build_deploys_message(rows: list[Any]) -> str:
-    """Build compact recent deployments message."""
+    """Build compact recent deployments message with clickable links."""
     if not rows:
         return "📭 No deployments yet."
 
     lines = [f"Total: <b>{len(rows)}</b>", ""]
     for row in rows:
+        # Determine network for linking (gecko-solana:... or manual-...)
+        # Default to base if not clear
+        cid = str(row["candidate_id"] or "n/a")
+        net = "base"
+        if "solana" in cid.lower(): net = "solana"
+        elif "bsc" in cid.lower(): net = "bsc"
+        elif "eth" in cid.lower(): net = "eth"
+
+        short_id = _fmt_truncate(cid, 8)
+        
         if row["status"] == "deploy_success":
-            contract = row["contract_address"] or "n/a"
-            tx = row["tx_hash"] or "n/a"
+            contract = row["contract_address"]
+            tx = row["tx_hash"]
+            
+            # Formulate links
+            ca_link = f"<a href='{_get_explorer_url(net, 'address', contract)}'>[CA]</a>" if contract else "[CA]"
+            tx_link = f"<a href='{_get_explorer_url(net, 'tx', tx)}'>[TX]</a>" if tx else "[TX]"
+            
             lines.append(
-                f"✅ {_fmt_inline_code(row['candidate_id'])} | "
-                f"{_fmt_inline_code(contract)} | {_fmt_inline_code(tx)}"
+                f"✅ {short_id} | {ca_link} | {tx_link}"
             )
             continue
 
-        error_code = row["error_code"] or "deploy_failed"
-        error_message = (row["error_message"] or "").strip()
-        if len(error_message) > _MAX_ERROR_TEXT:
-            error_message = error_message[:_MAX_ERROR_TEXT] + "…"
+        # Failure case
+        error_code = row["error_code"] or "fail"
+        # Extract first line of error or a brief summary
+        raw_msg = (row["error_message"] or "").strip()
+        if raw_msg.startswith("[") or raw_msg.startswith("{"):
+            # Likely JSON error (SDK exception)
+            err_summary = "SDK Error"
+        else:
+            err_summary = raw_msg.split("\n")[0][:30]
+            if len(raw_msg) > 30: err_summary += "…"
+            
         lines.append(
-            f"❌ <code>{row['candidate_id']}</code> | {error_code}"
-            + (f" | {_fmt_text(error_message)}" if error_message else "")
+            f"❌ {short_id} | <code>{error_code}</code>" + (f": {err_summary}" if err_summary else "")
         )
 
     return "\n".join(lines)
