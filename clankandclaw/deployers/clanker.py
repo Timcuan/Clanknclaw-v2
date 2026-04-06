@@ -49,11 +49,12 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
         f"{deploy_request.token_name} ({deploy_request.token_symbol}) on Base."
     )
 
+    # SDK v4 Context: essential for linking back to original social post
     context: dict[str, Any] = {
         "interface": "Clank&Claw",
-        "platform": deploy_request.source or "automated",
+        "platform": "x" if deploy_request.source == "x" else ("farcaster" if deploy_request.source == "farcaster" else "automated"),
         "messageId": deploy_request.source_event_id or deploy_request.candidate_id,
-        "id": deploy_request.candidate_id,
+        "id": deploy_request.source_event_id or deploy_request.candidate_id,
     }
 
     # Build metadata: description is key for Clanker v4 deployment standards

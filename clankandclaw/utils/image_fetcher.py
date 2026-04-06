@@ -34,51 +34,65 @@ async def fetch_image_bytes(url: str, stealth: StealthClient | None = None) -> b
     if _own_stealth:
         stealth = StealthClient(StealthConfig(), timeout=REQUEST_TIMEOUT_SECONDS)
     try:
-        return await _fetch_with_stealth(url, stealth)
+        # Standard Browser User-Agent to bypass generic bot filters
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        return await _fetch_with_stealth(url, stealth, user_agent=user_agent)
     finally:
         if _own_stealth:
             await stealth.aclose()
 
 
-async def _fetch_with_stealth(url: str, stealth: StealthClient) -> bytes:
+async def _fetch_with_stealth(url: str, stealth: StealthClient, user_agent: str) -> bytes:
     current_url = url
     redirects_followed = 0
+    max_retries = 3
+    retry_delay = 1.0
 
-    while True:
-        # SSRF validation before every request (including after redirects)
-        await _resolve_fetch_target(current_url)
+    for attempt in range(max_retries):
+        try:
+            # SSRF validation before every request
+            await _resolve_fetch_target(current_url)
 
-        response = await stealth.get(
-            current_url,
-            headers={"accept": "image/*"},
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
+            response = await stealth.get(
+                current_url,
+                headers={
+                    "accept": "image/*, */*",
+                    "user-agent": user_agent,
+                },
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
 
-        if _is_redirect(response.status_code):
-            redirect_location = response.headers.get("location")
-            if not redirect_location:
-                break
-            redirects_followed += 1
-            if redirects_followed > MAX_REDIRECTS:
-                raise httpx.TooManyRedirects("Exceeded maximum allowed redirects.")
-            current_url = urljoin(current_url, redirect_location)
-            continue
+            if _is_redirect(response.status_code):
+                redirect_location = response.headers.get("location")
+                if not redirect_location:
+                    break
+                redirects_followed += 1
+                if redirects_followed > MAX_REDIRECTS:
+                    raise httpx.TooManyRedirects("Exceeded maximum allowed redirects.")
+                current_url = urljoin(current_url, redirect_location)
+                continue
 
-        httpx.Response(
-            response.status_code,
-            headers=dict(response.headers),
-            request=httpx.Request("GET", current_url),
-        ).raise_for_status()
+            httpx.Response(
+                response.status_code,
+                headers=dict(response.headers),
+                request=httpx.Request("GET", current_url),
+            ).raise_for_status()
 
-        _validate_content_type(response.headers.get("content-type"))
-        _validate_size(response.headers.get("content-length"))
+            _validate_content_type(response.headers.get("content-type"))
+            _validate_size(response.headers.get("content-length"))
 
-        body = response.content
-        if len(body) > MAX_IMAGE_BYTES:
-            raise ValueError("image response is too large")
-        return body
+            body = response.content
+            if len(body) > MAX_IMAGE_BYTES:
+                raise ValueError("image response is too large")
+            return body
 
-    raise ValueError("redirect loop without valid response")
+        except Exception as exc:
+            if attempt == max_retries - 1:
+                raise
+            logger.warning(f"Image fetch attempt {attempt+1} failed: {exc}, retrying...")
+            await asyncio.sleep(retry_delay * (attempt + 1))
+
+    raise ValueError("redirect loop or max retries without valid response")
 
 
 def _validate_image_url(url: str) -> None:

@@ -126,12 +126,13 @@ global.fetch = async function(url, options) {
       const suffix = suffixStr.includes('b07') ? 'b07' : suffixStr;
       
       let nonce = 0;
-      // Loop ceiling set to 2,000,000 to prevent event loop blocking for > 2-3 seconds
-      while (nonce < 2000000) {
+      // Loop ceiling set to 5,000,000 to ensure 'no miss' for finding b07 suffix
+      while (nonce < 5000000) {
           const salt = pad(toHex(nonce), { size: 32 });
           const hash = keccak256(concat(['0xff', deployer, salt, initCodeHash]));
           
           if (hash.toLowerCase().endsWith(suffix)) {
+              console.error(`[CNC-DEBUG] Found ${suffix} vanity salt: ${salt} (nonce: ${nonce})`);
               return {
                   ok: true,
                   json: async () => ({ salt: salt }),
@@ -141,7 +142,7 @@ global.fetch = async function(url, options) {
           nonce++;
       }
       // If we somehow exceed the loop ceiling, fall back gracefully
-      console.warn('[CNC-DEBUG] Local vanity mining exceeded 2M iterations, falling back to Render API...');
+      console.warn(`[CNC-DEBUG] Local vanity mining exceeded 5M iterations for ${suffix}, falling back to Render API...`);
     } catch (err) {
       console.warn('[CNC-DEBUG] Local vanity script error:', err, '- falling back to Render API...');
     }
