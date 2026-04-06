@@ -81,9 +81,64 @@ Buttons:
 - `/setbot on|off`
 - `/setdeployer clanker|bankr|both`
 - `/control`
+- `/manualdeploy` (wizard entrypoint)
+- `/deploynow <platform> <name> <symbol> <image_or_cid> [description]` (power-user direct mode)
+- `/deployca <platform> <candidate_id>` (force deploy from existing candidate)
 
 Backward-compatible operational commands remain:
 - `/status`, `/queue`, `/candidate`, `/deploys`, `/claimfees`
+
+### Manual Deploy UX (Hybrid)
+
+Manual deploy uses a hybrid interaction model:
+- Inline buttons for fast decisions (platform, source mode, confirm/cancel)
+- Text input for high-entropy fields (name, symbol, description, candidate id, override CID)
+
+Rationale:
+- Buttons reduce typo risk and operator latency during active windows.
+- Text input keeps flexibility for custom token metadata.
+
+## Manual Deploy via Chat
+
+### Functional Requirements
+
+1. Operator can deploy manually without waiting for detector/review queue.
+2. Operator can select deploy mode: `clanker`, `bankr`, or `both`.
+3. Operator can deploy from:
+- Existing `candidate_id`, or
+- Fully custom metadata entered in chat.
+4. All manual deploys require explicit final confirmation.
+
+### Wizard Flow (`/manualdeploy`)
+
+1. Select platform mode (`clanker|bankr|both`).
+2. Select source (`candidate` or `custom`).
+3. Build draft payload (collect metadata and image/CID).
+4. Show preview card (name, symbol, image CID, tax/admin/reward config, deployer mode).
+5. Final action: `Confirm Deploy` or `Cancel`.
+
+### Manual Deploy Data Model
+
+Add table `manual_deploy_requests`:
+- `id`
+- `requested_by_chat_id`
+- `requested_by_user_id`
+- `thread_id`
+- `source_mode` (`candidate|custom`)
+- `candidate_id` nullable
+- `platform_mode` (`clanker|bankr|both`)
+- `payload_json`
+- `status` (`draft|confirmed|deploying|completed|failed|cancelled`)
+- `created_at`
+- `updated_at`
+
+### Manual Deploy Guardrails
+
+- Authorized chat enforcement.
+- Confirm-required execution (no single-tap transaction send).
+- Rate limit per window to avoid accidental spam.
+- Strict payload validation before confirmation.
+- If selected deployer is unavailable, block with explicit operator message.
 
 ## Runtime Behavior
 
@@ -145,6 +200,48 @@ Category mapping:
 For `both` mode:
 - keep one deploy thread; include platform sections in message body.
 - do not split by platform thread in this phase to reduce operator cognitive load.
+
+Manual deploy threading:
+- Wizard interaction in `ops` thread.
+- Deploy execution updates in `deploy` thread.
+- Critical failures in `alert` thread.
+
+## Telegram Media to IPFS Flow (Deploy-Ready)
+
+### Operator Requirement
+
+Operator can send image directly to bot, and bot converts it automatically into deploy-ready IPFS CID.
+
+### Processing Flow
+
+1. Operator uploads image (`photo` or `document`) in Telegram.
+2. Bot retrieves file via Telegram Bot API (`getFile` + file download).
+3. Validate type/size and decode integrity.
+4. Normalize image for deployment:
+- standard output format (default PNG)
+- optional resize constraints for efficiency
+- strip non-essential metadata
+5. Compute content hash for dedupe.
+6. Reuse CID from cache when hash already exists; otherwise upload to Pinata.
+7. Return `ipfs://<CID>` and attach to draft/manual deploy payload.
+
+### Reliability Rules
+
+- Retry Pinata upload with bounded backoff.
+- Deterministic fallback choices on failure:
+- retry upload
+- use previous CID
+- cancel flow
+- Reject unsupported or corrupted files with actionable error text.
+
+### Storage
+
+Persist media upload mapping in cache/DB:
+- content hash
+- CID
+- mime type
+- byte size
+- timestamp
 
 ## Safety and Consistency
 
