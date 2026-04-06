@@ -296,6 +296,15 @@ def build_review_message(
         lines.append(f"\n{mood} <b>AI INSIGHT | {bullish}% BULLISH</b>")
         lines.append(f"<i>{_fmt_text(rationale)}</i>")
 
+    # Protection & Advanced Features
+    protection_line = "🛡️ <b>Anti-Sniper:</b> ENABLED (15s decay)"
+    if metadata.get("vault_pct"):
+        protection_line += f" | 🔐 <b>Vault:</b> {metadata['vault_pct']}% Locked"
+    else:
+        protection_line += " | 🔐 <b>Vault:</b> DISABLED"
+    lines.append(f"\n{protection_line}")
+    lines.append("💸 <b>Dev Buy:</b> DISABLED")
+
     if raw_text:
         trimmed = _shorten_text(raw_text, 60)
         lines += ["", f"<blockquote>{_fmt_text(trimmed)}</blockquote>"]

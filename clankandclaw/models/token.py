@@ -119,6 +119,14 @@ class DeployRequest(BaseModel):
     metadata_description: str | None = None
     raw_context_excerpt: str | None = None
 
+    # Advanced SDK v4 Features
+    sniper_fee_enabled: bool = True
+    vault_pct: int | None = Field(default=None, ge=0, le=100)
+    vault_lockup_minutes: int | None = Field(default=None, ge=0)
+    vault_vesting_minutes: int | None = Field(default=None, ge=0)
+    metadata_x_url: str | None = None
+    metadata_telegram_url: str | None = None
+
     @field_validator("signer_wallet", mode="before")
     @classmethod
     def validate_signer_wallet(cls, value: Any, info) -> str:

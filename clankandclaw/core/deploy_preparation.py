@@ -379,6 +379,12 @@ class DeployPreparation:
                     candidate,
                     _build_context_excerpt(candidate.raw_text),
                 ),
+                metadata_x_url=candidate.metadata.get("x_url"),
+                metadata_telegram_url=candidate.metadata.get("telegram_url"),
+                sniper_fee_enabled=True, # Default on for protection
+                vault_pct=candidate.metadata.get("vault_pct"),
+                vault_lockup_minutes=candidate.metadata.get("vault_lockup_minutes"),
+                vault_vesting_minutes=candidate.metadata.get("vault_vesting_minutes"),
             )
 
             preflight_started = perf_counter()

@@ -57,8 +57,14 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
     }
 
     # Build metadata: description is key for Clanker v4 deployment standards
-    description = deploy_request.metadata_description or deploy_request.raw_context_excerpt or ""
     metadata: dict[str, Any] = {"description": description}
+    social_urls = []
+    if deploy_request.metadata_x_url:
+        social_urls.append({"platform": "x", "url": deploy_request.metadata_x_url})
+    if deploy_request.metadata_telegram_url:
+        social_urls.append({"platform": "telegram", "url": deploy_request.metadata_telegram_url})
+    if social_urls:
+        metadata["socialMediaUrls"] = social_urls
 
     config = {
         "name": deploy_request.token_name,
@@ -79,6 +85,19 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
             "clankerFee": deploy_request.clanker_fee_bps if deploy_request.clanker_fee_bps is not None else deploy_request.tax_bps,
             "pairedFee": deploy_request.paired_fee_bps if deploy_request.paired_fee_bps is not None else deploy_request.tax_bps,
         },
+        # Sniper Protection (Decaying Fees)
+        **({"sniperFees": {
+            "startingFee": 666_777, # 66.6777%
+            "endingFee": 41_673,    # 4.1673%
+            "secondsToDecay": 15,
+        }} if deploy_request.sniper_fee_enabled else {}),
+        # Vesting Vault
+        **({"vault": {
+            "percentage": deploy_request.vault_pct,
+            "lockupDuration": (deploy_request.vault_lockup_minutes or 0) * 60,
+            "vestingDuration": (deploy_request.vault_vesting_minutes or 0) * 60,
+            "recipient": deploy_request.token_admin,
+        }} if deploy_request.vault_pct and deploy_request.vault_pct > 0 else {}),
         # Rewards configuration (omitted when disabled)
         **({"rewards": {
             "recipients": [
