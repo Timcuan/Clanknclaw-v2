@@ -171,6 +171,14 @@ Runtime wallet controls (no VPS redeploy/restart required):
 - `/setreward <address|default>` sets reward recipient override.
 - Wallet overrides are persisted in SQLite and applied on next deploy request.
 
+Runtime operation controls (minimal scope, fast toggle):
+- `/control` shows live runtime state.
+- `/setmode <review|auto>` toggles manual review vs auto (`priority_review` only).
+- `/setbot <on|off>` toggles non-critical Telegram notifications.
+- `/setdeployer <clanker|bankr|both>` stores deployer mode.
+  - Current execution support: `clanker` only.
+  - `bankr` and `both` are reserved modes and will return explicit failure until Bankr deployer is enabled.
+
 ### X/Twitter Polling Setup
 
 To enable X polling, configure twscrape with authenticated accounts:

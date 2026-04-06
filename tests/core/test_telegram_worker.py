@@ -172,6 +172,36 @@ async def test_send_review_notification_returns_none_when_bot_send_fails(db):
     assert result is None
 
 
+@pytest.mark.asyncio
+async def test_send_review_notification_auto_mode_priority_triggers_deploy_without_bot_message(db):
+    bot = make_mock_bot()
+    worker = make_worker(db)
+    deploy_prep = MagicMock()
+    deploy_prep.prepare_and_deploy = AsyncMock()
+    worker.set_deploy_preparation(deploy_prep)
+    db.set_runtime_setting("ops.mode", "auto")
+    with patch("clankandclaw.core.workers.telegram_worker.TelegramBot", return_value=bot):
+        await worker.start()
+
+    review_id = await worker.send_review_notification("x-1", "priority_review", 90, ["kw"])
+    assert review_id == "review-x-1"
+    deploy_prep.prepare_and_deploy.assert_awaited_once_with("x-1")
+    bot.send_review_notification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_review_notification_skips_when_bot_off(db):
+    bot = make_mock_bot()
+    worker = make_worker(db)
+    db.set_runtime_setting("ops.bot_enabled", "off")
+    with patch("clankandclaw.core.workers.telegram_worker.TelegramBot", return_value=bot):
+        await worker.start()
+
+    result = await worker.send_review_notification("x-1", "review", 50, [])
+    assert result is None
+    bot.send_review_notification.assert_not_awaited()
+
+
 # ── _handle_approve ───────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -226,6 +256,24 @@ async def test_handle_approve_prevents_double_approval(db):
         await worker._handle_approve("x-1")  # second — must fail
 
     deploy_prep.prepare_and_deploy.assert_awaited_once()  # only called once
+
+
+@pytest.mark.asyncio
+async def test_handle_approve_fails_when_deployer_mode_not_supported(db):
+    bot = make_mock_bot()
+    worker = make_worker(db)
+    db.set_runtime_setting("ops.deployer_mode", "bankr")
+    with patch("clankandclaw.core.workers.telegram_worker.TelegramBot", return_value=bot):
+        await worker.start()
+
+    await worker.send_review_notification("x-1", "review", 70, [])
+    deploy_prep = MagicMock()
+    deploy_prep.prepare_and_deploy = AsyncMock()
+    worker.set_deploy_preparation(deploy_prep)
+
+    await worker._handle_approve("x-1")
+    deploy_prep.prepare_and_deploy.assert_not_awaited()
+    bot.send_deploy_failure.assert_awaited()
 
 
 # ── _handle_reject ────────────────────────────────────────────────────────────

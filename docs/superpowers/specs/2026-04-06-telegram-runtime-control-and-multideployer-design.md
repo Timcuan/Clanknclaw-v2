@@ -298,9 +298,9 @@ Persist media upload mapping in cache/DB:
 ## Rollout Plan
 
 1. Runtime settings API completion and tests.
-2. Telegram control panel + callbacks + slash setters.
-3. Pipeline/deploy worker runtime resolution (`review/auto`, `deployer_mode`).
-4. Multi-deployer persistence + message formatting.
+2. Telegram control panel + slash setters (`/control`, `/setmode`, `/setbot`, `/setdeployer`).
+3. Pipeline/deploy worker runtime resolution (`review/auto`, `bot_enabled`, `deployer_mode`).
+4. Keep deployer execution scope minimal: `clanker` active, `bankr/both` stored as runtime mode and reported clearly as planned/unavailable.
 5. Backward compatibility validation + migration notes.
 
 ## Testing Strategy

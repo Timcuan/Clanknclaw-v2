@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `/wallets`, `/setsigner`, `/setadmin`, `/setreward` for live global wallet overrides
   - overrides stored in `runtime_settings` and applied at deploy preparation time
   - signer private-key override is passed to Node deploy process without requiring service redeploy
+- Minimal runtime operation controls from Telegram:
+  - `/control`, `/setmode`, `/setbot`, `/setdeployer`
+  - `auto` mode now auto-approves `priority_review` candidates only
+  - `bot_enabled=off` suppresses non-critical notifications
+  - `deployer_mode=bankr|both` is persisted but currently reported as unsupported at execution time (safe fail)
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`

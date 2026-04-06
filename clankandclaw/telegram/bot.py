@@ -493,10 +493,14 @@ class TelegramBot:
         self.dp.message.register(self._handle_start, Command("start"))
         self.dp.message.register(self._handle_help, Command("help"))
         self.dp.message.register(self._handle_status, Command("status"))
+        self.dp.message.register(self._handle_control, Command("control"))
         self.dp.message.register(self._handle_queue, Command("queue"))
         self.dp.message.register(self._handle_candidate, Command("candidate"))
         self.dp.message.register(self._handle_deploys, Command("deploys"))
         self.dp.message.register(self._handle_claimfees, Command("claimfees"))
+        self.dp.message.register(self._handle_setmode, Command("setmode"))
+        self.dp.message.register(self._handle_setbot, Command("setbot"))
+        self.dp.message.register(self._handle_setdeployer, Command("setdeployer"))
         self.dp.message.register(self._handle_wallets, Command("wallets"))
         self.dp.message.register(self._handle_setsigner, Command("setsigner"))
         self.dp.message.register(self._handle_setadmin, Command("setadmin"))
@@ -521,10 +525,14 @@ class TelegramBot:
         await self.bot.set_my_commands(
             [
                 BotCommand(command="status", description="Operational status"),
+                BotCommand(command="control", description="Control panel"),
                 BotCommand(command="queue", description="Pending review queue"),
                 BotCommand(command="candidate", description="Candidate detail by ID"),
                 BotCommand(command="deploys", description="Recent deployments"),
                 BotCommand(command="claimfees", description="Claim rewards by token"),
+                BotCommand(command="setmode", description="Set mode review/auto"),
+                BotCommand(command="setbot", description="Set bot on/off"),
+                BotCommand(command="setdeployer", description="Set deployer mode"),
                 BotCommand(command="wallets", description="Show runtime wallet config"),
                 BotCommand(command="setsigner", description="Set deployer signer wallet/key"),
                 BotCommand(command="setadmin", description="Set token admin wallet"),
@@ -547,10 +555,14 @@ class TelegramBot:
             "Approve/reject is done per candidate from inline buttons.\n\n"
             "<b>Commands:</b>\n"
             "/status — Operational counters\n"
+            "/control — Runtime control panel\n"
             "/queue — Pending queue\n"
             "/candidate &lt;id&gt; — Candidate detail\n"
             "/deploys — Recent deployments\n"
             "/claimfees &lt;token_address&gt; — Claim token rewards\n"
+            "/setmode &lt;review|auto&gt; — Set review mode\n"
+            "/setbot &lt;on|off&gt; — Toggle bot notifications\n"
+            "/setdeployer &lt;clanker|bankr|both&gt; — Set deployer mode\n"
             "/wallets — Show runtime wallet config\n"
             "/setsigner &lt;address|private_key|default&gt; — Set deployer signer\n"
             "/setadmin &lt;address|default&gt; — Set token admin\n"
@@ -573,10 +585,14 @@ class TelegramBot:
             "3. Reject → mark rejected immediately\n\n"
             "<b>Commands:</b>\n"
             "/status — Operational counters\n"
+            "/control — Runtime control panel\n"
             "/queue — Pending queue\n"
             "/candidate &lt;id&gt; — Candidate detail\n"
             "/deploys — Recent deployments\n"
             "/claimfees &lt;token_address&gt; — Claim rewards via Clanker SDK\n"
+            "/setmode &lt;review|auto&gt; — Set review mode\n"
+            "/setbot &lt;on|off&gt; — Toggle bot notifications\n"
+            "/setdeployer &lt;clanker|bankr|both&gt; — Set deployer mode\n"
             "/wallets — Show runtime wallet config\n"
             "/setsigner &lt;address|private_key|default&gt; — Set deployer signer\n"
             "/setadmin &lt;address|default&gt; — Set token admin\n"
@@ -626,6 +642,102 @@ class TelegramBot:
         except Exception as exc:
             logger.error(f"Error listing queue: {exc}", exc_info=True)
             await message.answer("⚠️ Error fetching queue.", parse_mode="HTML")
+
+    async def _handle_control(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+
+        mode = (self._runtime_get("ops.mode") or "review").strip().lower()
+        bot_state = (self._runtime_get("ops.bot_enabled") or "on").strip().lower()
+        deployer = (self._runtime_get("ops.deployer_mode") or "clanker").strip().lower()
+        auto_rule = (self._runtime_get("ops.auto_rule") or "priority_review_only").strip().lower()
+
+        mode_view = "🟩 AUTO" if mode == "auto" else "🟦 REVIEW"
+        bot_view = "🟢 ON" if bot_state in {"on", "true", "1", "yes"} else "🔴 OFF"
+        deployer_view = deployer.upper()
+        if deployer == "both":
+            deployer_view = "BOTH (planned)"
+        if deployer == "bankr":
+            deployer_view = "BANKR (planned)"
+
+        await message.answer(
+            "🎛️ <b>Runtime Control</b>\n\n"
+            f"• <b>Mode:</b> {mode_view}\n"
+            f"• <b>Bot:</b> {bot_view}\n"
+            f"• <b>Deployer:</b> {_fmt_text(deployer_view)}\n"
+            f"• <b>Auto rule:</b> {_fmt_inline_code(auto_rule)}\n\n"
+            "Setters:\n"
+            "• <code>/setmode review</code> or <code>/setmode auto</code>\n"
+            "• <code>/setbot on</code> or <code>/setbot off</code>\n"
+            "• <code>/setdeployer clanker|bankr|both</code>",
+            parse_mode="HTML",
+        )
+
+    async def _handle_setmode(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+        parts = (message.text or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("Usage: /setmode &lt;review|auto&gt;", parse_mode="HTML")
+            return
+        mode = parts[1].strip().lower()
+        if mode not in {"review", "auto"}:
+            await message.answer("⚠️ Invalid mode. Use review or auto.", parse_mode="HTML")
+            return
+        if not self._runtime_set("ops.mode", mode):
+            await message.answer("⚠️ Failed saving mode.", parse_mode="HTML")
+            return
+        await message.answer(f"✅ Mode set to <b>{_fmt_text(mode)}</b>.", parse_mode="HTML")
+
+    async def _handle_setbot(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+        parts = (message.text or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("Usage: /setbot &lt;on|off&gt;", parse_mode="HTML")
+            return
+        value = parts[1].strip().lower()
+        if value not in {"on", "off"}:
+            await message.answer("⚠️ Invalid value. Use on or off.", parse_mode="HTML")
+            return
+        if not self._runtime_set("ops.bot_enabled", value):
+            await message.answer("⚠️ Failed saving bot state.", parse_mode="HTML")
+            return
+        await message.answer(f"✅ Bot notifications set to <b>{_fmt_text(value)}</b>.", parse_mode="HTML")
+
+    async def _handle_setdeployer(self, message: Message) -> None:
+        if not self._is_authorized_chat(message.chat.id):
+            return
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+        parts = (message.text or "").strip().split(maxsplit=1)
+        if len(parts) < 2:
+            await message.answer("Usage: /setdeployer &lt;clanker|bankr|both&gt;", parse_mode="HTML")
+            return
+        value = parts[1].strip().lower()
+        if value not in {"clanker", "bankr", "both"}:
+            await message.answer("⚠️ Invalid deployer mode.", parse_mode="HTML")
+            return
+        if not self._runtime_set("ops.deployer_mode", value):
+            await message.answer("⚠️ Failed saving deployer mode.", parse_mode="HTML")
+            return
+        note = ""
+        if value in {"bankr", "both"}:
+            note = "\n⚠️ Bankr execution is not implemented yet; deploy will fail until enabled."
+        await message.answer(
+            f"✅ Deployer mode set to <b>{_fmt_text(value)}</b>.{note}",
+            parse_mode="HTML",
+        )
 
     async def _handle_candidate(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
