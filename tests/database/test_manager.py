@@ -283,3 +283,34 @@ def test_runtime_settings_delete(tmp_path):
     assert db.get_runtime_setting("wallet.token_admin") == "0x" + "1" * 40
     db.delete_runtime_setting("wallet.token_admin")
     assert db.get_runtime_setting("wallet.token_admin") is None
+
+
+def test_database_manager_compacts_oversized_raw_text_and_metadata(tmp_path):
+    db = DatabaseManager(tmp_path / "state.db")
+    db.initialize()
+    raw_text = "x" * 5000
+    metadata = {
+        "context_url": "https://x.com/a/status/1",
+        "author_handle": "alice",
+        "raw_event": {"huge": "y" * 10000},
+        "image_candidates": [f"https://example.com/{i}.png" for i in range(40)],
+        "notes": "z" * 2000,
+    }
+    db.save_candidate(
+        "sig-big",
+        "x",
+        "tweet-big",
+        "fp-big",
+        raw_text,
+        metadata=metadata,
+    )
+    row = db.get_candidate("sig-big")
+    assert row is not None
+    assert len(row["raw_text"]) <= 1200
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        stored_meta = conn.execute(
+            "SELECT metadata_json FROM signal_candidates WHERE id = ?",
+            ("sig-big",),
+        ).fetchone()[0]
+    assert len(stored_meta.encode("utf-8")) <= 16384
+    assert "raw_event" not in stored_meta

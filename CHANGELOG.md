@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `auto` mode now auto-approves `priority_review` candidates only
   - `bot_enabled=off` suppresses non-critical notifications
   - `deployer_mode=bankr|both` is persisted but currently reported as unsupported at execution time (safe fail)
+- Smart data hygiene for long-running VPS mode:
+  - DB compaction for oversized raw text and noisy metadata fields on candidate writes
+  - image deploy preparation now caps external image fetch attempts to reduce worst-case latency
+  - Pinata cache now uses bounded size + batched flush to reduce cache-file write pressure
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`

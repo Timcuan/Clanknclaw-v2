@@ -19,6 +19,9 @@ class PinataClient:
         cache_default = Path(os.getenv("PINATA_CACHE_PATH", ".pinata_cache.json"))
         self.cache_path = Path(cache_path) if cache_path else cache_default
         self._cache = self._load_cache()
+        self._cache_max_entries = int(os.getenv("PINATA_CACHE_MAX_ENTRIES", "20000"))
+        self._cache_flush_every = int(os.getenv("PINATA_CACHE_FLUSH_EVERY", "25"))
+        self._dirty_updates = 0
 
     def _load_cache(self) -> dict[str, str]:
         if not self.cache_path.exists():
@@ -34,6 +37,24 @@ class PinataClient:
     def _save_cache(self) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         self.cache_path.write_text(json.dumps(self._cache, sort_keys=True))
+        self._dirty_updates = 0
+
+    def _evict_if_needed(self) -> None:
+        overflow = len(self._cache) - self._cache_max_entries
+        if overflow <= 0:
+            return
+        # Dict preserves insertion order in modern Python.
+        for key in list(self._cache.keys())[:overflow]:
+            self._cache.pop(key, None)
+
+    def _schedule_cache_flush(self) -> None:
+        self._dirty_updates += 1
+        must_flush = (
+            self._dirty_updates >= self._cache_flush_every
+            or not self.cache_path.exists()
+        )
+        if must_flush:
+            self._save_cache()
 
     def _cache_key(self, payload: bytes, *, kind: str) -> str:
         digest = hashlib.sha256(payload).hexdigest()
@@ -44,7 +65,8 @@ class PinataClient:
 
     def _cache_set(self, payload: bytes, cid: str, *, kind: str) -> None:
         self._cache[self._cache_key(payload, kind=kind)] = cid
-        self._save_cache()
+        self._evict_if_needed()
+        self._schedule_cache_flush()
 
     def normalize_cid(self, raw_cid: str) -> str:
         cid = raw_cid.strip()

@@ -123,3 +123,38 @@ async def test_pinata_client_upload_any_uses_mime_guess(monkeypatch: pytest.Monk
 
     assert ipfs_hash == "QmAny"
     assert _DummyClient.calls[0]["files"]["file"][2] == "image/webp"
+
+
+def test_pinata_client_evicts_old_cache_entries(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setenv("PINATA_CACHE_MAX_ENTRIES", "2")
+    client = PinataClient(jwt="pinata-jwt", cache_path=str(tmp_path / "pinata-cache.json"))
+    client._cache = {}
+    client._cache_set(b"a", "QmA", kind="file")
+    client._cache_set(b"b", "QmB", kind="file")
+    client._cache_set(b"c", "QmC", kind="file")
+    assert len(client._cache) == 2
+    assert client._cache_get(b"a", kind="file") is None
+    assert client._cache_get(b"b", kind="file") == "QmB"
+    assert client._cache_get(b"c", kind="file") == "QmC"
+
+
+def test_pinata_client_flushes_cache_in_batches(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setenv("PINATA_CACHE_FLUSH_EVERY", "3")
+    client = PinataClient(jwt="pinata-jwt", cache_path=str(tmp_path / "pinata-cache.json"))
+    save_calls = {"count": 0}
+
+    def fake_save():
+        save_calls["count"] += 1
+        client.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        client.cache_path.write_text("{}")
+        client._dirty_updates = 0
+
+    monkeypatch.setattr(client, "_save_cache", fake_save)
+    client._cache = {}
+    client._cache_set(b"a", "QmA", kind="file")
+    client._cache_set(b"b", "QmB", kind="file")
+    assert save_calls["count"] == 1  # first write flushes because cache file does not exist
+    client._cache_set(b"c", "QmC", kind="file")
+    client._cache_set(b"d", "QmD", kind="file")
+    client._cache_set(b"e", "QmE", kind="file")
+    assert save_calls["count"] == 2

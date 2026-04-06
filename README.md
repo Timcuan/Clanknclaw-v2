@@ -179,6 +179,11 @@ Runtime operation controls (minimal scope, fast toggle):
   - Current execution support: `clanker` only.
   - `bankr` and `both` are reserved modes and will return explicit failure until Bankr deployer is enabled.
 
+Storage and payload hygiene optimizations:
+- DB write compaction for oversized `raw_text` and noisy metadata payloads.
+- Metadata heavy keys are pruned and oversized arrays/strings are capped before persistence.
+- Pinata cache is bounded (`PINATA_CACHE_MAX_ENTRIES`) and flushed in batches (`PINATA_CACHE_FLUSH_EVERY`) to reduce disk I/O under burst uploads.
+
 ### X/Twitter Polling Setup
 
 To enable X polling, configure twscrape with authenticated accounts:

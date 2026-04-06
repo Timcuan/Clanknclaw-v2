@@ -5,9 +5,82 @@ from pathlib import Path
 from time import sleep
 from typing import Optional
 
+_MAX_RAW_TEXT_CHARS = 1200
+_MAX_METADATA_JSON_BYTES = 16 * 1024
+_MAX_LIST_ITEMS = 12
+_MAX_STRING_CHARS = 500
+_HEAVY_METADATA_KEYS = {
+    "raw_event",
+    "event",
+    "tweet",
+    "cast",
+    "embeds",
+    "media_raw",
+    "debug",
+    "html",
+}
+_ESSENTIAL_METADATA_KEYS = (
+    "context_url",
+    "author_handle",
+    "suggested_name",
+    "suggested_symbol",
+    "image_url",
+    "image_candidates",
+    "image_urls",
+    "network",
+    "dex",
+    "volume",
+    "transactions",
+    "liquidity_usd",
+    "confidence_tier",
+    "gate_stage",
+    "source_tags_matched",
+)
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _compact_raw_text(raw_text: str) -> str:
+    normalized = " ".join((raw_text or "").split())
+    if len(normalized) <= _MAX_RAW_TEXT_CHARS:
+        return normalized
+    return normalized[:_MAX_RAW_TEXT_CHARS]
+
+
+def _compact_metadata_value(value):
+    if isinstance(value, str):
+        if len(value) <= _MAX_STRING_CHARS:
+            return value
+        return value[:_MAX_STRING_CHARS]
+    if isinstance(value, list):
+        return [_compact_metadata_value(item) for item in value[:_MAX_LIST_ITEMS]]
+    if isinstance(value, dict):
+        compacted: dict[str, object] = {}
+        for key, item in value.items():
+            if str(key) in _HEAVY_METADATA_KEYS:
+                continue
+            compacted[str(key)] = _compact_metadata_value(item)
+        return compacted
+    return value
+
+
+def _compact_metadata_for_storage(metadata: dict | None) -> dict:
+    compacted = _compact_metadata_value(metadata or {})
+    if not isinstance(compacted, dict):
+        return {}
+
+    encoded = json.dumps(compacted, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    if len(encoded) <= _MAX_METADATA_JSON_BYTES:
+        return compacted
+
+    # Fallback: keep essential keys only when payload is still too large.
+    reduced: dict[str, object] = {"_truncated": True}
+    for key in _ESSENTIAL_METADATA_KEYS:
+        if key in compacted:
+            reduced[key] = compacted[key]
+    return reduced
 
 
 class DatabaseManager:
@@ -294,7 +367,9 @@ class DatabaseManager:
         observed_at: str = "",
         metadata: dict | None = None,
     ) -> None:
-        metadata_json = json.dumps(metadata or {})
+        raw_text_compact = _compact_raw_text(raw_text)
+        metadata_compact = _compact_metadata_for_storage(metadata)
+        metadata_json = json.dumps(metadata_compact)
         def _op():
             with self._connect() as conn:
                 conn.execute(
@@ -303,7 +378,7 @@ class DatabaseManager:
                         (id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (candidate_id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json),
+                    (candidate_id, source, source_event_id, fingerprint, raw_text_compact, observed_at, metadata_json),
                 )
         self._with_retry(_op)
 
@@ -321,7 +396,9 @@ class DatabaseManager:
         observed_at: str = "",
         metadata: dict | None = None,
     ) -> None:
-        metadata_json = json.dumps(metadata or {})
+        raw_text_compact = _compact_raw_text(raw_text)
+        metadata_compact = _compact_metadata_for_storage(metadata)
+        metadata_json = json.dumps(metadata_compact)
         def _op():
             with self._connect() as conn:
                 conn.execute("BEGIN")
@@ -339,7 +416,7 @@ class DatabaseManager:
                             observed_at = excluded.observed_at,
                             metadata_json = excluded.metadata_json
                         """,
-                        (candidate_id, source, source_event_id, fingerprint, raw_text, observed_at, metadata_json),
+                        (candidate_id, source, source_event_id, fingerprint, raw_text_compact, observed_at, metadata_json),
                     )
                     conn.execute(
                         """
