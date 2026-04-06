@@ -31,6 +31,13 @@ cd "$APP_DIR"
 echo -e "${CYAN}📥 Pulling latest Mission Control fixes...${NC}"
 git pull origin main
 
+# 3.1 .env Sanitization (Deduplicate keys)
+if [ -f ".env" ]; then
+    echo -e "${CYAN}🧹 Sanitizing .env variables...${NC}"
+    # Keep only the last occurrence of each key to ensure updates override old values
+    awk -F= '!a[$1]++{b[c++]=$1} {v[$1]=$0} END{for(i=0;i<c;i++) print v[b[i]]}' .env > .env.tmp && mv .env.tmp .env
+fi
+
 # 4. Dependency Update (Safe skip if no change)
 if [ -f "requirements.txt" ]; then
     echo -e "${CYAN}📦 Syncing dependencies...${NC}"

@@ -26,7 +26,7 @@ def _clean_best_effort(val: str) -> str:
 
 class CircuitBreaker:
     """Manages AI API health to prevent redundant failing calls."""
-    def __init__(self, failure_threshold: int = 3, cooldown_seconds: int = 300):
+    def __init__(self, failure_threshold: int = 3, cooldown_seconds: int = 120):
         self.failure_threshold = failure_threshold
         self.cooldown_seconds = cooldown_seconds
         self.failures = 0
@@ -246,19 +246,25 @@ async def suggest_token_metadata(theme: str) -> list[dict[str, str]]:
             }
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, json=payload)
-                if resp.status_code == 429: continue
+                if resp.status_code == 429:
+                     logger.warning(f"Gemini {model} rate limited (429).")
+                     continue
+                if resp.status_code == 403:
+                     logger.error(f"Gemini {model} FORBIDDEN (403). CHECK API KEY.")
+                     gemini_breaker.record_failure()
+                     return []
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["candidates"][0]["content"]["parts"][0]["text"]
                 # Robust JSON cleaning (remove markdown etc)
-                json_match = re.search(r"\[.*\]", content, re.DOTALL)
+                json_match = re.search(r"(\[.*\])", content, re.DOTALL)
                 if json_match:
-                    content = json_match.group(0)
+                    content = json_match.group(1)
                 
                 gemini_breaker.record_success()
                 return json.loads(content)
         except Exception as exc:
-            logger.debug(f"AI Metadata Suggestion failed: {exc}")
+            logger.warning(f"AI Metadata Suggestion failed on {model}: {exc}")
             continue
             
     gemini_breaker.record_failure()
