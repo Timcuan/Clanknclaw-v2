@@ -24,6 +24,7 @@ _MAX_IMAGE_DIMENSION = 1024
 _MIN_IMAGE_DIMENSION = 120
 _IMAGE_BAD_HINTS = ("profile_images", "profile_banners", "avatar", "banner", "default_profile")
 _IMAGE_EXT_HINTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+_MAX_IMAGE_FETCH_ATTEMPTS = 4
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _PRIVATE_KEY_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
 
@@ -375,8 +376,12 @@ class DeployPreparation:
     async def _prepare_image(self, candidate: SignalCandidate, token_name: str, token_symbol: str) -> str:
         """Fetch image and upload to IPFS."""
         image_candidates = _build_image_candidates(candidate, token_name, token_symbol)
+        attempts = 0
 
         for image_url in image_candidates:
+            if attempts >= _MAX_IMAGE_FETCH_ATTEMPTS:
+                break
+            attempts += 1
             try:
                 image_bytes = await fetch_image_bytes(image_url)
                 if not _is_image_content_plausible(image_bytes, image_url, candidate.source):
@@ -390,6 +395,14 @@ class DeployPreparation:
                 return f"ipfs://{ipfs_hash}"
             except Exception:
                 continue
+
+        if len(image_candidates) > _MAX_IMAGE_FETCH_ATTEMPTS:
+            logger.info(
+                "Image fetch attempt cap reached for %s: tried=%d total_candidates=%d",
+                candidate.id,
+                attempts,
+                len(image_candidates),
+            )
 
         logger.warning("No valid context image for %s; using generated placeholder image", candidate.id)
         try:

@@ -169,6 +169,26 @@ async def test_prepare_image_uses_placeholder_when_no_image_url(db):
     assert uri == "ipfs://QmImageHash"
 
 
+@pytest.mark.asyncio
+async def test_prepare_image_caps_failed_fetch_attempts(db, monkeypatch):
+    prep, pinata, _ = make_preparation(db)
+    called_urls: list[str] = []
+
+    async def fake_fetch(url: str) -> bytes:
+        called_urls.append(url)
+        raise RuntimeError("fetch failed")
+
+    monkeypatch.setattr("clankandclaw.core.deploy_preparation.fetch_image_bytes", fake_fetch)
+
+    urls = [f"https://example.com/img{i}.png" for i in range(10)]
+    candidate = make_candidate(metadata={"image_candidates": urls})
+
+    uri = await prep._prepare_image(candidate, "Moon", "MOON")
+    assert uri == "ipfs://QmImageHash"
+    assert len(called_urls) == 4
+    pinata.upload_file_bytes.assert_awaited_once()
+
+
 # ── get_candidate_by_id ───────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
