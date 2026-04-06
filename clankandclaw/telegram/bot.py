@@ -1001,6 +1001,22 @@ class TelegramBot:
     async def _handle_autothread(self, message: Message) -> None:
         if not self._is_authorized_chat(message.chat.id):
             return
+
+        args = (message.text or "").strip().split()
+        force = len(args) > 1 and args[1].lower() == "force"
+        current_bindings = dict(self._dynamic_thread_bindings)
+
+        if not current_bindings and not force:
+            await message.answer(
+                _fmt_dashboard_header("Notice", "⚠️") +
+                "I detected <b>no existing topics</b> in my database memory.\n\n"
+                "If you <b>already have topics</b> from a previous setup, do NOT use this command yet, as it will create duplicates. Instead, go inside each existing topic and send: <code>/pair review</code>, <code>/pair deploy</code>, etc.\n\n"
+                "If this is a <b>fresh setup</b> or you want to generate all missing topics automatically, run:\n"
+                "<code>/autothread force</code>",
+                parse_mode="HTML"
+            )
+            return
+
         created, failures = await self._ensure_forum_topics_bound()
         if failures:
             await message.answer(
