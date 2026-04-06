@@ -65,3 +65,4 @@ deployment:
 telegram:
   bot_token: ""
   chat_id: ""
+  message_thread_id: null

@@ -74,6 +74,7 @@ class DeploymentSection(BaseModel):
 class TelegramSection(BaseModel):
     bot_token: str = ""
     chat_id: str = ""
+    message_thread_id: int | None = None
 
 
 class WalletSection(BaseModel):
@@ -138,6 +139,8 @@ def load_config(path: Path) -> AppConfig:
         raw["telegram"]["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
     if os.getenv("TELEGRAM_CHAT_ID"):
         raw["telegram"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID")
+    if os.getenv("TELEGRAM_MESSAGE_THREAD_ID"):
+        raw["telegram"]["message_thread_id"] = int(os.getenv("TELEGRAM_MESSAGE_THREAD_ID", "0"))
 
     if "farcaster_detector" not in raw:
         raw["farcaster_detector"] = {}

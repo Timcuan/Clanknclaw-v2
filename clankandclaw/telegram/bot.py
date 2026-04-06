@@ -1,5 +1,6 @@
 """Telegram bot for approval flow."""
 
+import asyncio
 import html
 import logging
 import os
@@ -284,6 +285,7 @@ class TelegramBot:
         self,
         token: str | None = None,
         chat_id: str | None = None,
+        message_thread_id: int | None = None,
         db: Any = None,
     ):
         if not AIOGRAM_AVAILABLE:
@@ -291,6 +293,7 @@ class TelegramBot:
 
         self.token = token or os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
+        self.message_thread_id = message_thread_id
         self._db = db  # optional DatabaseManager for operator commands
 
         if not self.token:
@@ -306,6 +309,40 @@ class TelegramBot:
         self.on_approve: Any = None
         self.on_reject: Any = None
         self.on_claim_fees: Any = None
+
+    async def _send_bot_message(
+        self,
+        *,
+        text: str,
+        parse_mode: str = "HTML",
+        reply_markup: Any | None = None,
+        disable_web_page_preview: bool = False,
+    ) -> Any:
+        """Send message with bounded retries for transient Telegram API failures."""
+        payload: dict[str, Any] = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+        }
+        if self.message_thread_id is not None:
+            payload["message_thread_id"] = self.message_thread_id
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        if disable_web_page_preview:
+            payload["disable_web_page_preview"] = True
+
+        for attempt in range(3):
+            try:
+                return await self.bot.send_message(**payload)
+            except Exception as exc:
+                retry_after = getattr(exc, "retry_after", None)
+                if retry_after and attempt < 2:
+                    await asyncio.sleep(float(retry_after) + 0.2)
+                    continue
+                if attempt < 2:
+                    await asyncio.sleep(0.4 * (attempt + 1))
+                    continue
+                raise
 
     def _setup_handlers(self) -> None:
         """Setup message and callback handlers."""
@@ -720,8 +757,7 @@ class TelegramBot:
             )
             keyboard = build_review_keyboard(candidate_id)
 
-            result = await self.bot.send_message(
-                chat_id=self.chat_id,
+            result = await self._send_bot_message(
                 text=message_text,
                 parse_mode="HTML",
                 reply_markup=keyboard,
@@ -738,8 +774,7 @@ class TelegramBot:
     async def send_deploy_preparing(self, candidate_id: str) -> None:
         """Notify that deploy preparation has started."""
         try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
+            await self._send_bot_message(
                 text=(
                     "⚙️ <b>Deploy Pipeline</b>\n\n"
                     "<b>Status</b>\n"
@@ -760,8 +795,7 @@ class TelegramBot:
     ) -> None:
         """Send deploy success notification."""
         try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
+            await self._send_bot_message(
                 text=(
                     "🎉 <b>Deploy Result</b>\n\n"
                     "<b>Status</b>\n"
@@ -784,8 +818,7 @@ class TelegramBot:
     ) -> None:
         """Send deploy failure notification."""
         try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
+            await self._send_bot_message(
                 text=(
                     "❌ <b>Deploy Result</b>\n\n"
                     "<b>Status</b>\n"

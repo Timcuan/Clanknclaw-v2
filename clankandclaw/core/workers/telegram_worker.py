@@ -24,11 +24,13 @@ class TelegramWorker:
         review_expiry_seconds: int = 900,
         bot_token: str | None = None,
         chat_id: str | None = None,
+        message_thread_id: int | None = None,
     ):
         self.db = db
         self.review_expiry_seconds = review_expiry_seconds
         self._bot_token = bot_token
         self._chat_id = chat_id
+        self._message_thread_id = message_thread_id
         self.review_queue = ReviewQueue(db)
         self._running = False
         self._task: asyncio.Task[None] | None = None
@@ -54,6 +56,7 @@ class TelegramWorker:
             self._bot = TelegramBot(
                 token=self._bot_token or None,
                 chat_id=self._chat_id or None,
+                message_thread_id=self._message_thread_id,
                 db=self.db,
             )
 

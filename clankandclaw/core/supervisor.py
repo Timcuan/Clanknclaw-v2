@@ -69,6 +69,7 @@ class Supervisor:
             review_expiry_seconds=self.config.app.review_expiry_seconds,
             bot_token=self.config.telegram.bot_token or None,
             chat_id=self.config.telegram.chat_id or None,
+            message_thread_id=self.config.telegram.message_thread_id,
         )
         self._workers["telegram"] = telegram
         telegram.set_rewards_claimer(rewards_claimer)

@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - richer review card with momentum-first context (`chain`, `volume`, `tx`, `liquidity`, `confidence`, `gate`)
   - standardized message sections across review/deploy/claim outputs
   - expanded inline actions (`Approve`, `Reject`, `Detail`, `Refresh`, `Queue`, `Deploys`)
+- Telegram API hardening aligned with recent Bot API capabilities:
+  - optional `message_thread_id` routing for topic/thread-based chats
+  - bounded retry/backoff on outbound bot notifications for transient `429`/delivery failures
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`

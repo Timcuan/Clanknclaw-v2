@@ -134,6 +134,7 @@ See `.env.example` for all available environment variables.
 **Optional:**
 - X/Twitter accounts configured via twscrape (see below)
 - `NEYNAR_API_KEY` for Farcaster detector
+- `TELEGRAM_MESSAGE_THREAD_ID` to route bot notifications into a specific Telegram topic/thread
 
 ### X/Twitter Polling Setup
 
