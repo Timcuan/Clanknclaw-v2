@@ -10,6 +10,7 @@ from clankandclaw.telegram.bot import (
     build_deploys_message,
     build_queue_message,
     build_review_message,
+    resolve_authorized_chat_id,
 )
 
 try:
@@ -226,6 +227,15 @@ def test_build_action_callback_data_rejects_over_limit_without_encoder():
     long_candidate_id = "gecko-solana:46mhiYcNiWZ5ymenbSrReJui8qsJynAM9nbeuLY4oH4A"
     with pytest.raises(ValueError, match="callback_data"):
         build_action_callback_data("approve", long_candidate_id)
+
+
+def test_resolve_authorized_chat_id_prefers_runtime_pairing():
+    assert resolve_authorized_chat_id("1558397457", "-1001234567890") == "-1001234567890"
+
+
+def test_resolve_authorized_chat_id_falls_back_to_configured():
+    assert resolve_authorized_chat_id("1558397457", None) == "1558397457"
+    assert resolve_authorized_chat_id("1558397457", "   ") == "1558397457"
 
 
 @pytest.mark.skipif(not AIOGRAM_AVAILABLE, reason="aiogram not installed")

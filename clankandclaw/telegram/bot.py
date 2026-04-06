@@ -110,6 +110,18 @@ def _parse_command_args(text: str) -> list[str]:
     return parts[1:]
 
 
+def resolve_authorized_chat_id(
+    configured_chat_id: str | None,
+    runtime_chat_id: str | None,
+) -> str | None:
+    """Prefer runtime-paired chat id when available; fallback to configured env chat id."""
+    if runtime_chat_id is not None and str(runtime_chat_id).strip():
+        return str(runtime_chat_id).strip()
+    if configured_chat_id is not None and str(configured_chat_id).strip():
+        return str(configured_chat_id).strip()
+    return None
+
+
 def build_action_callback_data(
     action: str,
     candidate_id: str,
@@ -383,7 +395,8 @@ class TelegramBot:
             raise ImportError("aiogram is required for TelegramBot")
 
         self.token = token or os.getenv("TELEGRAM_BOT_TOKEN")
-        self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
+        configured_chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
+        self.chat_id = configured_chat_id
         self.message_thread_id = message_thread_id
         self.thread_review_id = thread_review_id
         self.thread_deploy_id = thread_deploy_id
@@ -411,6 +424,10 @@ class TelegramBot:
         self.on_manual_deploy: Any = None
         self.on_manual_deploy_candidate: Any = None
         self._load_dynamic_thread_bindings()
+        runtime_chat_id = self._runtime_get("telegram.chat_id")
+        resolved_chat_id = resolve_authorized_chat_id(configured_chat_id, runtime_chat_id)
+        if resolved_chat_id:
+            self.chat_id = resolved_chat_id
 
     def _persist_dynamic_thread_binding(self, category: str, thread_id: int) -> None:
         if not self._db:
@@ -470,6 +487,17 @@ class TelegramBot:
         self._dynamic_thread_bindings[category] = parsed
         self._persist_dynamic_thread_binding(category, parsed)
         logger.info("telegram.smart_bind category=%s thread_id=%s", category, parsed)
+
+    def _persist_authorized_chat(self, chat_id: Any) -> None:
+        if not self._db:
+            return
+        setter = getattr(self._db, "set_runtime_setting", None)
+        if not callable(setter):
+            return
+        try:
+            setter("telegram.chat_id", str(chat_id))
+        except Exception as exc:
+            logger.debug("Failed persisting telegram.chat_id=%s: %s", chat_id, exc)
 
     def _capture_operator_thread(self, thread_id: Any) -> None:
         try:
@@ -602,6 +630,7 @@ class TelegramBot:
     def _setup_handlers(self) -> None:
         """Setup message and callback handlers."""
         self.dp.message.register(self._handle_start, Command("start"))
+        self.dp.message.register(self._handle_pair, Command("pair"))
         self.dp.message.register(self._handle_help, Command("help"))
         self.dp.message.register(self._handle_status, Command("status"))
         self.dp.message.register(self._handle_control, Command("control"))
@@ -655,7 +684,22 @@ class TelegramBot:
                 BotCommand(command="deploynow", description="Manual deploy now"),
                 BotCommand(command="deployca", description="Deploy existing candidate"),
                 BotCommand(command="help", description="Usage guide"),
+                BotCommand(command="pair", description="Pair bot to this chat"),
             ]
+        )
+
+    async def _handle_pair(self, message: Message) -> None:
+        """Pair bot to current chat for easier setup in groups/forum topics."""
+        self.chat_id = str(message.chat.id)
+        self._persist_authorized_chat(self.chat_id)
+        thread_id = getattr(message, "message_thread_id", None)
+        self._capture_operator_thread(thread_id)
+        self._bind_dynamic_thread("ops", thread_id)
+        await message.answer(
+            "🔗 <b>Paired</b>\n\n"
+            f"• <b>Chat ID:</b> {_fmt_inline_code(self.chat_id)}\n"
+            "Bot will now accept commands in this chat.",
+            parse_mode="HTML",
         )
 
     # ── command handlers ──────────────────────────────────────────────────────
