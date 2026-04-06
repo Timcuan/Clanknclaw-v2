@@ -59,6 +59,12 @@ app:
   max_pending_notifications: 500
   deploy_prepare_timeout_seconds: 90.0
   deploy_execute_timeout_seconds: 180.0
+  cleanup_enabled: true
+  cleanup_interval_seconds: 900.0
+  retention_candidates_days: 3
+  retention_reviews_days: 7
+  retention_deployments_days: 14
+  retention_rewards_days: 30
 
 x_detector:
   enabled: true                # Enable X/Twitter polling
@@ -183,6 +189,7 @@ Storage and payload hygiene optimizations:
 - DB write compaction for oversized `raw_text` and noisy metadata payloads.
 - Metadata heavy keys are pruned and oversized arrays/strings are capped before persistence.
 - Pinata cache is bounded (`PINATA_CACHE_MAX_ENTRIES`) and flushed in batches (`PINATA_CACHE_FLUSH_EVERY`) to reduce disk I/O under burst uploads.
+- Supervisor runs periodic DB retention cleanup for stale rows (`signal_candidates`, `candidate_decisions`, `review_items`, `deployment_results`, `reward_claim_results`).
 
 ### X/Twitter Polling Setup
 

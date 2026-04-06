@@ -7,6 +7,12 @@ app:
   max_pending_notifications: 500
   deploy_prepare_timeout_seconds: 90.0
   deploy_execute_timeout_seconds: 180.0
+  cleanup_enabled: true
+  cleanup_interval_seconds: 900.0
+  retention_candidates_days: 3
+  retention_reviews_days: 7
+  retention_deployments_days: 14
+  retention_rewards_days: 30
 
 x_detector:
   enabled: true

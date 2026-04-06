@@ -12,7 +12,7 @@ from clankandclaw.database.manager import DatabaseManager
 
 def make_config(*, x_enabled: bool = True, farcaster_enabled: bool = True, gecko_enabled: bool = True) -> AppConfig:
     return AppConfig(
-        app=AppSection(log_level="INFO", review_expiry_seconds=900),
+        app=AppSection(log_level="INFO", review_expiry_seconds=900, cleanup_enabled=False),
         deployment=DeploymentSection(platform="clanker", tax_bps=1000),
         telegram=TelegramSection(bot_token="", chat_id=""),
         x_detector=XDetectorSection(enabled=x_enabled),

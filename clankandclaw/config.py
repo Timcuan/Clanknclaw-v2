@@ -15,6 +15,12 @@ class AppSection(BaseModel):
     max_pending_notifications: int = 500
     deploy_prepare_timeout_seconds: float = 90.0
     deploy_execute_timeout_seconds: float = 180.0
+    cleanup_enabled: bool = True
+    cleanup_interval_seconds: float = 900.0
+    retention_candidates_days: int = 3
+    retention_reviews_days: int = 7
+    retention_deployments_days: int = 14
+    retention_rewards_days: int = 30
 
 
 class XDetectorSection(BaseModel):
@@ -110,6 +116,18 @@ def load_config(path: Path) -> AppConfig:
         raw["app"] = {}
     if os.getenv("APP_USER_AGENT"):
         raw["app"]["user_agent"] = os.getenv("APP_USER_AGENT")
+    if os.getenv("APP_CLEANUP_ENABLED"):
+        raw["app"]["cleanup_enabled"] = os.getenv("APP_CLEANUP_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+    if os.getenv("APP_CLEANUP_INTERVAL_SECONDS"):
+        raw["app"]["cleanup_interval_seconds"] = float(os.getenv("APP_CLEANUP_INTERVAL_SECONDS", "900"))
+    if os.getenv("APP_RETENTION_CANDIDATES_DAYS"):
+        raw["app"]["retention_candidates_days"] = int(os.getenv("APP_RETENTION_CANDIDATES_DAYS", "3"))
+    if os.getenv("APP_RETENTION_REVIEWS_DAYS"):
+        raw["app"]["retention_reviews_days"] = int(os.getenv("APP_RETENTION_REVIEWS_DAYS", "7"))
+    if os.getenv("APP_RETENTION_DEPLOYMENTS_DAYS"):
+        raw["app"]["retention_deployments_days"] = int(os.getenv("APP_RETENTION_DEPLOYMENTS_DAYS", "14"))
+    if os.getenv("APP_RETENTION_REWARDS_DAYS"):
+        raw["app"]["retention_rewards_days"] = int(os.getenv("APP_RETENTION_REWARDS_DAYS", "30"))
     # Backward compatibility: migrate gmgn_detector block to gecko_detector if needed.
     if "gecko_detector" not in raw and "gmgn_detector" in raw:
         raw["gecko_detector"] = raw["gmgn_detector"]

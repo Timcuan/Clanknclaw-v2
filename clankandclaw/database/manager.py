@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import sleep
 from typing import Optional
@@ -665,3 +665,91 @@ class DatabaseManager:
                 )
 
         self._with_retry(_op)
+
+    def cleanup_old_records(
+        self,
+        *,
+        retention_candidates_days: int = 3,
+        retention_reviews_days: int = 7,
+        retention_deployments_days: int = 14,
+        retention_rewards_days: int = 30,
+    ) -> dict[str, int]:
+        now = datetime.now(timezone.utc)
+        cutoff_candidates = (now - timedelta(days=max(1, retention_candidates_days))).isoformat().replace("+00:00", "Z")
+        cutoff_reviews = (now - timedelta(days=max(1, retention_reviews_days))).isoformat().replace("+00:00", "Z")
+        cutoff_deployments = (now - timedelta(days=max(1, retention_deployments_days))).isoformat().replace("+00:00", "Z")
+        cutoff_rewards = (now - timedelta(days=max(1, retention_rewards_days))).isoformat().replace("+00:00", "Z")
+
+        def _op() -> dict[str, int]:
+            with self._connect() as conn:
+                conn.execute("BEGIN")
+                try:
+                    removed_reviews = conn.execute(
+                        """
+                        DELETE FROM review_items
+                        WHERE (
+                            status IN ('rejected', 'expired')
+                            AND created_at < ?
+                        )
+                        OR (
+                            status = 'pending'
+                            AND expires_at < ?
+                            AND created_at < ?
+                        )
+                        """,
+                        (cutoff_reviews, cutoff_reviews, cutoff_reviews),
+                    ).rowcount
+
+                    removed_deployments = conn.execute(
+                        "DELETE FROM deployment_results WHERE deployed_at < ?",
+                        (cutoff_deployments,),
+                    ).rowcount
+
+                    removed_rewards = conn.execute(
+                        "DELETE FROM reward_claim_results WHERE claimed_at < ?",
+                        (cutoff_rewards,),
+                    ).rowcount
+
+                    # Remove decisions for old candidates that no longer participate in review/deploy lifecycle.
+                    removed_decisions = conn.execute(
+                        """
+                        DELETE FROM candidate_decisions
+                        WHERE candidate_id IN (
+                            SELECT c.id
+                            FROM signal_candidates c
+                            LEFT JOIN review_items r ON r.candidate_id = c.id
+                            LEFT JOIN deployment_results d ON d.candidate_id = c.id
+                            WHERE c.observed_at != ''
+                              AND c.observed_at < ?
+                              AND r.id IS NULL
+                              AND d.id IS NULL
+                        )
+                        """,
+                        (cutoff_candidates,),
+                    ).rowcount
+
+                    removed_candidates = conn.execute(
+                        """
+                        DELETE FROM signal_candidates
+                        WHERE observed_at != ''
+                          AND observed_at < ?
+                          AND id NOT IN (SELECT candidate_id FROM review_items)
+                          AND id NOT IN (SELECT candidate_id FROM deployment_results)
+                        """,
+                        (cutoff_candidates,),
+                    ).rowcount
+
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+
+            return {
+                "review_items": int(removed_reviews),
+                "deployment_results": int(removed_deployments),
+                "reward_claim_results": int(removed_rewards),
+                "candidate_decisions": int(removed_decisions),
+                "signal_candidates": int(removed_candidates),
+            }
+
+        return self._with_retry(_op)

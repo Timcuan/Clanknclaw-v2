@@ -103,6 +103,28 @@ def test_load_config_reads_deployment_overrides_from_env(tmp_path: Path, monkeyp
     assert cfg.deployment.base_rpc_url == "https://base-mainnet.g.alchemy.com/v2/testkey"
 
 
+def test_load_config_reads_cleanup_overrides_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("app:\n  log_level: INFO\n  review_expiry_seconds: 60\n")
+    monkeypatch.setenv("DEPLOYER_SIGNER_PRIVATE_KEY", "0x" + "1" * 64)
+    monkeypatch.setenv("TOKEN_ADMIN_ADDRESS", "0x0000000000000000000000000000000000000001")
+    monkeypatch.setenv("FEE_RECIPIENT_ADDRESS", "0x0000000000000000000000000000000000000002")
+    monkeypatch.setenv("APP_CLEANUP_ENABLED", "true")
+    monkeypatch.setenv("APP_CLEANUP_INTERVAL_SECONDS", "300")
+    monkeypatch.setenv("APP_RETENTION_CANDIDATES_DAYS", "2")
+    monkeypatch.setenv("APP_RETENTION_REVIEWS_DAYS", "5")
+    monkeypatch.setenv("APP_RETENTION_DEPLOYMENTS_DAYS", "10")
+    monkeypatch.setenv("APP_RETENTION_REWARDS_DAYS", "20")
+
+    cfg = load_config(config_file)
+    assert cfg.app.cleanup_enabled is True
+    assert cfg.app.cleanup_interval_seconds == 300
+    assert cfg.app.retention_candidates_days == 2
+    assert cfg.app.retention_reviews_days == 5
+    assert cfg.app.retention_deployments_days == 10
+    assert cfg.app.retention_rewards_days == 20
+
+
 def test_load_config_rejects_non_mapping_yaml_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config_file = tmp_path / "config.yaml"
     config_file.write_text("- not-a-mapping\n")

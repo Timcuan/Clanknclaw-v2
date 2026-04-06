@@ -32,6 +32,7 @@ class Supervisor:
         self._workers: dict[str, Any] = {}
         self._running = False
         self._shutdown_event = asyncio.Event()
+        self._cleanup_task: asyncio.Task[None] | None = None
 
     def worker_names(self) -> list[str]:
         """Return list of worker names (for testing compatibility)."""
@@ -179,6 +180,17 @@ class Supervisor:
             except Exception as exc:
                 logger.error(f"Failed to start worker {name}: {exc}", exc_info=True)
 
+        if self.config.app.cleanup_enabled:
+            self._cleanup_task = asyncio.create_task(self._run_cleanup_loop())
+            logger.info(
+                "Enabled DB cleanup loop (interval=%ss, retention: cand=%sd review=%sd deploy=%sd reward=%sd)",
+                self.config.app.cleanup_interval_seconds,
+                self.config.app.retention_candidates_days,
+                self.config.app.retention_reviews_days,
+                self.config.app.retention_deployments_days,
+                self.config.app.retention_rewards_days,
+            )
+
         # Setup signal handlers
         self._setup_signal_handlers()
 
@@ -191,6 +203,14 @@ class Supervisor:
 
         logger.info("Stopping supervisor")
         self._running = False
+
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cleanup_task = None
 
         # Stop all workers
         for name, worker in self._workers.items():
@@ -225,3 +245,21 @@ class Supervisor:
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: signal_handler(s))
+
+    async def _run_cleanup_loop(self) -> None:
+        interval = max(60.0, float(self.config.app.cleanup_interval_seconds))
+        while self._running:
+            try:
+                summary = self.db.cleanup_old_records(
+                    retention_candidates_days=self.config.app.retention_candidates_days,
+                    retention_reviews_days=self.config.app.retention_reviews_days,
+                    retention_deployments_days=self.config.app.retention_deployments_days,
+                    retention_rewards_days=self.config.app.retention_rewards_days,
+                )
+                if any(summary.values()):
+                    logger.info("db.cleanup %s", summary)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("Cleanup loop failed: %s", exc, exc_info=True)
+            await asyncio.sleep(interval)

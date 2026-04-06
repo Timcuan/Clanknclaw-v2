@@ -314,3 +314,44 @@ def test_database_manager_compacts_oversized_raw_text_and_metadata(tmp_path):
         ).fetchone()[0]
     assert len(stored_meta.encode("utf-8")) <= 16384
     assert "raw_event" not in stored_meta
+
+
+def test_cleanup_old_records_removes_stale_data_safely(tmp_path):
+    db = DatabaseManager(tmp_path / "state.db")
+    db.initialize()
+    old = "2026-03-01T00:00:00Z"
+    fresh = "2026-04-06T10:00:00Z"
+
+    db.save_candidate("old-free", "x", "tweet-1", "fp-1", "old free", observed_at=old, metadata={})
+    db.save_candidate("old-linked", "x", "tweet-2", "fp-2", "old linked", observed_at=old, metadata={})
+    db.save_candidate("fresh-free", "x", "tweet-3", "fp-3", "fresh free", observed_at=fresh, metadata={})
+    db.save_decision("old-free", 10, "skip", ["x"], "clanker")
+    db.save_decision("old-linked", 10, "skip", ["x"], "clanker")
+    db.create_review_item("review-old", "old-linked", expires_at=old)
+    db.reject_review_item("review-old", "tester")
+    db.save_deployment_result(
+        result_id="dep-old",
+        candidate_id="old-linked",
+        status="deploy_success",
+        deployed_at=old,
+        tx_hash="0x" + "a" * 64,
+        contract_address="0x" + "b" * 40,
+    )
+    db.save_reward_claim_result(
+        result_id="claim-old",
+        token_address="0x" + "c" * 40,
+        status="claim_success",
+        claimed_at=old,
+        tx_hash="0x" + "d" * 64,
+    )
+
+    summary = db.cleanup_old_records(
+        retention_candidates_days=7,
+        retention_reviews_days=7,
+        retention_deployments_days=7,
+        retention_rewards_days=7,
+    )
+    assert summary["signal_candidates"] >= 1
+    assert db.get_candidate("old-free") is None
+    assert db.get_candidate("fresh-free") is not None
+    assert db.get_candidate("old-linked") is not None

@@ -61,6 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - DB compaction for oversized raw text and noisy metadata fields on candidate writes
   - image deploy preparation now caps external image fetch attempts to reduce worst-case latency
   - Pinata cache now uses bounded size + batched flush to reduce cache-file write pressure
+- Scheduled DB retention cleanup loop:
+  - configurable cleanup interval and retention days for candidates/reviews/deployments/rewards
+  - safe candidate pruning only when no linked review/deployment rows remain
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`
