@@ -73,6 +73,7 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
         "image": deploy_request.image_uri,
         "metadata": metadata,
         "vanity": True,  # Generate 0xb07 suffix
+        "feeType": deploy_request.fee_type,
         **({"tokenAdmin": deploy_request.token_admin} if deploy_request.token_admin_enabled else {}),
         "context": context,
         # Pool: pairedToken is passed through; tick/positions computed by Node.js script
@@ -80,9 +81,9 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
             "pairedToken": _HARDCODED_PAIRED_TOKEN,
         },
         "startingMarketCapEth": _HARDCODED_STARTING_MARKET_CAP_ETH,
-        # Fee configuration - static 1% fees
+        # Fee configuration - default static 1% but supporting dynamic capability
         "fees": {
-            "type": "static",
+            "type": deploy_request.fee_type,
             "clankerFee": deploy_request.clanker_fee_bps if deploy_request.clanker_fee_bps is not None else deploy_request.tax_bps,
             "pairedFee": deploy_request.paired_fee_bps if deploy_request.paired_fee_bps is not None else deploy_request.tax_bps,
         },

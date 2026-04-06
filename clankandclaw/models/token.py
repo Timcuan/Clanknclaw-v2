@@ -123,6 +123,7 @@ class DeployRequest(BaseModel):
     sniper_fee_enabled: bool = True
     metadata_x_url: str | None = None
     metadata_telegram_url: str | None = None
+    fee_type: Literal["static", "dynamic"] = "static"
 
     @field_validator("signer_wallet", mode="before")
     @classmethod

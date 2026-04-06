@@ -190,11 +190,11 @@ const deployParams = {
 
   pool: buildPool(deployConfig.startingMarketCapEth, deployConfig.pool?.pairedToken),
 
-  fees: deployConfig.fees || {
+  fees: deployConfig.fees || (deployConfig.feeType === 'dynamic' ? FEE_CONFIGS.DynamicBasic : {
     type: 'static',
     clankerFee: deployConfig.taxBps ?? 1000,
     pairedFee: deployConfig.taxBps ?? 1000,
-  },
+  }),
 
   rewards: deployConfig.rewards || {
     recipients: [{
