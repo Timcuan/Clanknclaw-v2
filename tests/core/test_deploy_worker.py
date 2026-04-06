@@ -236,3 +236,65 @@ async def test_prepare_and_deploy_idempotent_skips_already_deployed(db, monkeypa
 
     assert result is True
     deployer.deploy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_deploys_same_candidate_only_deploy_once(tmp_path):
+    """Two concurrent calls for the same candidate_id must result in exactly one deploy."""
+    import asyncio
+    from unittest.mock import patch
+
+    db = DatabaseManager(tmp_path / "concurrent.db")
+    db.initialize()
+    db.save_candidate(
+        "x-concurrent", "x", "tw-concurrent", "fp-concurrent",
+        "deploy token RACE symbol RACE",
+        observed_at=_now(),
+        metadata={"image_url": "https://example.com/img.png"},
+    )
+
+    deploy_call_count = 0
+
+    async def slow_deploy(req):
+        nonlocal deploy_call_count
+        deploy_call_count += 1
+        await asyncio.sleep(0.05)
+        return DeployResult(
+            deploy_request_id="x-concurrent",
+            status="deploy_success",
+            tx_hash="0x" + "a" * 64,
+            contract_address="0x" + "b" * 40,
+            latency_ms=50,
+            completed_at=_now(),
+        )
+
+    deployer = MagicMock()
+    deployer.deploy = slow_deploy
+    deployer.preflight = AsyncMock(return_value=None)
+
+    pinata = MagicMock()
+    worker = DeployWorker(
+        db=db,
+        pinata_client=pinata,
+        deployer=deployer,
+        signer_wallet="0x" + "a" * 40,
+        token_admin="0x" + "b" * 40,
+        fee_recipient="0x" + "c" * 40,
+    )
+    await worker.start()
+
+    async def fake_fetch(url):
+        return b"bytes"
+
+    with patch("clankandclaw.core.deploy_preparation.fetch_image_bytes", fake_fetch):
+        worker.preparation.pinata.upload_file_bytes = AsyncMock(return_value="QmImg")
+        worker.preparation.deployer.preflight = AsyncMock(return_value=None)
+        worker.preparation.deployer.deploy = slow_deploy
+
+        results = await asyncio.gather(
+            worker.prepare_and_deploy("x-concurrent"),
+            worker.prepare_and_deploy("x-concurrent"),
+        )
+
+    assert all(r is True for r in results)
+    assert deploy_call_count == 1

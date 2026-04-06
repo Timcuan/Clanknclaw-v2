@@ -53,6 +53,7 @@ class DeployWorker:
         self.deploy_timeout_seconds = max(10.0, deploy_timeout_seconds)
         self._telegram_worker: Any = None  # Will be set by supervisor
         self._running = False
+        self._candidate_locks: dict[str, asyncio.Lock] = {}
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         """Set the telegram worker for sending notifications."""
@@ -68,12 +69,23 @@ class DeployWorker:
         self._running = False
         logger.info("Deploy worker stopped")
 
+    def _get_candidate_lock(self, candidate_id: str) -> asyncio.Lock:
+        if candidate_id not in self._candidate_locks:
+            self._candidate_locks[candidate_id] = asyncio.Lock()
+        return self._candidate_locks[candidate_id]
+
     async def prepare_and_deploy(self, candidate_id: str) -> bool:
         """Prepare and execute deployment for an approved candidate."""
         if not self._running:
             logger.warning("Deploy worker not running")
             return False
 
+        lock = self._get_candidate_lock(candidate_id)
+        async with lock:
+            return await self._prepare_and_deploy_locked(candidate_id)
+
+    async def _prepare_and_deploy_locked(self, candidate_id: str) -> bool:
+        """Execute deployment logic for a candidate (must be called with candidate lock held)."""
         logger.info("Starting deploy process for %s", candidate_id)
 
         # Idempotency: skip if this exact candidate was already deployed successfully.
