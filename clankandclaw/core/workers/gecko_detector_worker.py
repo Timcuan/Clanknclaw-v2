@@ -258,7 +258,7 @@ class GeckoDetectorWorker:
     def _profile_for_network(self, network: str) -> dict[str, float]:
         # Chain-specific gameplay profile for momentum detection.
         profiles: dict[str, dict[str, float | list[str] | str]] = {
-            "base": {"min_volume_m5_usd": 2500.0, "min_volume_m15_usd": 7000.0, "min_tx_count_m5": 10.0, "min_liquidity_usd": 9000.0, "max_pool_age_minutes": 120.0, "min_hot_points": 4.0, "require_target_source": 1.0, "scan_mode": "new_pools"},
+            "base": {"min_volume_m5_usd": 500.0, "min_volume_m15_usd": 1500.0, "min_tx_count_m5": 5.0, "min_liquidity_usd": 2000.0, "max_pool_age_minutes": 120.0, "min_hot_points": 3.0, "require_target_source": 1.0, "scan_mode": "new_pools"},
             "solana": {
                 "min_volume_h1_usd": 100000.0, "min_tx_count_h1": 200.0, "min_liquidity_usd": 35000.0, "max_pool_age_minutes": 1440.0, "min_hot_points": 3.0, "require_target_source": 1.0, "scan_mode": "trending_pools",
                 "required_dex_ids": ["raydium", "raydium-clmm", "meteora", "orca", "fluxbeam", "lifinity-v2"]
@@ -267,7 +267,7 @@ class GeckoDetectorWorker:
                 "min_volume_h1_usd": 80000.0, "min_tx_count_h1": 150.0, "min_liquidity_usd": 25000.0, "max_pool_age_minutes": 1440.0, "min_hot_points": 3.0, "require_target_source": 1.0, "scan_mode": "trending_pools",
                 "required_dex_ids": ["pancakeswap_v2", "pancakeswap_v3", "pancakeswap_v4", "uniswap_v3"]
             },
-            "eth": {"min_volume_m5_usd": 15000.0, "min_volume_m15_usd": 40000.0, "min_tx_count_m5": 25.0, "min_liquidity_usd": 50000.0, "max_pool_age_minutes": 90.0, "min_hot_points": 4.0, "require_target_source": 1.0, "scan_mode": "new_pools"},
+            "eth": {"min_volume_m5_usd": 1000.0, "min_volume_m15_usd": 3000.0, "min_tx_count_m5": 8.0, "min_liquidity_usd": 5000.0, "max_pool_age_minutes": 90.0, "min_hot_points": 3.0, "require_target_source": 1.0, "scan_mode": "new_pools"},
         }
         base = {
             "min_volume_m5_usd": self.min_volume_m5_usd,
