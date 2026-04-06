@@ -69,7 +69,7 @@ async def extract_token_identity_with_llm(text: str) -> TokenIdentity:
 
     prompt = f"Extract 'name' and 'symbol' (ticker) from this text. Return JSON only: {text}"
     
-    for model in ["gemini-1.5-flash-latest", "gemini-1.5-flash-8b"]:
+    for model in ["gemini-1.5-flash", "gemini-1.5-flash-8b"]:
         try:
             await gemini_limiter.wait()
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -117,7 +117,7 @@ async def enrich_signal_with_llm(text: str) -> dict[str, Any]:
     """
     
     # Tiered execution strategy
-    for model in ["gemini-1.5-flash-latest", "gemini-1.5-flash-8b"]:
+    for model in ["gemini-1.5-flash", "gemini-1.5-flash-8b"]:
         try:
             await gemini_limiter.wait()
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -234,7 +234,7 @@ async def suggest_token_metadata(theme: str) -> list[dict[str, str]]:
     Return ONLY a JSON array of objects with 'name' and 'symbol' keys.
     """
     
-    for model in ["gemini-1.5-flash-latest", "gemini-1.5-flash-8b"]:
+    for model in ["gemini-1.5-flash", "gemini-1.5-flash-8b"]:
         try:
             await gemini_limiter.wait()
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
