@@ -101,8 +101,10 @@ class XDetectorWorker:
             except asyncio.CancelledError:
                 pass
         if self._notification_tasks:
+            for t in list(self._notification_tasks):
+                t.cancel()
             await asyncio.gather(*list(self._notification_tasks), return_exceptions=True)
-        await asyncio.to_thread(self._pipeline_executor.shutdown, True)
+        await asyncio.to_thread(self._pipeline_executor.shutdown, wait=False, cancel_futures=True)
         logger.info("X detector worker stopped")
 
     async def _run(self) -> None:
