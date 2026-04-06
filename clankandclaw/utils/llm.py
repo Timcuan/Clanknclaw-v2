@@ -1,26 +1,26 @@
 import asyncio
 import inspect
+import json
+import logging
+import os
+import re
 import threading
 from collections.abc import Awaitable, Callable
-from typing import TypeAlias
+from typing import Any, TypeAlias
+
+import httpx
+
+from clankandclaw.utils.limiter import gemini_limiter
+
+logger = logging.getLogger(__name__)
 
 
 TokenIdentity: TypeAlias = tuple[str, str]
 TokenIdentityFallback: TypeAlias = Callable[[str], TokenIdentity | Awaitable[TokenIdentity]]
 
 
-import re
-
 def _clean_best_effort(val: str) -> str:
     return re.sub(r"[^A-Za-z0-9 ]+", "", val).strip()
-
-import os
-import json
-import httpx
-import logging
-from clankandclaw.utils.limiter import gemini_limiter
-
-logger = logging.getLogger(__name__)
 
 
 class CircuitBreaker:
