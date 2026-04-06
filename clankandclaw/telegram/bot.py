@@ -1,13 +1,14 @@
 """Telegram bot for approval flow."""
 
 import asyncio
+import secrets
 import html
 import json
 import logging
 import os
 import re
 import shlex
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from aiogram import Bot, Dispatcher
@@ -34,6 +35,7 @@ _MAX_RAW_TEXT = 300  # chars shown in review message
 _MAX_QUEUE_ITEMS = 10
 _MAX_ERROR_TEXT = 80
 _MAX_REASONS = 6
+_MAX_CALLBACK_DATA = 64
 _THREAD_CATEGORIES = ("review", "deploy", "claim", "ops", "alert")
 _EVM_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _PRIVATE_KEY_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
@@ -106,6 +108,22 @@ def _parse_command_args(text: str) -> list[str]:
     if not parts:
         return []
     return parts[1:]
+
+
+def build_action_callback_data(
+    action: str,
+    candidate_id: str,
+    *,
+    encode_candidate_id: Callable[[str], str] | None = None,
+) -> str:
+    """Build Telegram callback_data with hard limit enforcement."""
+    encoded = encode_candidate_id(candidate_id) if encode_candidate_id else candidate_id
+    callback_data = f"{action}:{encoded}"
+    if len(callback_data) > _MAX_CALLBACK_DATA:
+        raise ValueError(
+            f"callback_data too long ({len(callback_data)} > {_MAX_CALLBACK_DATA}) for action={action}"
+        )
+    return callback_data
 
 
 def build_review_message(
@@ -291,7 +309,11 @@ def build_deploys_message(rows: list[Any]) -> str:
     return "\n".join(lines)
 
 
-def build_review_keyboard(candidate_id: str) -> Any:
+def build_review_keyboard(
+    candidate_id: str,
+    *,
+    encode_candidate_id: Callable[[str], str] | None = None,
+) -> Any:
     """Build inline keyboard for operator actions."""
     if not AIOGRAM_AVAILABLE:
         raise ImportError("aiogram is required for keyboard building")
@@ -299,12 +321,40 @@ def build_review_keyboard(candidate_id: str) -> Any:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Approve", callback_data=f"approve:{candidate_id}"),
-                InlineKeyboardButton(text="❌ Reject", callback_data=f"reject:{candidate_id}"),
+                InlineKeyboardButton(
+                    text="✅ Approve",
+                    callback_data=build_action_callback_data(
+                        "approve",
+                        candidate_id,
+                        encode_candidate_id=encode_candidate_id,
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text="❌ Reject",
+                    callback_data=build_action_callback_data(
+                        "reject",
+                        candidate_id,
+                        encode_candidate_id=encode_candidate_id,
+                    ),
+                ),
             ],
             [
-                InlineKeyboardButton(text="🔎 Detail", callback_data=f"detail:{candidate_id}"),
-                InlineKeyboardButton(text="🔄 Refresh", callback_data=f"refresh:{candidate_id}"),
+                InlineKeyboardButton(
+                    text="🔎 Detail",
+                    callback_data=build_action_callback_data(
+                        "detail",
+                        candidate_id,
+                        encode_candidate_id=encode_candidate_id,
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text="🔄 Refresh",
+                    callback_data=build_action_callback_data(
+                        "refresh",
+                        candidate_id,
+                        encode_candidate_id=encode_candidate_id,
+                    ),
+                ),
             ],
             [
                 InlineKeyboardButton(text="📋 Queue", callback_data="queue"),
@@ -343,6 +393,7 @@ class TelegramBot:
         self._db = db  # optional DatabaseManager for operator commands
         self._last_operator_thread_id: int | None = None
         self._dynamic_thread_bindings: dict[str, int] = {}
+        self._callback_candidate_map: dict[str, str] = {}
 
         if not self.token:
             raise ValueError("TELEGRAM_BOT_TOKEN is required")
@@ -429,6 +480,50 @@ class TelegramBot:
                 self._last_operator_thread_id = parsed
         except (TypeError, ValueError):
             return
+
+    def _encode_callback_candidate_id(self, candidate_id: str) -> str:
+        """Encode candidate IDs to callback-safe short tokens when needed."""
+        if len(f"refresh:{candidate_id}") <= _MAX_CALLBACK_DATA:
+            return candidate_id
+
+        token = f"k:{secrets.token_hex(6)}"
+        self._callback_candidate_map[token] = candidate_id
+        if self._db:
+            setter = getattr(self._db, "set_runtime_setting", None)
+            if callable(setter):
+                try:
+                    setter(f"telegram.callback.{token}", candidate_id)
+                except Exception as exc:
+                    logger.debug("Failed persisting callback token %s: %s", token, exc)
+        return token
+
+    def _decode_callback_candidate_id(self, encoded_id: str) -> str:
+        """Resolve callback-safe token back to original candidate ID."""
+        if not encoded_id.startswith("k:"):
+            return encoded_id
+
+        mapped = self._callback_candidate_map.get(encoded_id)
+        if mapped:
+            return mapped
+
+        if self._db:
+            getter = getattr(self._db, "get_runtime_setting", None)
+            if callable(getter):
+                try:
+                    persisted = getter(f"telegram.callback.{encoded_id}")
+                except Exception as exc:
+                    logger.debug("Failed loading callback token %s: %s", encoded_id, exc)
+                    persisted = None
+                if persisted:
+                    self._callback_candidate_map[encoded_id] = persisted
+                    return persisted
+        return encoded_id
+
+    def _build_review_keyboard(self, candidate_id: str) -> Any:
+        return build_review_keyboard(
+            candidate_id,
+            encode_candidate_id=self._encode_callback_candidate_id,
+        )
 
     def _resolve_message_thread_id(self, explicit_thread_id: int | None = None) -> int | None:
         if explicit_thread_id is not None:
@@ -1173,7 +1268,8 @@ class TelegramBot:
         self._bind_dynamic_thread("deploy", thread_id)
         self._bind_dynamic_thread("alert", thread_id)
 
-        candidate_id = callback.data.split(":", 1)[1]
+        encoded_candidate_id = callback.data.split(":", 1)[1]
+        candidate_id = self._decode_callback_candidate_id(encoded_candidate_id)
         logger.info(f"Approve callback for candidate {candidate_id}")
 
         if self.on_approve:
@@ -1212,7 +1308,8 @@ class TelegramBot:
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("review", thread_id)
 
-        candidate_id = callback.data.split(":", 1)[1]
+        encoded_candidate_id = callback.data.split(":", 1)[1]
+        candidate_id = self._decode_callback_candidate_id(encoded_candidate_id)
         logger.info(f"Reject callback for candidate {candidate_id}")
 
         if self.on_reject:
@@ -1260,7 +1357,8 @@ class TelegramBot:
         thread_id = getattr(callback.message, "message_thread_id", None)
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("review", thread_id)
-        candidate_id = callback.data.split(":", 1)[1]
+        encoded_candidate_id = callback.data.split(":", 1)[1]
+        candidate_id = self._decode_callback_candidate_id(encoded_candidate_id)
         try:
             text = await self._render_candidate_detail(candidate_id)
             await callback.message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
@@ -1278,7 +1376,8 @@ class TelegramBot:
         thread_id = getattr(callback.message, "message_thread_id", None)
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("review", thread_id)
-        candidate_id = callback.data.split(":", 1)[1]
+        encoded_candidate_id = callback.data.split(":", 1)[1]
+        candidate_id = self._decode_callback_candidate_id(encoded_candidate_id)
         if not self._db:
             await callback.answer("Database unavailable", show_alert=True)
             return
@@ -1309,7 +1408,7 @@ class TelegramBot:
             await callback.message.edit_text(
                 updated,
                 parse_mode="HTML",
-                reply_markup=build_review_keyboard(candidate_id),
+                reply_markup=self._build_review_keyboard(candidate_id),
                 disable_web_page_preview=True,
             )
             await callback.answer("Refreshed")
@@ -1381,7 +1480,7 @@ class TelegramBot:
                 author_handle=author_handle,
                 metadata=metadata,
             )
-            keyboard = build_review_keyboard(candidate_id)
+            keyboard = self._build_review_keyboard(candidate_id)
 
             result = await self._send_bot_message(
                 text=message_text,

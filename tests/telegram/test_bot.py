@@ -5,6 +5,7 @@ import pytest
 from clankandclaw.telegram.bot import (
     AIOGRAM_AVAILABLE,
     _parse_command_args,
+    build_action_callback_data,
     build_candidate_detail_message,
     build_deploys_message,
     build_queue_message,
@@ -221,6 +222,12 @@ def test_parse_command_args_returns_empty_on_unbalanced_quotes():
     assert _parse_command_args('/deploynow clanker "Moon Coin MOON auto') == []
 
 
+def test_build_action_callback_data_rejects_over_limit_without_encoder():
+    long_candidate_id = "gecko-solana:46mhiYcNiWZ5ymenbSrReJui8qsJynAM9nbeuLY4oH4A"
+    with pytest.raises(ValueError, match="callback_data"):
+        build_action_callback_data("approve", long_candidate_id)
+
+
 @pytest.mark.skipif(not AIOGRAM_AVAILABLE, reason="aiogram not installed")
 def test_build_review_keyboard_has_approve_and_reject():
     keyboard = build_review_keyboard("sig-1")
@@ -232,3 +239,15 @@ def test_build_review_keyboard_has_approve_and_reject():
     assert "refresh:sig-1" in cb_data
     assert "queue" in cb_data
     assert "deploys" in cb_data
+
+
+@pytest.mark.skipif(not AIOGRAM_AVAILABLE, reason="aiogram not installed")
+def test_build_review_keyboard_supports_encoded_candidate_id():
+    long_candidate_id = "gecko-solana:46mhiYcNiWZ5ymenbSrReJui8qsJynAM9nbeuLY4oH4A"
+    keyboard = build_review_keyboard(long_candidate_id, encode_candidate_id=lambda _: "k:abc123")
+    cb_data = {btn.callback_data for row in keyboard.inline_keyboard for btn in row}
+    assert "approve:k:abc123" in cb_data
+    assert "reject:k:abc123" in cb_data
+    assert "detail:k:abc123" in cb_data
+    assert "refresh:k:abc123" in cb_data
+    assert max(len(item or "") for item in cb_data) <= 64
