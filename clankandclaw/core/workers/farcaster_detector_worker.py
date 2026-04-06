@@ -3,8 +3,9 @@
 import asyncio
 import logging
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
+import random
 from time import perf_counter
 from typing import Any
 
@@ -29,8 +30,10 @@ class FarcasterDetectorWorker:
         target_handles: list[str] | None = None,
         query_terms: list[str] | None = None,
         request_timeout_seconds: float = 20.0,
+        max_requests_per_minute: int = 45,
         max_process_concurrency: int = 8,
         max_query_concurrency: int = 2,
+        user_agent: str = "ClankAndClaw/1.0 (+ops)",
     ):
         self.db = db
         self.poll_interval = poll_interval
@@ -40,8 +43,10 @@ class FarcasterDetectorWorker:
         self.target_handles = [h.lower().lstrip("@") for h in (target_handles or ["bankr", "clanker"])]
         self.query_terms = query_terms or ["deploy", "launch", "contract", "ca", "token"]
         self.request_timeout_seconds = request_timeout_seconds
+        self.max_requests_per_minute = max(1, max_requests_per_minute)
         self.max_process_concurrency = max(1, max_process_concurrency)
         self.max_query_concurrency = max(1, max_query_concurrency)
+        self.user_agent = user_agent
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._telegram_worker: Any = None
@@ -57,6 +62,17 @@ class FarcasterDetectorWorker:
             max_workers=self.max_process_concurrency,
             thread_name_prefix="xcc-farcaster-pipeline",
         )
+        self._last_request_at: datetime | None = None
+        self._request_interval_multiplier = 1.0
+        self._request_jitter_seconds = 0.2
+        self._provider_cooldown_until: datetime | None = None
+        self._consecutive_request_failures = 0
+        self._default_headers = {
+            "accept": "application/json",
+            "accept-language": "en-US,en;q=0.9",
+            "user-agent": self.user_agent,
+            "connection": "keep-alive",
+        }
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         self._telegram_worker = telegram_worker
@@ -113,7 +129,10 @@ class FarcasterDetectorWorker:
 
     async def _poll_and_process(self) -> None:
         started = perf_counter()
-        headers = {"accept": "application/json"}
+        if self._provider_cooldown_until and datetime.now(timezone.utc) < self._provider_cooldown_until:
+            logger.warning("Farcaster detector cooldown active until %s", self._provider_cooldown_until.isoformat())
+            return
+        headers = dict(self._default_headers)
         if self.api_key:
             headers["x-api-key"] = self.api_key
         if self._billing_blocked:
@@ -135,7 +154,35 @@ class FarcasterDetectorWorker:
                 processed_count += int(result)
 
         self._last_poll_time = datetime.now(timezone.utc)
-        logger.info("farcaster.loop_ms=%d processed=%d", int((perf_counter() - started) * 1000), processed_count)
+        logger.info(
+            "farcaster.loop_ms=%d processed=%d rpm_mult=%.2f",
+            int((perf_counter() - started) * 1000),
+            processed_count,
+            self._request_interval_multiplier,
+        )
+
+    async def _respect_rate_limit(self) -> None:
+        min_interval = (60.0 / float(self.max_requests_per_minute)) * self._request_interval_multiplier
+        if not self._last_request_at:
+            return
+        elapsed = (datetime.now(timezone.utc) - self._last_request_at).total_seconds()
+        if elapsed < min_interval:
+            jitter = random.uniform(0.0, self._request_jitter_seconds)
+            await asyncio.sleep((min_interval - elapsed) + jitter)
+
+    def _on_request_success(self) -> None:
+        self._consecutive_request_failures = 0
+        self._request_interval_multiplier = max(1.0, self._request_interval_multiplier * 0.95)
+        if self._provider_cooldown_until and datetime.now(timezone.utc) >= self._provider_cooldown_until:
+            self._provider_cooldown_until = None
+
+    def _on_request_failure(self, status_code: int | None = None) -> None:
+        self._consecutive_request_failures += 1
+        self._request_interval_multiplier = min(3.0, self._request_interval_multiplier * 1.2)
+        if status_code in {403, 429}:
+            self._provider_cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=90)
+        elif self._consecutive_request_failures >= 6:
+            self._provider_cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=120)
 
     async def _request_with_retry(
         self,
@@ -144,11 +191,19 @@ class FarcasterDetectorWorker:
         params: dict[str, Any],
     ) -> httpx.Response:
         for attempt in range(3):
+            await self._respect_rate_limit()
             response = await client.get(self.api_url, headers=headers, params=params)
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+            self._last_request_at = datetime.now(timezone.utc)
+            if response.status_code in {403, 429, 500, 502, 503, 504} and attempt < 2:
+                self._on_request_failure(response.status_code)
                 await asyncio.sleep(0.35 * (attempt + 1))
                 continue
+            if response.is_success:
+                self._on_request_success()
+            elif response.status_code >= 400:
+                self._on_request_failure(response.status_code)
             return response
+        self._on_request_failure()
         return response
 
     async def process_event(self, event: dict[str, Any], context_url: str) -> None:

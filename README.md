@@ -53,6 +53,7 @@ Single async Python service with:
 app:
   log_level: INFO              # Logging level (DEBUG, INFO, WARNING, ERROR)
   review_expiry_seconds: 900   # Review item expiration (15 minutes)
+  user_agent: "ClankAndClaw/1.0 (+ops)"  # Consistent API client identity
 
 x_detector:
   enabled: true                # Enable X/Twitter polling
@@ -75,6 +76,7 @@ farcaster_detector:
   target_handles: ["bankr", "clanker"]
   query_terms: ["deploy", "launch", "contract", "ca", "token"]
   request_timeout_seconds: 20.0
+  max_requests_per_minute: 45
   max_process_concurrency: 8
   max_query_concurrency: 2      # Parallel Neynar search queries per loop
 

@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - stage-3 Base source/factory confidence validation
 - Gecko adaptive anti-block pacing (dynamic request interval multiplier + degraded mode)
 - Gecko cooldown-aware reprocessing to avoid duplicate spam while allowing significant surge re-evaluation
+- Provider-safe request posture (Gecko/Farcaster):
+  - consistent `User-Agent` and conservative default headers
+  - cooldown/circuit behavior on repeated `403/429/5xx`
+  - bounded request pacing for compliant 24/7 operation
 - SQLite performance hardening for 24/7 workload:
   - WAL mode + busy timeout + hot-path indexes
   - retry handling for transient `database is locked`

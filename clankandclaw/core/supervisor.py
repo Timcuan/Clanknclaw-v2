@@ -121,8 +121,10 @@ class Supervisor:
                 target_handles=self.config.farcaster_detector.target_handles,
                 query_terms=self.config.farcaster_detector.query_terms,
                 request_timeout_seconds=self.config.farcaster_detector.request_timeout_seconds,
+                max_requests_per_minute=self.config.farcaster_detector.max_requests_per_minute,
                 max_process_concurrency=self.config.farcaster_detector.max_process_concurrency,
                 max_query_concurrency=self.config.farcaster_detector.max_query_concurrency,
+                user_agent=self.config.app.user_agent,
             )
             farcaster_detector.set_telegram_worker(telegram)
             self._workers["farcaster_detector"] = farcaster_detector
@@ -145,6 +147,7 @@ class Supervisor:
                 request_timeout_seconds=self.config.gecko_detector.request_timeout_seconds,
                 base_target_sources=self.config.gecko_detector.base_target_sources,
                 max_process_concurrency=self.config.gecko_detector.max_process_concurrency,
+                user_agent=self.config.app.user_agent,
             )
             gecko_detector.set_telegram_worker(telegram)
             self._workers["gecko_detector"] = gecko_detector

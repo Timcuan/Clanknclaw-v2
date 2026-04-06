@@ -1,6 +1,7 @@
 app:
   log_level: INFO
   review_expiry_seconds: 900
+  user_agent: "ClankAndClaw/1.0 (+ops)"
 
 x_detector:
   enabled: true
@@ -23,6 +24,7 @@ farcaster_detector:
   target_handles: ["bankr", "clanker"]
   query_terms: ["deploy", "launch", "contract", "ca", "token"]
   request_timeout_seconds: 20.0
+  max_requests_per_minute: 45
   max_process_concurrency: 8
   max_query_concurrency: 2
 

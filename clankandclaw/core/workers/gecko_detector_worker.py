@@ -71,6 +71,7 @@ class GeckoDetectorWorker:
         request_timeout_seconds: float = 20.0,
         base_target_sources: list[str] | None = None,
         max_process_concurrency: int = 10,
+        user_agent: str = "ClankAndClaw/1.0 (+ops)",
     ):
         self.db = db
         self.poll_interval = poll_interval
@@ -86,6 +87,7 @@ class GeckoDetectorWorker:
         self.max_requests_per_minute = max(1, max_requests_per_minute)
         self.request_timeout_seconds = request_timeout_seconds
         self.max_process_concurrency = max(1, max_process_concurrency)
+        self.user_agent = user_agent
         self.base_target_sources = [_normalize_tag(s) for s in (base_target_sources or ["bankr", "doppler", "zora", "virtual", "uniswapv4", "clanker"])]
         self._running = False
         self._task: asyncio.Task[None] | None = None
@@ -107,10 +109,17 @@ class GeckoDetectorWorker:
         self._base_request_interval_seconds = 60.0 / float(self.max_requests_per_minute)
         self._adaptive_interval_multiplier = 1.0
         self._degraded_until: datetime | None = None
+        self._circuit_open_until: datetime | None = None
         self._consecutive_poll_errors = 0
         self._consecutive_poll_successes = 0
         self._pool_reprocess_cooldown_seconds = 600
         self._request_jitter_seconds = 0.2
+        self._default_headers = {
+            "accept": "application/json",
+            "accept-language": "en-US,en;q=0.9",
+            "user-agent": self.user_agent,
+            "connection": "keep-alive",
+        }
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         self._telegram_worker = telegram_worker
@@ -181,6 +190,8 @@ class GeckoDetectorWorker:
             self._consecutive_poll_successes = 0
         if self._degraded_until and datetime.now(timezone.utc) >= self._degraded_until:
             self._degraded_until = None
+        if self._circuit_open_until and datetime.now(timezone.utc) >= self._circuit_open_until:
+            self._circuit_open_until = None
 
     def _on_poll_failure(self) -> None:
         self._consecutive_poll_errors += 1
@@ -188,14 +199,16 @@ class GeckoDetectorWorker:
         self._adaptive_interval_multiplier = min(3.0, self._adaptive_interval_multiplier * 1.25)
         if self._consecutive_poll_errors >= 4:
             self._degraded_until = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=90)
+        if self._consecutive_poll_errors >= 7:
+            self._circuit_open_until = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=180)
 
     async def _poll_network(self, client: httpx.AsyncClient, network: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         url = f"{self.api_base_url}/networks/{network}/new_pools"
         for attempt in range(3):
             await self._respect_rate_limit()
-            response = await client.get(url, params={"page": 1})
+            response = await client.get(url, params={"page": 1}, headers=self._default_headers)
             self._last_request_at = datetime.now(timezone.utc)
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+            if response.status_code in {403, 429, 500, 502, 503, 504} and attempt < 2:
                 self._on_poll_failure()
                 await asyncio.sleep(0.35 * (attempt + 1))
                 continue
@@ -393,6 +406,9 @@ class GeckoDetectorWorker:
         )
 
     async def _poll_and_process(self) -> None:
+        if self._circuit_open_until and datetime.now(timezone.utc) < self._circuit_open_until:
+            logger.warning("Gecko detector circuit-open until %s", self._circuit_open_until.isoformat())
+            return
         if self._degraded_until and datetime.now(timezone.utc) < self._degraded_until:
             logger.warning(
                 "Gecko detector in degraded mode until %s (multiplier=%.2f)",

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 class AppSection(BaseModel):
     log_level: str = "INFO"
     review_expiry_seconds: int = 900
+    user_agent: str = "ClankAndClaw/1.0 (+ops)"
 
 
 class XDetectorSection(BaseModel):
@@ -31,6 +32,7 @@ class FarcasterDetectorSection(BaseModel):
     target_handles: list[str] = Field(default_factory=lambda: ["bankr", "clanker"])
     query_terms: list[str] = Field(default_factory=lambda: ["deploy", "launch", "contract", "ca", "token"])
     request_timeout_seconds: float = 20.0
+    max_requests_per_minute: int = 45
     max_process_concurrency: int = 8
     max_query_concurrency: int = 2
 
@@ -93,6 +95,10 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("YAML root must be a mapping")
     else:
         raw = dict(raw)
+    if "app" not in raw:
+        raw["app"] = {}
+    if os.getenv("APP_USER_AGENT"):
+        raw["app"]["user_agent"] = os.getenv("APP_USER_AGENT")
     # Backward compatibility: migrate gmgn_detector block to gecko_detector if needed.
     if "gecko_detector" not in raw and "gmgn_detector" in raw:
         raw["gecko_detector"] = raw["gmgn_detector"]
