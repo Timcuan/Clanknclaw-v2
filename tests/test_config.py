@@ -83,6 +83,24 @@ def test_load_config_reads_telegram_from_env(tmp_path: Path, monkeypatch: pytest
     assert cfg.telegram.thread_alert_id == 1005
 
 
+def test_load_config_ignores_non_positive_telegram_thread_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("app:\n  log_level: INFO\n  review_expiry_seconds: 60\n")
+    monkeypatch.setenv("DEPLOYER_SIGNER_PRIVATE_KEY", "0xabc")
+    monkeypatch.setenv("TOKEN_ADMIN_ADDRESS", "0x0000000000000000000000000000000000000001")
+    monkeypatch.setenv("FEE_RECIPIENT_ADDRESS", "0x0000000000000000000000000000000000000002")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1234567890:AABBCCaabbcc")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "-100123456")
+    monkeypatch.setenv("TELEGRAM_MESSAGE_THREAD_ID", "0")
+    monkeypatch.setenv("TELEGRAM_THREAD_REVIEW_ID", "-1")
+    monkeypatch.setenv("TELEGRAM_THREAD_DEPLOY_ID", "abc")
+
+    cfg = load_config(config_file)
+    assert cfg.telegram.message_thread_id is None
+    assert cfg.telegram.thread_review_id is None
+    assert cfg.telegram.thread_deploy_id is None
+
+
 def test_load_config_reads_deployment_overrides_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     config_file = tmp_path / "config.yaml"
     config_file.write_text("app:\n  log_level: INFO\n  review_expiry_seconds: 60\n")

@@ -113,6 +113,17 @@ class AppConfig(BaseModel):
     wallets: WalletSection
 
 
+def _parse_positive_int_env(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def load_config(path: Path) -> AppConfig:
     raw = yaml.safe_load(path.read_text())
     if raw is None:
@@ -171,18 +182,24 @@ def load_config(path: Path) -> AppConfig:
         raw["telegram"]["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
     if os.getenv("TELEGRAM_CHAT_ID"):
         raw["telegram"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID")
-    if os.getenv("TELEGRAM_MESSAGE_THREAD_ID"):
-        raw["telegram"]["message_thread_id"] = int(os.getenv("TELEGRAM_MESSAGE_THREAD_ID", "0"))
-    if os.getenv("TELEGRAM_THREAD_REVIEW_ID"):
-        raw["telegram"]["thread_review_id"] = int(os.getenv("TELEGRAM_THREAD_REVIEW_ID", "0"))
-    if os.getenv("TELEGRAM_THREAD_DEPLOY_ID"):
-        raw["telegram"]["thread_deploy_id"] = int(os.getenv("TELEGRAM_THREAD_DEPLOY_ID", "0"))
-    if os.getenv("TELEGRAM_THREAD_CLAIM_ID"):
-        raw["telegram"]["thread_claim_id"] = int(os.getenv("TELEGRAM_THREAD_CLAIM_ID", "0"))
-    if os.getenv("TELEGRAM_THREAD_OPS_ID"):
-        raw["telegram"]["thread_ops_id"] = int(os.getenv("TELEGRAM_THREAD_OPS_ID", "0"))
-    if os.getenv("TELEGRAM_THREAD_ALERT_ID"):
-        raw["telegram"]["thread_alert_id"] = int(os.getenv("TELEGRAM_THREAD_ALERT_ID", "0"))
+    message_thread_id = _parse_positive_int_env("TELEGRAM_MESSAGE_THREAD_ID")
+    thread_review_id = _parse_positive_int_env("TELEGRAM_THREAD_REVIEW_ID")
+    thread_deploy_id = _parse_positive_int_env("TELEGRAM_THREAD_DEPLOY_ID")
+    thread_claim_id = _parse_positive_int_env("TELEGRAM_THREAD_CLAIM_ID")
+    thread_ops_id = _parse_positive_int_env("TELEGRAM_THREAD_OPS_ID")
+    thread_alert_id = _parse_positive_int_env("TELEGRAM_THREAD_ALERT_ID")
+    if message_thread_id is not None:
+        raw["telegram"]["message_thread_id"] = message_thread_id
+    if thread_review_id is not None:
+        raw["telegram"]["thread_review_id"] = thread_review_id
+    if thread_deploy_id is not None:
+        raw["telegram"]["thread_deploy_id"] = thread_deploy_id
+    if thread_claim_id is not None:
+        raw["telegram"]["thread_claim_id"] = thread_claim_id
+    if thread_ops_id is not None:
+        raw["telegram"]["thread_ops_id"] = thread_ops_id
+    if thread_alert_id is not None:
+        raw["telegram"]["thread_alert_id"] = thread_alert_id
 
     if "farcaster_detector" not in raw:
         raw["farcaster_detector"] = {}

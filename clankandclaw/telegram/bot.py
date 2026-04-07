@@ -100,6 +100,14 @@ def _shorten_text(value: str, limit: int) -> str:
     return value[:limit] + "…"
 
 
+def _normalize_thread_id(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def build_review_message(
     candidate_id: str,
     review_priority: str,
@@ -363,12 +371,12 @@ class TelegramBot:
         self.token = token or os.getenv("TELEGRAM_BOT_TOKEN")
         configured_chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
         self.chat_id = configured_chat_id
-        self.message_thread_id = message_thread_id
-        self.thread_review_id = thread_review_id
-        self.thread_deploy_id = thread_deploy_id
-        self.thread_claim_id = thread_claim_id
-        self.thread_ops_id = thread_ops_id
-        self.thread_alert_id = thread_alert_id
+        self.message_thread_id = _normalize_thread_id(message_thread_id)
+        self.thread_review_id = _normalize_thread_id(thread_review_id)
+        self.thread_deploy_id = _normalize_thread_id(thread_deploy_id)
+        self.thread_claim_id = _normalize_thread_id(thread_claim_id)
+        self.thread_ops_id = _normalize_thread_id(thread_ops_id)
+        self.thread_alert_id = _normalize_thread_id(thread_alert_id)
         self._db = db  # optional DatabaseManager for operator commands
         self._pinata = pinata_client
         self._last_operator_thread_id: int | None = None
@@ -451,11 +459,11 @@ class TelegramBot:
             return
 
         configured = {
-            "review": self.thread_review_id,
-            "deploy": self.thread_deploy_id,
-            "claim": self.thread_claim_id,
-            "ops": self.thread_ops_id,
-            "alert": self.thread_alert_id,
+            "review": _normalize_thread_id(self.thread_review_id),
+            "deploy": _normalize_thread_id(self.thread_deploy_id),
+            "claim": _normalize_thread_id(self.thread_claim_id),
+            "ops": _normalize_thread_id(self.thread_ops_id),
+            "alert": _normalize_thread_id(self.thread_alert_id),
         }
         if configured.get(category) is not None:
             return
@@ -550,11 +558,12 @@ class TelegramBot:
         return _build_dashboard_keyboard()
 
     def _resolve_message_thread_id(self, explicit_thread_id: int | None = None) -> int | None:
-        if explicit_thread_id is not None:
-            return explicit_thread_id
-        if self.message_thread_id is not None:
+        explicit = _normalize_thread_id(explicit_thread_id)
+        if explicit is not None:
+            return explicit
+        if _normalize_thread_id(self.message_thread_id) is not None:
             return self.message_thread_id
-        if self._last_operator_thread_id is not None:
+        if _normalize_thread_id(self._last_operator_thread_id) is not None:
             return self._last_operator_thread_id
         return None
 
@@ -564,11 +573,11 @@ class TelegramBot:
              return None
              
         mapping = {
-            "review": self.thread_review_id,
-            "deploy": self.thread_deploy_id,
-            "claim": self.thread_claim_id,
-            "ops": self.thread_ops_id,
-            "alert": self.thread_alert_id,
+            "review": _normalize_thread_id(self.thread_review_id),
+            "deploy": _normalize_thread_id(self.thread_deploy_id),
+            "claim": _normalize_thread_id(self.thread_claim_id),
+            "ops": _normalize_thread_id(self.thread_ops_id),
+            "alert": _normalize_thread_id(self.thread_alert_id),
         }
         
         # 1. Configured Env (Priority)
@@ -613,15 +622,40 @@ class TelegramBot:
              return None
              
         try:
+            resolved_thread_id = _normalize_thread_id(message_thread_id)
             return await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=text,
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
                 disable_web_page_preview=disable_web_page_preview,
-                message_thread_id=message_thread_id,
+                message_thread_id=resolved_thread_id,
             )
         except Exception as exc:
+            error_text = str(exc).lower()
+            retryable_thread_error = (
+                "message thread not found" in error_text
+                or "message thread is not found" in error_text
+                or "topic closed" in error_text
+            )
+            if message_thread_id is not None and retryable_thread_error:
+                logger.warning(
+                    "Telegram send failed for thread=%s; retrying without thread (%s)",
+                    message_thread_id,
+                    exc,
+                )
+                try:
+                    return await self.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=text,
+                        parse_mode=parse_mode,
+                        reply_markup=reply_markup,
+                        disable_web_page_preview=disable_web_page_preview,
+                        message_thread_id=None,
+                    )
+                except Exception as retry_exc:
+                    logger.error(f"Telegram API call retry failed: {retry_exc}", exc_info=True)
+                    return None
             logger.error(f"Telegram API call failed: {exc}", exc_info=True)
             return None
 
@@ -2114,6 +2148,17 @@ class TelegramBot:
     async def start_polling(self) -> None:
         """Start polling for updates."""
         logger.info("Starting Telegram bot polling")
+        logger.info(
+            "telegram.routing chat_id=%s review=%s deploy=%s claim=%s ops=%s alert=%s default=%s dynamic=%s",
+            self.chat_id,
+            self._thread_for("review"),
+            self._thread_for("deploy"),
+            self._thread_for("claim"),
+            self._thread_for("ops"),
+            self._thread_for("alert"),
+            self._resolve_message_thread_id(),
+            self._dynamic_thread_bindings,
+        )
         try:
             await self._set_bot_commands()
         except Exception as exc:
