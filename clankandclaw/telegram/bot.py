@@ -130,40 +130,23 @@ def build_review_message(
     token_name = _fmt_text(metadata.get("token_name"), fallback="Unknown")
     token_symbol = _fmt_text(metadata.get("token_symbol"), fallback="N/A")
     network = _fmt_text(metadata.get("network"), fallback="unknown")
+    network_icon = _network_icon(network)
     confidence_tier = _fmt_text(metadata.get("confidence_tier"), fallback="n/a")
-    gate_stage = _fmt_text(metadata.get("gate_stage"), fallback="n/a")
     liquidity_usd = _fmt_num(metadata.get("liquidity_usd"), digits=2, fallback="0.00")
     volume = metadata.get("volume") or {}
     tx_data = metadata.get("transactions") or {}
-    volume_m1 = _fmt_num(volume.get("m1"), digits=2, fallback="0.00")
     volume_m5 = _fmt_num(volume.get("m5"), digits=2, fallback="0.00")
-    volume_m15 = _fmt_num(volume.get("m15"), digits=2, fallback="0.00")
-    tx_m1 = _fmt_num(tx_data.get("m1"), fallback="0")
     tx_m5 = _fmt_num(tx_data.get("m5"), fallback="0")
-    contracts = [*list(metadata.get("evm_contracts") or []), *list(metadata.get("sol_contracts") or [])]
-    contracts = [str(item) for item in contracts if str(item).strip()]
-    contract_hint = ", ".join(_fmt_inline_code(item) for item in contracts[:2]) if contracts else "n/a"
-    if len(contracts) > 2:
-        contract_hint += f" (+{len(contracts) - 2})"
 
     lines = [
         f"{priority_emoji} <b>Review Candidate</b>",
-        "",
-        "<b>Overview</b>",
-        f"• <b>Token:</b> {_fmt_text(token_name)} ({_fmt_text(token_symbol)})",
-        f"• <b>ID:</b> {_fmt_inline_code(candidate_id)}",
-        f"• <b>Source:</b> {source_label}",
+        f"{network_icon} <b>{_fmt_text(token_name)}</b> <code>${_fmt_text(token_symbol)}</code>",
         f"• <b>Score / Priority:</b> {_fmt_num(score)} / {_fmt_text(review_priority)}",
-        "",
-        "<b>Momentum</b>",
-        f"• <b>Chain / Confidence / Gate:</b> {network} / {confidence_tier} / {gate_stage}",
-        f"• <b>m5 Volume · Tx · Liquidity:</b> ${volume_m5} · {tx_m5} · ${liquidity_usd}",
-        f"• <b>m1/m15 Volume:</b> ${volume_m1} / ${volume_m15}",
-        f"• <b>m1 Tx:</b> {tx_m1}",
-        "",
-        "<b>Risk / Signals</b>",
-        f"• <b>Contract hints:</b> {contract_hint}",
-        f"• <b>Signals:</b> {_fmt_text(reasons, fallback='—')}",
+        f"• <b>Chain / Source:</b> {_fmt_text(network)} / {source_label}",
+        f"• <b>ID:</b> {_fmt_inline_code(candidate_id)}",
+        f"• <b>m5 Vol / Tx / Liq:</b> ${volume_m5} / {tx_m5} / ${liquidity_usd}",
+        f"• <b>Signals:</b> {_fmt_text(_shorten_text(reasons, 140), fallback='—')}",
+        f"• <b>Confidence:</b> {confidence_tier}",
     ]
 
     if author_handle:
@@ -174,8 +157,8 @@ def build_review_message(
         lines.append(f'• <b>Link:</b> <a href="{safe_url}">Open source</a>')
 
     if raw_text:
-        trimmed = _shorten_text(raw_text, _MAX_RAW_TEXT)
-        lines += ["", "<b>Context Excerpt</b>", f"<blockquote>{_fmt_text(trimmed)}</blockquote>"]
+        trimmed = _shorten_text(raw_text, 180)
+        lines += ["", f"<blockquote>{_fmt_text(trimmed)}</blockquote>"]
 
     return "\n".join(lines)
 
@@ -300,23 +283,13 @@ def build_review_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Approve",
+                    text="🚀 Deploy",
                     callback_data=build_action_callback_data(
                         "approve",
                         candidate_id,
                         encode_candidate_id=encode_candidate_id,
                     ),
                 ),
-                InlineKeyboardButton(
-                    text="❌ Reject",
-                    callback_data=build_action_callback_data(
-                        "reject",
-                        candidate_id,
-                        encode_candidate_id=encode_candidate_id,
-                    ),
-                ),
-            ],
-            [
                 InlineKeyboardButton(
                     text="🔎 Detail",
                     callback_data=build_action_callback_data(
@@ -325,18 +298,6 @@ def build_review_keyboard(
                         encode_candidate_id=encode_candidate_id,
                     ),
                 ),
-                InlineKeyboardButton(
-                    text="🔄 Refresh",
-                    callback_data=build_action_callback_data(
-                        "refresh",
-                        candidate_id,
-                        encode_candidate_id=encode_candidate_id,
-                    ),
-                ),
-            ],
-            [
-                InlineKeyboardButton(text="📋 Queue", callback_data="queue"),
-                InlineKeyboardButton(text="🚀 Deploys", callback_data="deploys"),
             ],
         ]
     )

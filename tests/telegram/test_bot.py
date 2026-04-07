@@ -32,7 +32,7 @@ def test_build_review_message_contains_required_fields():
     assert "priority_review" in msg
     assert "85" in msg
     assert "deploy_keyword" in msg
-    assert "Momentum" in msg
+    assert "m5 Vol / Tx / Liq" in msg
 
 
 def test_build_review_message_includes_raw_text():
@@ -261,14 +261,10 @@ def test_build_forum_topic_plan_skips_bound_categories():
 @pytest.mark.skipif(not AIOGRAM_AVAILABLE, reason="aiogram not installed")
 def test_build_review_keyboard_has_approve_and_reject():
     keyboard = build_review_keyboard("sig-1")
-    assert len(keyboard.inline_keyboard) == 3
+    assert len(keyboard.inline_keyboard) == 1
     cb_data = {btn.callback_data for row in keyboard.inline_keyboard for btn in row}
     assert "approve:sig-1" in cb_data
-    assert "reject:sig-1" in cb_data
     assert "detail:sig-1" in cb_data
-    assert "refresh:sig-1" in cb_data
-    assert "queue" in cb_data
-    assert "deploys" in cb_data
 
 
 @pytest.mark.skipif(not AIOGRAM_AVAILABLE, reason="aiogram not installed")
@@ -277,7 +273,5 @@ def test_build_review_keyboard_supports_encoded_candidate_id():
     keyboard = build_review_keyboard(long_candidate_id, encode_candidate_id=lambda _: "k:abc123")
     cb_data = {btn.callback_data for row in keyboard.inline_keyboard for btn in row}
     assert "approve:k:abc123" in cb_data
-    assert "reject:k:abc123" in cb_data
     assert "detail:k:abc123" in cb_data
-    assert "refresh:k:abc123" in cb_data
     assert max(len(item or "") for item in cb_data) <= 64
