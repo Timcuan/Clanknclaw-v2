@@ -11,27 +11,27 @@ import shlex
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
+from clankandclaw.utils.llm import enrich_signal_with_llm, suggest_token_metadata, suggest_token_description
+from clankandclaw.telegram.formatters import (
+    _fmt_text, _fmt_inline_code, _fmt_dashboard_header, _source_label, _network_icon,
+    _fmt_num, _is_evm_address, _mask_sensitive_wallet, _parse_command_args,
+    _fmt_truncate, _get_explorer_url,
+)
+from clankandclaw.telegram.ui import (
+    _build_dashboard_keyboard, _build_back_home_keyboard, _build_tools_keyboard, _build_category_keyboard,
+    build_action_callback_data as ui_build_action_callback_data,
+    build_forum_topic_plan as ui_build_forum_topic_plan,
+)
+
 if TYPE_CHECKING:
     from aiogram import Bot, Dispatcher
     from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 try:
     from aiogram import Bot, Dispatcher, F
-    from aiogram.filters import Command, StateFilter, StateFilter
+    from aiogram.filters import Command, StateFilter
     from aiogram.fsm.context import FSMContext
     from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-    from clankandclaw.utils.llm import enrich_signal_with_llm, suggest_token_metadata, suggest_token_description
-    from clankandclaw.telegram.formatters import (
-        _fmt_text, _fmt_inline_code, _fmt_dashboard_header, _source_label, _network_icon,
-        _fmt_num, _is_evm_address, _mask_sensitive_wallet, _parse_command_args,
-        _fmt_truncate, _get_explorer_url
-    )
-    from clankandclaw.telegram.ui import (
-        _build_dashboard_keyboard, _build_back_home_keyboard, _build_tools_keyboard, _build_category_keyboard,
-        build_action_callback_data, build_forum_topic_plan, build_review_message,
-        build_queue_message, build_candidate_detail_message, build_deploys_message,
-        build_review_keyboard
-    )
     from clankandclaw.telegram.wizard import WizardHandler, ManualDeployStates
     AIOGRAM_AVAILABLE = True
 except ImportError:
@@ -46,12 +46,18 @@ except ImportError:
     FSMContext = Any  # type: ignore
     State = Any  # type: ignore
     StatesGroup = Any  # type: ignore
+    WizardHandler = Any  # type: ignore
+    ManualDeployStates = Any  # type: ignore
 
 logger = logging.getLogger(__name__)
 
 
 _THREAD_CATEGORIES = ("review", "deploy", "claim", "ops", "alert")
 _MAX_CALLBACK_DATA = 64
+_MAX_RAW_TEXT = 300
+_MAX_QUEUE_ITEMS = 10
+_MAX_ERROR_TEXT = 80
+_MAX_REASONS = 6
 
 _DEFAULT_FORUM_TOPIC_TITLES = {
     "review": "🛰 cnc-review",
@@ -64,9 +70,268 @@ _DEFAULT_FORUM_TOPIC_TITLES = {
 
 def resolve_authorized_chat_id(configured_id: str | None, runtime_id: str | None) -> str | None:
     """Determine the effective chat ID with persistence priority."""
-    if runtime_id:
-        return runtime_id
-    return configured_id
+    if runtime_id is not None and str(runtime_id).strip():
+        return str(runtime_id).strip()
+    if configured_id is not None and str(configured_id).strip():
+        return str(configured_id).strip()
+    return None
+
+
+def build_action_callback_data(
+    action: str,
+    candidate_id: str,
+    *,
+    encode_candidate_id: Callable[[str], str] | None = None,
+) -> str:
+    return ui_build_action_callback_data(
+        action,
+        candidate_id,
+        encode_candidate_id=encode_candidate_id,
+    )
+
+
+def build_forum_topic_plan(existing_thread_bindings: dict[str, int] | None = None) -> list[tuple[str, str]]:
+    return ui_build_forum_topic_plan(existing_thread_bindings)
+
+
+def _shorten_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "…"
+
+
+def build_review_message(
+    candidate_id: str,
+    review_priority: str,
+    score: int,
+    reason_codes: list[str],
+    *,
+    raw_text: str | None = None,
+    source: str | None = None,
+    context_url: str | None = None,
+    author_handle: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    metadata = metadata or {}
+    reason_view = reason_codes[:_MAX_REASONS]
+    reasons = ", ".join(reason_view) if reason_view else "—"
+    if len(reason_codes) > _MAX_REASONS:
+        reasons += f" (+{len(reason_codes) - _MAX_REASONS})"
+    priority_emoji = "🔥" if review_priority == "priority_review" else "📋"
+    source_label = _source_label(source)
+    network = _fmt_text(metadata.get("network"), fallback="unknown")
+    confidence_tier = _fmt_text(metadata.get("confidence_tier"), fallback="n/a")
+    gate_stage = _fmt_text(metadata.get("gate_stage"), fallback="n/a")
+    liquidity_usd = _fmt_num(metadata.get("liquidity_usd"), digits=2, fallback="0.00")
+    volume = metadata.get("volume") or {}
+    tx_data = metadata.get("transactions") or {}
+    volume_m1 = _fmt_num(volume.get("m1"), digits=2, fallback="0.00")
+    volume_m5 = _fmt_num(volume.get("m5"), digits=2, fallback="0.00")
+    volume_m15 = _fmt_num(volume.get("m15"), digits=2, fallback="0.00")
+    tx_m1 = _fmt_num(tx_data.get("m1"), fallback="0")
+    tx_m5 = _fmt_num(tx_data.get("m5"), fallback="0")
+    contracts = [*list(metadata.get("evm_contracts") or []), *list(metadata.get("sol_contracts") or [])]
+    contracts = [str(item) for item in contracts if str(item).strip()]
+    contract_hint = ", ".join(_fmt_inline_code(item) for item in contracts[:2]) if contracts else "n/a"
+    if len(contracts) > 2:
+        contract_hint += f" (+{len(contracts) - 2})"
+
+    lines = [
+        f"{priority_emoji} <b>Review Candidate</b>",
+        "",
+        "<b>Overview</b>",
+        f"• <b>ID:</b> {_fmt_inline_code(candidate_id)}",
+        f"<b>Source:</b> {source_label}",
+        f"• <b>Priority:</b> {_fmt_text(review_priority)}",
+        f"• <b>Score:</b> {_fmt_num(score)}",
+        "",
+        "<b>Momentum</b>",
+        f"• <b>Chain:</b> {network}",
+        f"• <b>Confidence:</b> {confidence_tier}",
+        f"• <b>Gate:</b> {gate_stage}",
+        f"• <b>Volume:</b> m1 ${volume_m1} | m5 ${volume_m5} | m15 ${volume_m15}",
+        f"• <b>Tx:</b> m1 {tx_m1} | m5 {tx_m5}",
+        f"• <b>Liquidity:</b> ${liquidity_usd}",
+        "",
+        "<b>Risk / Signals</b>",
+        f"• <b>Contract hints:</b> {contract_hint}",
+        f"• <b>Signals:</b> {_fmt_text(reasons, fallback='—')}",
+    ]
+
+    if author_handle:
+        lines.append(f"• <b>Author:</b> @{_fmt_text(author_handle, fallback='unknown')}")
+
+    if context_url:
+        safe_url = html.escape(context_url, quote=True)
+        lines.append(f'• <b>Link:</b> <a href="{safe_url}">Open source</a>')
+
+    if raw_text:
+        trimmed = _shorten_text(raw_text, _MAX_RAW_TEXT)
+        lines += ["", "<b>Context Excerpt</b>", f"<blockquote>{_fmt_text(trimmed)}</blockquote>"]
+
+    return "\n".join(lines)
+
+
+def build_queue_message(rows: list[Any]) -> str:
+    if not rows:
+        return "📭 No pending reviews."
+
+    lines = [f"📋 <b>Pending Queue</b>", f"Total: <b>{len(rows)}</b>", ""]
+    for row in rows[:_MAX_QUEUE_ITEMS]:
+        score = row["score"] if row["score"] is not None else "?"
+        reasons = row["reason_codes"] or "—"
+        lines.append(
+            f"• {_fmt_inline_code(row['candidate_id'])} | {_source_label(row['source'])} | score {_fmt_text(score)}\n"
+            f"  signals: {_fmt_text(_shorten_text(str(reasons), 120), fallback='—')}"
+        )
+    if len(rows) > _MAX_QUEUE_ITEMS:
+        lines.append(f"\n…and {len(rows) - _MAX_QUEUE_ITEMS} more")
+    return "\n".join(lines)
+
+
+def build_candidate_detail_message(
+    candidate: Any,
+    decision: Any | None,
+    review_item: Any | None,
+    deployment: Any | None,
+) -> str:
+    meta_raw = candidate["metadata_json"] if "metadata_json" in candidate.keys() else "{}"
+    try:
+        meta = json.loads(meta_raw or "{}")
+    except Exception:
+        meta = {}
+
+    lines = [
+        "🔎 <b>Candidate Detail</b>",
+        "",
+        "<b>Overview</b>",
+        f"• <b>ID:</b> {_fmt_inline_code(candidate['id'])}",
+        f"• <b>Source:</b> {_source_label(candidate['source'])}",
+        f"• <b>Author:</b> @{_fmt_text(meta.get('author_handle'))}" if meta.get("author_handle") else "• <b>Author:</b> n/a",
+        f"• <b>Link:</b> <a href=\"{html.escape(meta['context_url'], quote=True)}\">Open source</a>" if meta.get("context_url") else "• <b>Link:</b> n/a",
+    ]
+
+    if decision:
+        lines.extend(
+            [
+                f"<b>Score:</b> {decision['score']}",
+                f"<b>Decision:</b> {decision['decision']}",
+                f"<b>Signals:</b> {decision['reason_codes'] or '—'}",
+                f"<b>Platform:</b> {decision['recommended_platform']}",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "<b>Score:</b> n/a",
+                "<b>Decision:</b> n/a",
+                "<b>Signals:</b> n/a",
+                "<b>Platform:</b> n/a",
+            ]
+        )
+
+    lines.append(f"<b>Review:</b> {review_item['status']}" if review_item else "<b>Review:</b> n/a")
+
+    if deployment:
+        lines.append(f"<b>Deploy:</b> {deployment['status']}")
+        if deployment.get("contract_address"):
+            lines.append(f"<b>Contract:</b> <code>{deployment['contract_address']}</code>")
+        if deployment.get("tx_hash"):
+            lines.append(f"<b>TX:</b> <code>{deployment['tx_hash']}</code>")
+    else:
+        lines.append("<b>Deploy:</b> n/a")
+
+    raw_text = candidate["raw_text"] or ""
+    if raw_text:
+        trimmed = raw_text[:_MAX_RAW_TEXT]
+        if len(raw_text) > _MAX_RAW_TEXT:
+            trimmed += "…"
+        lines += ["", f"<blockquote>{_fmt_text(trimmed)}</blockquote>"]
+
+    return "\n".join(lines)
+
+
+def build_deploys_message(rows: list[Any]) -> str:
+    if not rows:
+        return "📭 No deployments yet."
+
+    lines = [f"🚀 <b>Recent Deployments</b>", f"Total: <b>{len(rows)}</b>", ""]
+    for row in rows:
+        if row["status"] == "deploy_success":
+            contract = row["contract_address"] or "n/a"
+            tx = row["tx_hash"] or "n/a"
+            lines.append(
+                f"✅ {_fmt_inline_code(row['candidate_id'])} | "
+                f"{_fmt_inline_code(contract)} | {_fmt_inline_code(tx)}"
+            )
+            continue
+
+        error_code = row["error_code"] or "deploy_failed"
+        error_message = (row["error_message"] or "").strip()
+        if len(error_message) > _MAX_ERROR_TEXT:
+            error_message = error_message[:_MAX_ERROR_TEXT] + "…"
+        lines.append(
+            f"❌ <code>{row['candidate_id']}</code> | {error_code}"
+            + (f" | {_fmt_text(error_message)}" if error_message else "")
+        )
+
+    return "\n".join(lines)
+
+
+def build_review_keyboard(
+    candidate_id: str,
+    context_url: str | None = None,
+    *,
+    encode_candidate_id: Callable[[str], str] | None = None,
+) -> Any:
+    del context_url
+    if not AIOGRAM_AVAILABLE:
+        raise ImportError("aiogram is required for keyboard building")
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Approve",
+                    callback_data=build_action_callback_data(
+                        "approve",
+                        candidate_id,
+                        encode_candidate_id=encode_candidate_id,
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text="❌ Reject",
+                    callback_data=build_action_callback_data(
+                        "reject",
+                        candidate_id,
+                        encode_candidate_id=encode_candidate_id,
+                    ),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔎 Detail",
+                    callback_data=build_action_callback_data(
+                        "detail",
+                        candidate_id,
+                        encode_candidate_id=encode_candidate_id,
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text="🔄 Refresh",
+                    callback_data=build_action_callback_data(
+                        "refresh",
+                        candidate_id,
+                        encode_candidate_id=encode_candidate_id,
+                    ),
+                ),
+            ],
+            [
+                InlineKeyboardButton(text="📋 Queue", callback_data="queue"),
+                InlineKeyboardButton(text="🚀 Deploys", callback_data="deploys"),
+            ],
+        ]
+    )
 
 
 
@@ -901,12 +1166,10 @@ class TelegramBot:
                  reply_markup=_build_back_home_keyboard()
             )
             return
-        note = ""
-        if value in {"bankr", "both"}:
-            note = "\n⚠️ Bankr execution is not implemented yet; runtime will fallback to clanker."
+
         await message.answer(
             _fmt_dashboard_header("Success", "✅") +
-            f"Deployer mode set to <b>{_fmt_text(value)}</b>.{note}",
+            f"Deployer mode set to <b>{_fmt_text(value.upper())}</b>.",
             parse_mode="HTML",
             reply_markup=_build_back_home_keyboard()
         )
@@ -1366,11 +1629,11 @@ class TelegramBot:
         deployment = self._db.get_latest_deployment_for_candidate(candidate_id)
         return build_candidate_detail_message(candidate, decision, review_item, deployment)
 
-    def _build_review_keyboard(self, candidate_id: str, mode: str = "summary") -> Any:
+    def _build_review_keyboard(self, candidate_id: str, context_url: str | None = None) -> Any:
         return build_review_keyboard(
             candidate_id,
+            context_url=context_url,
             encode_candidate_id=self._encode_callback_candidate_id,
-            mode=mode,
         )
 
     async def _handle_detail(self, callback: CallbackQuery) -> None:
@@ -1610,8 +1873,9 @@ class TelegramBot:
                  await callback.message.edit_text(
                      _fmt_dashboard_header("Claim Success", "✅") +
                      f"Successfully claimed fees for <code>{address}</code>.\n\n"
-                     f"• <b>TX:</b> <code>{result.tx_hash}</code>",
+                     f"• <b>TX:</b> <a href=\"https://basescan.org/tx/{result.tx_hash}\">{result.tx_hash[:10]}...{result.tx_hash[-6:]}</a>",
                      parse_mode="HTML",
+                     disable_web_page_preview=True,
                      reply_markup=_build_back_home_keyboard()
                  )
             else:
@@ -1748,18 +2012,24 @@ class TelegramBot:
     ) -> int | None:
         """Send a review notification to Telegram. Returns message_id or None."""
         try:
+            meta = metadata or {}
+            # Resolve context_url: explicit param → metadata fallback
+            resolved_url = context_url or meta.get("context_url")
+            # Resolve raw_text: explicit param → metadata fallback
+            resolved_raw = raw_text or meta.get("raw_text")
+
             message_text = build_review_message(
                 candidate_id,
                 review_priority,
                 score,
                 reason_codes,
-                raw_text=raw_text,
+                raw_text=resolved_raw,
                 source=source,
-                context_url=context_url,
+                context_url=resolved_url,
                 author_handle=author_handle,
-                metadata=metadata,
+                metadata=meta,
             )
-            keyboard = self._build_review_keyboard(candidate_id)
+            keyboard = self._build_review_keyboard(candidate_id, context_url=resolved_url)
 
             result = await self._send_bot_message(
                 text=message_text,
@@ -1853,7 +2123,10 @@ class TelegramBot:
             if created:
                 logger.info("telegram.auto_thread_setup created=%s", ",".join(created))
             if failures:
-                logger.warning("telegram.auto_thread_setup failures=%s", " | ".join(failures))
+                if failures == ["paired chat is not a forum supergroup"]:
+                    logger.info("telegram.auto_thread_setup skipped: paired chat is not forum-enabled")
+                else:
+                    logger.warning("telegram.auto_thread_setup failures=%s", " | ".join(failures))
         except Exception as exc:
             logger.warning("telegram.auto_thread_setup failed: %s", exc)
         await self.dp.start_polling(self.bot, handle_signals=False)

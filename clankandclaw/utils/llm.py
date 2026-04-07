@@ -61,6 +61,26 @@ class CircuitBreaker:
 
 # Global Circuit Breakers
 gemini_breaker = CircuitBreaker()
+_gemini_client: httpx.AsyncClient | None = None
+_gemini_client_lock = asyncio.Lock()
+
+
+async def _get_gemini_client() -> httpx.AsyncClient:
+    global _gemini_client
+    if _gemini_client is not None:
+        return _gemini_client
+    async with _gemini_client_lock:
+        if _gemini_client is None:
+            _gemini_client = httpx.AsyncClient(timeout=30.0)
+    return _gemini_client
+
+
+async def _reset_gemini_client_for_tests() -> None:
+    global _gemini_client
+    async with _gemini_client_lock:
+        if _gemini_client is not None:
+            await _gemini_client.aclose()
+            _gemini_client = None
 
 
 async def _call_gemini_api(prompt: str, json_mode: bool = True) -> str:
@@ -72,45 +92,57 @@ async def _call_gemini_api(prompt: str, json_mode: bool = True) -> str:
     if not api_key:
         return ""
 
-    # Tiered execution strategy (Lite -> Flash -> Pro)
-    # v1beta is used as it supports the latest 3.x preview models identified on VPS ListModels
-    tiers = [
-        "models/gemini-3.1-flash-lite-preview",
-        "models/gemini-3-flash-preview",
-        "models/gemini-3.1-pro-preview"
+    # Tiered execution strategy with resilient fallback when a model is retired.
+    configured_model = (os.getenv("GEMINI_MODEL") or "").strip()
+    candidate_models = [
+        configured_model,
+        "models/gemini-2.5-flash",
+        "models/gemini-2.0-flash",
+        "models/gemini-1.5-flash",
     ]
-    
+    tiers: list[str] = []
+    for model_path in candidate_models:
+        if not model_path:
+            continue
+        if model_path not in tiers:
+            tiers.append(model_path)
+    client = await _get_gemini_client()
     for model_path in tiers:
         try:
             await gemini_limiter.wait()
-            # Note: models/ prefix is included in the ListModels name and required for the URL
             url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={api_key}"
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
-            
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, json=payload)
-                
-                if resp.status_code == 429: # Rate Limit
-                     logger.warning(f"Gemini {model_path} Rate Limited (429). Trying next tier...")
-                     continue
-                if resp.status_code == 403: # API Key Restricted
-                     logger.error(f"Gemini {model_path} FORBIDDEN (403). CHECK API KEY.")
-                     gemini_breaker.record_failure()
-                     return ""
-                if resp.status_code == 503: # Overloaded
-                     logger.warning(f"Gemini {model_path} Overloaded (503). Trying next tier...")
-                     continue
-                if resp.status_code == 400: # Bad Request
-                     logger.error(f"Gemini {model_path} 400 BAD REQUEST: {resp.text}")
-                     continue
-                     
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["candidates"][0]["content"]["parts"][0]["text"]
-                
-                gemini_breaker.record_success()
-                return content
-                
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "response_mime_type": "application/json" if json_mode else "text/plain"
+                }
+            }
+
+            resp = await client.post(url, json=payload)
+
+            if resp.status_code == 429: # Rate Limit
+                 logger.warning(f"Gemini {model_path} Rate Limited (429). Trying next tier...")
+                 continue
+            if resp.status_code == 403: # API Key Restricted
+                 logger.error(f"Gemini {model_path} FORBIDDEN (403). CHECK API KEY.")
+                 gemini_breaker.record_failure()
+                 return ""
+            if resp.status_code == 503: # Overloaded
+                 logger.warning(f"Gemini {model_path} Overloaded (503). Trying next tier...")
+                 continue
+            if resp.status_code == 400: # Bad Request
+                 logger.error(f"Gemini {model_path} 400 BAD REQUEST: {resp.text}")
+                 continue
+            if resp.status_code == 404: # Model not found / retired
+                 logger.warning(f"Gemini {model_path} NOT FOUND (404). Trying next tier...")
+                 continue
+
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["candidates"][0]["content"]["parts"][0]["text"]
+            gemini_breaker.record_success()
+            return content
+
         except Exception as exc:
             logger.warning(f"Gemini call to {model_path} failed: {exc}")
             continue
@@ -142,12 +174,11 @@ async def enrich_signal_with_llm(text: str) -> dict[str, Any]:
     """Unified call for maximum efficiency."""
     prompt = f"""
     Analyze this social media post and return a JSON object with the following fields:
-    - name: The official token name (null if not found).
     - symbol: The official token symbol/ticker (null if not found).
     - is_genuine_launch: Boolean. Is the user actually trying to deploy or requesting a launch?
-    - bullish_score: Integer (1-100).
-    - ai_rationale: One-sentence explanation.
-    - suggested_description: A professional 150-200 char description.
+    - bullish_score: Integer (1-100). Score > 80 if it has 'Alpha' potential (minimalist tickers, community intent).
+    - ai_rationale: One-sentence degen explanation of why this is a moon-mission or a skip.
+    - suggested_description: A viral, degen-friendly 150-200 char description.
 
     Text: {text}
     """
@@ -161,6 +192,71 @@ async def enrich_signal_with_llm(text: str) -> dict[str, Any]:
         return json.loads(content)
     except Exception:
         return {}
+
+
+async def validate_gecko_candidate_with_llm(
+    token_name: str,
+    token_symbol: str,
+    volume_m5: float,
+    liquidity: float,
+    age_minutes: float,
+    scan_mode: str,
+) -> dict[str, Any]:
+    """
+    LLM quality gate for Gecko auto-deploy candidates.
+    
+    Validates name/symbol sanity, detects scam/offensive patterns,
+    and generates a deploy-ready description.
+    
+    Returns dict with keys:
+      - safe: bool (True = proceed, False = flag for review)
+      - risk: None | "scam" | "offensive" | "generic" | "suspicious"
+      - description: str (150-char deploy description)
+    
+    Always returns a safe default on timeout/error (non-blocking).
+    """
+    _DEFAULT = {"safe": True, "risk": None, "description": ""}
+
+    if not gemini_breaker.is_available():
+        return _DEFAULT
+
+    mode_label = "early new launch" if scan_mode == "new_pools" else "trending pool"
+    liq_str = f"${liquidity:,.0f}"
+    vol_str = f"${volume_m5:,.0f}"
+    age_str = f"{age_minutes:.0f}m" if age_minutes < 999 else "unknown"
+
+    prompt = f"""You are a crypto token quality analyst for the Base network.
+
+Token detected: {token_name} (${token_symbol})
+Context: {mode_label} on Base DEX. Age: {age_str}. Vol 5m: {vol_str}. Liquidity: {liq_str}.
+
+Tasks:
+1. Is the name "{token_name}" legitimate? (not offensive, scam-like, or meaningless)
+2. Is "${token_symbol}" valid? (2-10 uppercase chars, not an obvious copy or scam ticker)
+3. Write a concise 120-150 char description for this token launch on Base.
+4. Any red flags? Examples: known rug patterns, offensive content, obvious copy of major token.
+
+Return ONLY valid JSON:
+{{"safe": true|false, "risk": null|"scam"|"offensive"|"suspicious"|"generic", "description": "..."}}
+
+Be permissive: only set safe=false for clear red flags. Meme names are fine."""
+
+    try:
+        content = await asyncio.wait_for(_call_gemini_api(prompt, json_mode=True), timeout=5.0)
+        if not content:
+            return _DEFAULT
+        json_match = re.search(r"(\{.*\})", content, re.DOTALL)
+        if not json_match:
+            return _DEFAULT
+        result = json.loads(json_match.group(1))
+        return {
+            "safe": bool(result.get("safe", True)),
+            "risk": result.get("risk") or None,
+            "description": str(result.get("description") or "")[:200],
+        }
+    except (asyncio.TimeoutError, Exception) as exc:
+        logger.debug("validate_gecko_candidate_with_llm skipped: %s", exc)
+        return _DEFAULT
 
 
 async def _extract_heuristic(text: str) -> TokenIdentity:
@@ -251,9 +347,9 @@ async def suggest_token_metadata(theme: str) -> list[dict[str, str]]:
 async def suggest_token_description(name: str, symbol: str, theme: str = "") -> str:
     """Generate a professional description."""
     prompt = f"""
-    Write a short, viral-ready, and professional meme token description for {symbol} ({name}).
+    Write a short, viral-ready, and degen-friendly meme token description for {symbol} ({name}).
     Context: {theme}
-    Tone: Degen-friendly, high-conviction, Base network 'moon mission' vibe.
+    Tone: Banter-heavy, high-conviction, Base network 'moon mission' vibe (WAGMI, LFG).
     Constraint: Plain text, 150-250 characters, NO hashtags.
     """
     content = await _call_gemini_api(prompt)
