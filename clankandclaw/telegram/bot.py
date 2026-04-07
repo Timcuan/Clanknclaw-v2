@@ -127,6 +127,8 @@ def build_review_message(
         reasons += f" (+{len(reason_codes) - _MAX_REASONS})"
     priority_emoji = "🔥" if review_priority == "priority_review" else "📋"
     source_label = _source_label(source)
+    token_name = _fmt_text(metadata.get("token_name"), fallback="Unknown")
+    token_symbol = _fmt_text(metadata.get("token_symbol"), fallback="N/A")
     network = _fmt_text(metadata.get("network"), fallback="unknown")
     confidence_tier = _fmt_text(metadata.get("confidence_tier"), fallback="n/a")
     gate_stage = _fmt_text(metadata.get("gate_stage"), fallback="n/a")
@@ -148,18 +150,16 @@ def build_review_message(
         f"{priority_emoji} <b>Review Candidate</b>",
         "",
         "<b>Overview</b>",
+        f"• <b>Token:</b> {_fmt_text(token_name)} ({_fmt_text(token_symbol)})",
         f"• <b>ID:</b> {_fmt_inline_code(candidate_id)}",
-        f"<b>Source:</b> {source_label}",
-        f"• <b>Priority:</b> {_fmt_text(review_priority)}",
-        f"• <b>Score:</b> {_fmt_num(score)}",
+        f"• <b>Source:</b> {source_label}",
+        f"• <b>Score / Priority:</b> {_fmt_num(score)} / {_fmt_text(review_priority)}",
         "",
         "<b>Momentum</b>",
-        f"• <b>Chain:</b> {network}",
-        f"• <b>Confidence:</b> {confidence_tier}",
-        f"• <b>Gate:</b> {gate_stage}",
-        f"• <b>Volume:</b> m1 ${volume_m1} | m5 ${volume_m5} | m15 ${volume_m15}",
-        f"• <b>Tx:</b> m1 {tx_m1} | m5 {tx_m5}",
-        f"• <b>Liquidity:</b> ${liquidity_usd}",
+        f"• <b>Chain / Confidence / Gate:</b> {network} / {confidence_tier} / {gate_stage}",
+        f"• <b>m5 Volume · Tx · Liquidity:</b> ${volume_m5} · {tx_m5} · ${liquidity_usd}",
+        f"• <b>m1/m15 Volume:</b> ${volume_m1} / ${volume_m15}",
+        f"• <b>m1 Tx:</b> {tx_m1}",
         "",
         "<b>Risk / Signals</b>",
         f"• <b>Contract hints:</b> {contract_hint}",
