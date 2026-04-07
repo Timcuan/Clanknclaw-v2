@@ -13,6 +13,7 @@ import httpx
 from clankandclaw.config import StealthConfig
 from clankandclaw.core.detectors.gecko_detector import normalize_gecko_payload
 from clankandclaw.core.pipeline import process_candidate
+from clankandclaw.utils.llm import validate_gecko_candidate_with_llm
 from clankandclaw.database.manager import DatabaseManager
 from clankandclaw.utils.stealth_client import StealthClient
 
@@ -94,7 +95,10 @@ class GeckoDetectorWorker:
         self.loop_timeout_seconds = max(10.0, loop_timeout_seconds)
         self.candidate_process_timeout_seconds = max(1.0, candidate_process_timeout_seconds)
         self.max_pending_notifications = max(10, max_pending_notifications)
-        self.base_target_sources = [_normalize_tag(s) for s in (base_target_sources or ["bankr", "doppler", "zora", "virtual", "uniswapv4", "clanker"])]
+        if base_target_sources is not None:
+             self.base_target_sources = [_normalize_tag(s) for s in base_target_sources if s]
+        else:
+             self.base_target_sources = [_normalize_tag(s) for s in ["bankr", "doppler", "zora", "virtual", "uniswapv4", "clanker"]]
         self._running = False
         self._task: asyncio.Task[None] | None = None
         self._telegram_worker: Any = None
@@ -255,31 +259,70 @@ class GeckoDetectorWorker:
             
         return {}
 
-    def _profile_for_network(self, network: str) -> dict[str, float]:
-        # Chain-specific gameplay profile for momentum detection.
-        profiles: dict[str, dict[str, float | list[str] | str]] = {
-            "base": {"min_volume_m5_usd": 500.0, "min_volume_m15_usd": 1500.0, "min_tx_count_m5": 5.0, "min_liquidity_usd": 2000.0, "max_pool_age_minutes": 120.0, "min_hot_points": 3.0, "require_target_source": 1.0, "scan_mode": "new_pools"},
+    def _profile_for_network(self, network: str, scan_mode: str | None = None) -> dict[str, float]:
+        """Return the filter profile for the given network and optional scan mode override."""
+        profiles: dict[str, dict[str, Any]] = {
+            # Base: New Launch — catch early momentum in first 60 minutes
+            "base_new_launch": {
+                "min_volume_m5_usd": 200.0,
+                "min_volume_m15_usd": 600.0,
+                "min_tx_count_m5": 3.0,
+                "min_liquidity_usd": 500.0,
+                "max_pool_age_minutes": 60.0,
+                "min_hot_points": 2.0,
+                "require_target_source": 0.0,
+                "scan_mode": "new_pools",
+                "check_buy_ratio": 1.0,
+                "signal_tag": "gecko_new_launch",
+            },
+            # Base: Volume Momentum — trending pools with active volume regardless of age
+            "base_trending": {
+                "min_volume_m5_usd": 2000.0,
+                "min_volume_m15_usd": 5000.0,
+                "min_tx_count_m5": 10.0,
+                "min_liquidity_usd": 3000.0,
+                "max_pool_age_minutes": 1440.0,
+                "min_hot_points": 3.0,
+                "require_target_source": 0.0,
+                "scan_mode": "trending_pools",
+                "check_buy_ratio": 1.0,
+                "min_spike_ratio": 0.3,
+                "signal_tag": "gecko_trending",
+            },
             "solana": {
-                "min_volume_h1_usd": 100000.0, "min_tx_count_h1": 200.0, "min_liquidity_usd": 35000.0, "max_pool_age_minutes": 1440.0, "min_hot_points": 3.0, "require_target_source": 1.0, "scan_mode": "trending_pools",
-                "required_dex_ids": ["raydium", "raydium-clmm", "meteora", "orca", "fluxbeam", "lifinity-v2"]
+                "min_volume_h1_usd": 100000.0, "min_tx_count_h1": 200.0, "min_liquidity_usd": 35000.0,
+                "max_pool_age_minutes": 1440.0, "min_hot_points": 3.0, "require_target_source": 0.0,
+                "scan_mode": "trending_pools",
+                "required_dex_ids": ["raydium", "raydium-clmm", "meteora", "orca", "fluxbeam", "lifinity-v2"],
             },
             "bsc": {
-                "min_volume_h1_usd": 80000.0, "min_tx_count_h1": 150.0, "min_liquidity_usd": 25000.0, "max_pool_age_minutes": 1440.0, "min_hot_points": 3.0, "require_target_source": 1.0, "scan_mode": "trending_pools",
-                "required_dex_ids": ["pancakeswap_v2", "pancakeswap_v3", "pancakeswap_v4", "uniswap_v3"]
+                "min_volume_h1_usd": 80000.0, "min_tx_count_h1": 150.0, "min_liquidity_usd": 25000.0,
+                "max_pool_age_minutes": 1440.0, "min_hot_points": 3.0, "require_target_source": 0.0,
+                "scan_mode": "trending_pools",
+                "required_dex_ids": ["pancakeswap_v2", "pancakeswap_v3", "pancakeswap_v4", "uniswap_v3"],
             },
-            "eth": {"min_volume_m5_usd": 1000.0, "min_volume_m15_usd": 3000.0, "min_tx_count_m5": 8.0, "min_liquidity_usd": 5000.0, "max_pool_age_minutes": 90.0, "min_hot_points": 3.0, "require_target_source": 1.0, "scan_mode": "new_pools"},
+            "eth": {
+                "min_volume_m5_usd": 1000.0, "min_volume_m15_usd": 3000.0, "min_tx_count_m5": 8.0,
+                "min_liquidity_usd": 5000.0, "max_pool_age_minutes": 90.0, "min_hot_points": 3.0,
+                "require_target_source": 1.0, "scan_mode": "new_pools",
+            },
         }
-        base = {
+        # Select correct Base sub-profile based on scan_mode
+        if network == "base":
+            if scan_mode == "trending_pools":
+                return profiles["base_trending"]
+            return profiles["base_new_launch"]
+        defaults = {
             "min_volume_m5_usd": self.min_volume_m5_usd,
             "min_volume_m15_usd": self.min_volume_m15_usd,
             "min_tx_count_m5": float(self.min_tx_count_m5),
             "min_liquidity_usd": self.min_liquidity_usd,
             "max_pool_age_minutes": float(self.max_pool_age_minutes),
-            "min_hot_points": 4.0,
+            "min_hot_points": 3.0,
             "require_target_source": 0.0,
         }
-        base.update(profiles.get(network, {}))
-        return base
+        defaults.update(profiles.get(network, {}))
+        return defaults
 
     def _base_source_match(self, attrs: dict[str, Any]) -> tuple[int, list[str]]:
         haystack_values = [
@@ -290,8 +333,8 @@ class GeckoDetectorWorker:
         matched = [tag for tag in self.base_target_sources if tag and tag in haystack]
         return len(set(matched)), sorted(set(matched))
 
-    def _evaluate_pool(self, network: str, attrs: dict[str, Any]) -> tuple[bool, dict[str, Any], str]:
-        profile = self._profile_for_network(network)
+    def _evaluate_pool(self, network: str, attrs: dict[str, Any], scan_mode: str | None = None) -> tuple[bool, dict[str, Any], str]:
+        profile = self._profile_for_network(network, scan_mode)
         volume = attrs.get("volume_usd") or {}
         tx_data = attrs.get("transactions") or {}
         tx_m1 = tx_data.get("m1") or {}
@@ -302,72 +345,82 @@ class GeckoDetectorWorker:
         volume_m15 = _to_float(volume.get("m15"))
         volume_h1 = _to_float(volume.get("h1"))
 
-        # Momentum ratios — used for spike detection and bot-pump filtering
-        spike_ratio_m1_m5 = (volume_m1 / volume_m5) if volume_m5 > 0 else 0.0   # fraction of m5 vol in last 1m
-        spike_ratio = (volume_m5 / volume_m15) if volume_m15 > 0 else 0.0        # m5-to-m15 velocity
-        
+        # Momentum ratios
+        spike_ratio_m1_m5 = (volume_m1 / volume_m5) if volume_m5 > 0 else 0.0
+        spike_ratio = (volume_m5 / volume_m15) if volume_m15 > 0 else 0.0
+
+        buy_count_m5 = _to_int(tx_m5.get("buys"))
+        sell_count_m5 = _to_int(tx_m5.get("sells"))
         tx_count_m1 = _to_int(tx_m1.get("buys")) + _to_int(tx_m1.get("sells"))
-        tx_count_m5 = _to_int(tx_m5.get("buys")) + _to_int(tx_m5.get("sells"))
+        tx_count_m5 = buy_count_m5 + sell_count_m5
         tx_count_h1 = _to_int(tx_data.get("h1", {}).get("buys")) + _to_int(tx_data.get("h1", {}).get("sells"))
-        
+        buy_ratio_m5 = buy_count_m5 / tx_count_m5 if tx_count_m5 > 0 else 0.0
+
         liquidity_usd = _to_float(attrs.get("reserve_in_usd"))
         age_minutes = _pool_age_minutes(attrs.get("pool_created_at"))
         dex_id = str(attrs.get("dex_id") or "").lower()
-        
-        mode = profile.get("scan_mode", "new_pools")
-        is_trending_mode = mode == "trending_pools"
-        
-        # Optimize Source Matching: always search DEX id and token name for alpha tags
-        base_source_match_score, base_source_tags = self._base_source_match(attrs)
-        
-        min_volume_m1 = max(400.0, float(profile.get("min_volume_m5_usd") or 1.0) * 0.2)
-        min_tx_count_m1 = max(3, int(float(profile.get("min_tx_count_m5") or 1.0) * 0.4))
 
+        actual_scan_mode = str(profile.get("scan_mode", "new_pools"))
+        is_trending_mode = actual_scan_mode == "trending_pools"
+
+        base_source_match_score, base_source_tags = self._base_source_match(attrs)
+
+        min_volume_m1 = max(200.0, float(profile.get("min_volume_m5_usd") or 1.0) * 0.2)
+        min_tx_count_m1 = max(2, int(float(profile.get("min_tx_count_m5") or 1.0) * 0.4))
         has_m1_signal = volume_m1 > 0 or tx_count_m1 > 0
-        # Stage 1: early spike/freshness gate to catch momentum quickly.
-        # Stage 1: trending gate for SOL/BSC vs fast-spike gate for snipes
+
+        # Stage 1: Gate logic differs by mode
         if is_trending_mode:
-             # Mandatory H1 thresholds for Solana/BSC trending pools
-             stage1_fast_spike = (
-                 volume_h1 >= float(profile.get("min_volume_h1_usd", 1.0))
-                 and tx_count_h1 >= float(profile.get("min_tx_count_h1", 1.0))
-                 and liquidity_usd >= float(profile["min_liquidity_usd"])
-             )
+            # Volume Momentum Gate: recent m5 volume must be significant
+            stage1_fast_spike = (
+                volume_m5 >= float(profile.get("min_volume_m5_usd", 1.0))
+                and tx_count_m5 >= int(float(profile.get("min_tx_count_m5", 1.0)))
+                and liquidity_usd >= float(profile["min_liquidity_usd"])
+                and age_minutes <= float(profile["max_pool_age_minutes"])
+            )
         else:
-             stage1_fast_spike = (
-                 age_minutes <= float(profile["max_pool_age_minutes"])
-                 and (
-                     (
-                         has_m1_signal
-                         and (
-                             (volume_m1 >= min_volume_m1 and tx_count_m1 >= min_tx_count_m1)
-                             or (volume_m5 >= float(profile["min_volume_m5_usd"]) * 0.8 and spike_ratio_m1_m5 >= 0.2)
-                         )
-                     )
-                     or (
-                         not has_m1_signal
-                         and volume_m5 >= float(profile["min_volume_m5_usd"])
-                         and tx_count_m5 >= int(float(profile["min_tx_count_m5"]) * 0.7)
-                     )
-                 )
-             )
-        
-        # Bonding / Graduation Gate: reject if DEX is not whitelisted (prevents pump-fun/four-meme noise)
+            stage1_fast_spike = (
+                age_minutes <= float(profile["max_pool_age_minutes"])
+                and (
+                    (
+                        has_m1_signal
+                        and (
+                            (volume_m1 >= min_volume_m1 and tx_count_m1 >= min_tx_count_m1)
+                            or (volume_m5 >= float(profile["min_volume_m5_usd"]) * 0.8 and spike_ratio_m1_m5 >= 0.2)
+                        )
+                    )
+                    or (
+                        not has_m1_signal
+                        and volume_m5 >= float(profile["min_volume_m5_usd"])
+                        and tx_count_m5 >= int(float(profile["min_tx_count_m5"]) * 0.7)
+                    )
+                )
+            )
+
+        # Buy Ratio Filter: reject if mostly sells (bot dump / no genuine demand)
+        if profile.get("check_buy_ratio") and tx_count_m5 >= 3 and buy_ratio_m5 < 0.4:
+            stage1_fast_spike = False
+
+        # Spike ratio gate for trending mode
+        if is_trending_mode and float(profile.get("min_spike_ratio", 0.0)) > 0:
+            if spike_ratio < float(profile["min_spike_ratio"]):
+                stage1_fast_spike = False
+
+        # DEX whitelist gate
         required_dex_ids = profile.get("required_dex_ids")
         if required_dex_ids and dex_id not in required_dex_ids:
-             stage1_fast_spike = False
-             
-        # Hardened filtering: reject if social proof is missing but required
-        if float(profile.get("require_target_source", 0.0)) > 0 and base_source_match_score <= 0:
-             stage1_fast_spike = False
+            stage1_fast_spike = False
 
-        # Anti-Wash Filter: reject if volume is suspiciously high compared to liquidity (ratio > 2.5) for snipes
+        if float(profile.get("require_target_source", 0.0)) > 0 and base_source_match_score <= 0:
+            stage1_fast_spike = False
+
+        # Anti-Wash Filter
         if not is_trending_mode and liquidity_usd > 0 and volume_m5 / liquidity_usd > 2.5:
-             stage1_fast_spike = False
-             
-        # Bot-Pump Filter: reject if 80%+ volume happened in the last 60 seconds (extreme spike) for snipes
+            stage1_fast_spike = False
+
+        # Bot-Pump Filter
         if not is_trending_mode and spike_ratio_m1_m5 > 0.8:
-             stage1_fast_spike = False
+            stage1_fast_spike = False
              
         if not stage1_fast_spike:
             stats = {
@@ -379,20 +432,38 @@ class GeckoDetectorWorker:
                 "pool_age_minutes": age_minutes,
                 "spike_ratio": spike_ratio,
                 "spike_ratio_m1_m5": spike_ratio_m1_m5,
+                "buy_ratio_m5": buy_ratio_m5,
                 "hot_score": 0,
                 "source_match_score": base_source_match_score,
                 "source_tags_matched": base_source_tags,
                 "confidence_tier": "low",
                 "gate_stage": "stage1_failed",
+                "signal_tag": str(profile.get("signal_tag", "")),
             }
             return False, stats, "stage1_spike_freshness"
 
         hot_score = 0
+        reason_signals: list[str] = []
+
+        # Add the mode-specific tag first
+        signal_tag = str(profile.get("signal_tag", ""))
+        if signal_tag:
+            reason_signals.append(signal_tag)
+
         if is_trending_mode:
-            # Trending scoring: primarily driven by volume and tx count
-            if volume_h1 >= float(profile["min_volume_h1_usd"]): hot_score += 2
-            if tx_count_h1 >= float(profile["min_tx_count_h1"]): hot_score += 1
-            if liquidity_usd >= float(profile["min_liquidity_usd"]): hot_score += 1
+            if volume_m5 >= float(profile["min_volume_m5_usd"]):
+                hot_score += 2
+                reason_signals.append("gecko_volume_surge")
+            if tx_count_m5 >= int(float(profile["min_tx_count_m5"])):
+                hot_score += 1
+                reason_signals.append("gecko_tx_m5_ok")
+            if liquidity_usd >= float(profile["min_liquidity_usd"]):
+                hot_score += 1
+            if spike_ratio >= 0.45:
+                hot_score += 1
+                reason_signals.append("gecko_spike_ratio_strong")
+            elif spike_ratio >= 0.3:
+                reason_signals.append("gecko_spike_ratio_ok")
         else:
             if volume_m5 >= float(profile["min_volume_m5_usd"]):
                 hot_score += 1
@@ -400,14 +471,28 @@ class GeckoDetectorWorker:
                 hot_score += 1
             if tx_count_m5 >= int(profile["min_tx_count_m5"]):
                 hot_score += 1
+                reason_signals.append("gecko_tx_m5_ok")
             if liquidity_usd >= float(profile["min_liquidity_usd"]):
                 hot_score += 1
             if age_minutes <= float(profile["max_pool_age_minutes"]):
                 hot_score += 1
             if spike_ratio >= 0.45:
                 hot_score += 1
+                reason_signals.append("gecko_spike_ratio_strong")
+            elif spike_ratio >= 0.25:
+                reason_signals.append("gecko_spike_ratio_ok")
             if tx_count_m1 >= min_tx_count_m1:
                 hot_score += 1
+
+        # Buy Pressure Bonus
+        if buy_ratio_m5 >= 0.6 and volume_m5 >= 150:
+            hot_score += 1
+            reason_signals.append("gecko_buy_pressure")
+
+        # Fresh launch bonus
+        if age_minutes <= 15 and tx_count_m5 >= 2:
+            hot_score += 1
+            reason_signals.append("gecko_fresh_launch")
 
         confidence_tier = "low"
         if hot_score >= int(profile["min_hot_points"]) + 2:
@@ -423,11 +508,14 @@ class GeckoDetectorWorker:
             "pool_age_minutes": age_minutes,
             "spike_ratio": spike_ratio,
             "spike_ratio_m1_m5": spike_ratio_m1_m5,
+            "buy_ratio_m5": buy_ratio_m5,
             "hot_score": hot_score,
             "source_match_score": base_source_match_score,
             "source_tags_matched": base_source_tags,
             "confidence_tier": confidence_tier,
             "gate_stage": "stage2_passed",
+            "reason_signals": reason_signals,
+            "signal_tag": signal_tag,
         }
         if bool(profile["require_target_source"]) and base_source_match_score < 1:
             stats["gate_stage"] = "stage3_failed"
@@ -523,25 +611,51 @@ class GeckoDetectorWorker:
         # Collect all process tasks across all networks before awaiting any of them,
         # so network fetching isn't blocked by pipeline processing of the previous network.
         all_process_tasks: list[asyncio.Task[None]] = []
+        # Build poll targets: Base gets polled twice (new_pools + trending_pools)
+        poll_targets: list[tuple[str, str | None]] = []
         for network in self.networks:
+            if network == "base":
+                poll_targets.append(("base", "new_pools"))      # New Launch mode
+                poll_targets.append(("base", "trending_pools"))  # Volume Momentum mode
+            else:
+                poll_targets.append((network, None))  # use profile default
+
+        for network, mode_override in poll_targets:
             try:
-                pools, included = await self._poll_network(stealth, network)
+                # Temporarily override scan_mode for this poll target
+                profile = self._profile_for_network(network, mode_override)
+                actual_mode = str(profile.get("scan_mode", "new_pools"))
+                url = f"{self.api_base_url}/networks/{network}/{actual_mode}"
+                await self._respect_rate_limit(stealth)
+                response = await stealth.get(url, params={"page": 1})
+                self._last_request_at = datetime.now(timezone.utc)
+                stealth.on_response(response.status_code)
+                if not response.is_success:
+                    self._on_poll_failure()
+                    logger.warning("GeckoTerminal poll failed network=%s mode=%s status=%d", network, actual_mode, response.status_code)
+                    continue
+                self._on_poll_success()
+                payload_data = response.json()
+                pools = list(payload_data.get("data", [])[:self.max_results])
+                included = payload_data.get("included", [])
             except httpx.HTTPError as exc:
                 self._on_poll_failure()
-                logger.error("HTTP error polling GeckoTerminal (%s): %s", network, exc)
+                logger.error("HTTP error polling GeckoTerminal (%s/%s): %s", network, mode_override, exc)
                 continue
 
             token_index = self._build_token_index(included)
-            logger.info("Fetched %s new pools from GeckoTerminal network=%s", len(pools), network)
+            logger.info("Fetched %d pools network=%s mode=%s", len(pools), network, mode_override or "default")
+
             for pool in pools:
                 attrs = pool.get("attributes") or {}
                 pool_address = str(attrs.get("address") or "")
                 if not pool_address:
                     continue
 
+                # Stable ID format used across pipeline/tests.
                 pool_id = f"{network}:{pool_address}"
 
-                is_hot, stats, skip_reason = self._evaluate_pool(network, attrs)
+                is_hot, stats, skip_reason = self._evaluate_pool(network, attrs, scan_mode=mode_override)
                 if not is_hot:
                     skipped_by_gate += 1
                     logger.debug("Skipping pool %s (%s)", pool_id, skip_reason)
@@ -553,48 +667,54 @@ class GeckoDetectorWorker:
                 self._seen_pool_ids.append(pool_id)
 
                 token_data = self._extract_base_token(pool, token_index)
-                
-                # Critical fix: prefer token-specific name/symbol, fallback to pool name, 
-                # but AVOID using "Unknown" or pool address as the name if possible.
-                token_name = (token_data.get("name") or attrs.get("name") or "").strip()
+
+                raw_name = (token_data.get("name") or attrs.get("name") or "").strip()
                 token_symbol = (token_data.get("symbol") or "").strip().upper()
-                
-                if not token_name or " / " in token_name:
-                    # If it's a pool name like "TKN / WETH", try to extract parts
-                    if " / " in token_name:
-                        parts = token_name.split(" / ")
-                        token_name = parts[0].strip()
-                        if not token_symbol:
-                            token_symbol = token_name[:10].upper()
-                    else:
-                        token_name = "Unknown"
-                
+
+                if " / " in raw_name:
+                    token_name = raw_name.split(" / ")[0].strip()
+                    if not token_symbol:
+                        token_symbol = token_name[:10].upper()
+                else:
+                    token_name = raw_name or "Unknown"
+
                 if not token_symbol:
                     token_symbol = "???"
 
                 context_url = self._build_context_url(network, attrs)
 
-                payload = {
+                # Merge reason_signals from scoring with classic source tags
+                reason_signals: list[str] = list(stats.get("reason_signals") or [])
+                for tag in (stats.get("source_tags_matched") or []):
+                    reason_signals.append(f"source_{tag}")
+
+                pool_payload = {
                     "id": pool_id,
                     "text": self._build_text(network, token_name, token_symbol, stats),
                     "author": "geckoterminal",
                     "timestamp": attrs.get("pool_created_at"),
                     "token_data": token_data,
+                    "token_name": token_name,
+                    "token_symbol": token_symbol,
                     "network": network,
+                    "scan_mode": mode_override or actual_mode,
                     "dex": attrs.get("dex_id"),
                     "volume": stats["volume"],
                     "transactions": stats["transactions"],
                     "liquidity_usd": stats["liquidity_usd"],
                     "pool_created_at": stats["pool_created_at"],
+                    "pool_age_minutes": stats.get("pool_age_minutes", 999.0),
                     "spike_ratio": stats["spike_ratio"],
                     "spike_ratio_m1_m5": stats["spike_ratio_m1_m5"],
+                    "buy_ratio_m5": stats.get("buy_ratio_m5", 0.0),
                     "hot_score": stats["hot_score"],
                     "confidence_tier": stats["confidence_tier"],
                     "gate_stage": stats["gate_stage"],
                     "source_match_score": stats["source_match_score"],
                     "source_tags_matched": stats["source_tags_matched"],
+                    "reason_signals": reason_signals,
                 }
-                all_process_tasks.append(asyncio.create_task(self._process_payload_with_semaphore(payload, context_url)))
+                all_process_tasks.append(asyncio.create_task(self._process_payload_with_semaphore(pool_payload, context_url)))
         if all_process_tasks:
             await asyncio.gather(*all_process_tasks)
             processed_count = len(all_process_tasks)
@@ -625,14 +745,101 @@ class GeckoDetectorWorker:
                 timeout=self.candidate_process_timeout_seconds,
             )
 
-            if scored.decision in ("review", "priority_review"):
+            if scored.decision in ("review", "priority_review", "auto_deploy"):
                 logger.info("Candidate %s scored %s -> %s", candidate.id, scored.score, scored.decision)
+
+                # Build metadata from payload
+                token_data = payload.get("token_data") or {}
+                metadata = {
+                    "network": payload.get("network", "unknown"),
+                    "token_name": payload.get("token_name") or token_data.get("name") or "",
+                    "token_symbol": payload.get("token_symbol") or token_data.get("symbol") or "",
+                    "liquidity_usd": float(payload.get("liquidity_usd") or 0.0),
+                    "volume": payload.get("volume") or {},
+                    "transactions": payload.get("transactions") or {},
+                    "confidence_tier": payload.get("confidence_tier", "high"),
+                    "fee_type": payload.get("fee_type", "static"),
+                    "scan_mode": payload.get("scan_mode", "new_pools"),
+                    "buy_ratio_m5": float(payload.get("buy_ratio_m5") or 0.0),
+                    "pool_age_minutes": float(payload.get("pool_age_minutes") or 999.0),
+                    "dex": payload.get("dex", "unknown"),
+                    "token_address": token_data.get("address"),
+                    "fdv_usd": float(payload.get("fdv_usd") or 0.0),
+                    "websites": payload.get("websites") or [],
+                    "socials": payload.get("socials") or [],
+                    "context_url": context_url,
+
+                }
+
+                # --- LLM Quality Gate (auto-deploy path only) ---
+                # Only fires for candidates heading toward auto-deploy.
+                # Non-blocking: 5s timeout, defaults to safe=True on failure.
+                auto_threshold = 85  # Mirror ops.auto_threshold default
+                try:
+                    auto_threshold = int(
+                        self.db.get_runtime_setting("ops.auto_threshold") or 85  # type: ignore[union-attr]
+                    )
+                except Exception:
+                    pass
+
+                is_auto_candidate = (
+                    scored.decision == "auto_deploy"
+                    or scored.score >= auto_threshold
+                )
+
+                if is_auto_candidate and metadata.get("token_name") and metadata.get("token_symbol"):
+                    try:
+                        llm_result = await validate_gecko_candidate_with_llm(
+                            token_name=metadata["token_name"],
+                            token_symbol=metadata["token_symbol"],
+                            volume_m5=float((payload.get("volume") or {}).get("m5") or 0.0),
+                            liquidity=float(payload.get("liquidity_usd") or 0.0),
+                            age_minutes=float(payload.get("pool_age_minutes") or 999.0),
+                            scan_mode=payload.get("scan_mode", "new_pools"),
+                        )
+
+                        if llm_result.get("description"):
+                            metadata["ai_description"] = llm_result["description"]
+
+                        if not llm_result.get("safe", True):
+                            risk = llm_result.get("risk") or "flagged"
+                            logger.warning(
+                                "LLM flagged candidate %s as unsafe (risk=%s); downgrading to review",
+                                candidate.id, risk,
+                            )
+                            metadata["llm_risk_flag"] = risk
+                            # Downgrade: override decision to review, skip auto-trigger
+                            from clankandclaw.models.token import ScoredCandidate
+                            scored = ScoredCandidate(
+                                candidate_id=scored.candidate_id,
+                                score=scored.score,
+                                decision="review",
+                                reason_codes=scored.reason_codes + [f"llm_risk_{risk}"],
+                                recommended_platform=scored.recommended_platform,
+                                review_priority="review",
+                                auto_trigger=False,
+                            )
+                    except Exception as exc:
+                        logger.debug("LLM gate skipped for %s: %s", candidate.id, exc)
+
+                # Merge detector signals with pipeline reason codes
+                detector_signals: list[str] = list(payload.get("reason_signals") or [])
+                pipeline_codes: list[str] = list(scored.reason_codes or [])
+                seen: set[str] = set()
+                merged_codes: list[str] = []
+                for code in detector_signals + pipeline_codes:
+                    if code not in seen:
+                        seen.add(code)
+                        merged_codes.append(code)
+
                 if self._telegram_worker:
                     self._schedule_review_notification(
                         candidate.id,
                         scored.review_priority,
                         scored.score,
-                        scored.reason_codes,
+                        merged_codes,
+                        context_url=context_url,
+                        metadata=metadata,
                     )
                 else:
                     logger.warning("Telegram worker not set, cannot send notification")
@@ -651,6 +858,9 @@ class GeckoDetectorWorker:
         review_priority: str,
         score: int,
         reason_codes: list[str],
+        *,
+        context_url: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         if len(self._notification_tasks) >= self.max_pending_notifications:
             logger.warning(
@@ -665,6 +875,8 @@ class GeckoDetectorWorker:
                 review_priority,
                 score,
                 reason_codes,
+                context_url=context_url,
+                metadata=metadata,
             )
         )
         self._notification_tasks.add(task)
@@ -676,6 +888,9 @@ class GeckoDetectorWorker:
         review_priority: str,
         score: int,
         reason_codes: list[str],
+        *,
+        context_url: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         if not self._telegram_worker:
             return
@@ -686,6 +901,8 @@ class GeckoDetectorWorker:
                     review_priority,
                     score,
                     reason_codes,
+                    context_url=context_url,
+                    metadata=metadata,
                 )
             except Exception as exc:
                 logger.error("Failed to send Gecko review notification for %s: %s", candidate_id, exc, exc_info=True)

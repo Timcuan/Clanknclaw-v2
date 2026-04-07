@@ -29,15 +29,27 @@ def quick_filter(candidate: SignalCandidate) -> FilterDecision:
         tx_m5 = int(tx_data.get("m5") or 0)
         hot_score = int(metadata.get("hot_score") or 0)
         spike_ratio_m1_m5 = float(metadata.get("spike_ratio_m1_m5") or 0.0)
+        buy_ratio_m5 = float(metadata.get("buy_ratio_m5") or 0.0)
 
+        # Hard reject: gate failed at detector level
         if gate_stage in {"stage1_failed", "stage2_failed", "stage3_failed"}:
             return FilterDecision(False, [gate_stage])
 
+        # Hard reject: zero activity — only when activity fields are explicitly present.
+        has_volume_data = isinstance(volume, dict) and any(key in volume for key in ("m1", "m5", "m15"))
+        has_tx_data = isinstance(tx_data, dict) and any(key in tx_data for key in ("m1", "m5"))
+        if (has_volume_data or has_tx_data) and volume_m5 < 50 and tx_m5 < 2:
+            return FilterDecision(False, ["gecko_zero_activity"])
+
+        # Hard reject: extreme sell pressure — dump signal
+        if buy_ratio_m5 > 0 and buy_ratio_m5 < 0.25 and tx_m5 >= 5:
+            return FilterDecision(False, ["gecko_sell_dominated"])
+
         strong_momentum = (
             hot_score >= 5
-            and volume_m5 >= 3500
-            and tx_m5 >= 12
-            and (spike_ratio_m1_m5 >= 0.2 or (volume_m1 >= 500 and tx_m1 >= 3))
+            and volume_m5 >= 2000
+            and tx_m5 >= 10
+            and (spike_ratio_m1_m5 >= 0.2 or (volume_m1 >= 300 and tx_m1 >= 2))
         )
         if confidence_tier in {"high", "medium"}:
             return FilterDecision(True, [f"gecko_confidence_{confidence_tier}"])

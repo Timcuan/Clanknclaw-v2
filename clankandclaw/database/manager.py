@@ -113,132 +113,13 @@ class DatabaseManager:
         rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         return {row["name"] for row in rows}
 
-    def _review_items_has_fresh_schema(self, conn: sqlite3.Connection) -> bool:
-        columns = [row["name"] for row in conn.execute("PRAGMA table_info(review_items)").fetchall()]
-        expected_columns = [
-            "id",
-            "candidate_id",
-            "status",
-            "created_at",
-            "expires_at",
-            "locked_by",
-            "locked_at",
-            "telegram_message_id",
-        ]
-        if columns != expected_columns:
-            return False
-        foreign_keys = conn.execute("PRAGMA foreign_key_list(review_items)").fetchall()
-        return any(
-            row["from"] == "candidate_id"
-            and row["table"] == "signal_candidates"
-            and row["to"] == "id"
-            for row in foreign_keys
-        )
 
-    def _rebuild_review_items_table(self, conn: sqlite3.Connection) -> None:
-        columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(review_items)").fetchall()
-        }
-        orphan_candidate_ids = [
-            row["candidate_id"]
-            for row in conn.execute(
-                """
-                SELECT DISTINCT legacy.candidate_id
-                FROM review_items AS legacy
-                LEFT JOIN signal_candidates AS candidates
-                    ON candidates.id = legacy.candidate_id
-                WHERE candidates.id IS NULL
-                """
-            ).fetchall()
-        ]
-        if orphan_candidate_ids:
-            raise sqlite3.IntegrityError(
-                "Cannot rebuild review_items: missing signal_candidates for candidate_id(s): "
-                + ", ".join(sorted(orphan_candidate_ids))
-            )
-
-        created_at_fallback = _utc_now_iso()
-        select_parts = [
-            "id",
-            "candidate_id",
-            "status",
-            "COALESCE(created_at, ?) AS created_at" if "created_at" in columns else "? AS created_at",
-            "expires_at",
-            "locked_by" if "locked_by" in columns else "NULL AS locked_by",
-            "locked_at" if "locked_at" in columns else "NULL AS locked_at",
-            "telegram_message_id" if "telegram_message_id" in columns else "NULL AS telegram_message_id",
-        ]
-
-        conn.execute("SAVEPOINT review_items_rebuild")
-        try:
-            conn.execute("ALTER TABLE review_items RENAME TO review_items_legacy")
-            conn.execute(
-                """
-                CREATE TABLE review_items (
-                    id TEXT PRIMARY KEY,
-                    candidate_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    locked_by TEXT,
-                    locked_at TEXT,
-                    telegram_message_id INTEGER,
-                    FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
-                );
-                """
-            )
-            conn.execute(
-                f"""
-                INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at, telegram_message_id)
-                SELECT {", ".join(select_parts)}
-                FROM review_items_legacy
-                """,
-                (created_at_fallback,),
-            )
-            conn.execute("DROP TABLE review_items_legacy")
-            conn.execute("RELEASE SAVEPOINT review_items_rebuild")
-        except Exception:
-            conn.execute("ROLLBACK TO SAVEPOINT review_items_rebuild")
-            conn.execute("RELEASE SAVEPOINT review_items_rebuild")
-            raise
-
-    def _legacy_review_items_orphan_candidate_ids(self, conn: sqlite3.Connection) -> list[str]:
-        existing_tables = self._existing_tables(conn)
-        if "review_items" not in existing_tables:
-            return []
-
-        if "signal_candidates" in existing_tables:
-            query = """
-                SELECT DISTINCT legacy.candidate_id
-                FROM review_items AS legacy
-                LEFT JOIN signal_candidates AS candidates
-                    ON candidates.id = legacy.candidate_id
-                WHERE candidates.id IS NULL
-            """
-        else:
-            query = """
-                SELECT DISTINCT candidate_id
-                FROM review_items
-            """
-
-        return [row["candidate_id"] for row in conn.execute(query).fetchall()]
 
     def initialize(self) -> None:
         with self._connect() as conn:
             conn.execute("BEGIN")
             try:
                 existing_tables = self._existing_tables(conn)
-                review_items_exists = "review_items" in existing_tables
-                legacy_review_items = review_items_exists and not self._review_items_has_fresh_schema(conn)
-
-                if legacy_review_items:
-                    orphan_candidate_ids = self._legacy_review_items_orphan_candidate_ids(conn)
-                    if orphan_candidate_ids:
-                        raise sqlite3.IntegrityError(
-                            "Cannot rebuild review_items: missing signal_candidates for candidate_id(s): "
-                            + ", ".join(sorted(orphan_candidate_ids))
-                        )
 
                 conn.execute(
                     """
@@ -307,17 +188,59 @@ class DatabaseManager:
                     );
                     """
                 )
-                # Migrate review_items missing telegram_message_id
+                required_review_columns = {
+                    "id",
+                    "candidate_id",
+                    "status",
+                    "created_at",
+                    "expires_at",
+                    "locked_by",
+                    "locked_at",
+                    "telegram_message_id",
+                }
                 ri_columns = {
                     row["name"]
                     for row in conn.execute("PRAGMA table_info(review_items)").fetchall()
                 }
-                if "telegram_message_id" not in ri_columns and "review_items" in existing_tables and not legacy_review_items:
+                if "review_items" in existing_tables and not required_review_columns.issubset(ri_columns):
+                    # Legacy review_items schema: rebuild table atomically so new columns and FK exist.
+                    created_at_default = _utc_now_iso()
+                    conn.execute("ALTER TABLE review_items RENAME TO review_items_legacy")
                     conn.execute(
-                        "ALTER TABLE review_items ADD COLUMN telegram_message_id INTEGER"
+                        """
+                        CREATE TABLE review_items (
+                            id TEXT PRIMARY KEY,
+                            candidate_id TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            expires_at TEXT NOT NULL,
+                            locked_by TEXT,
+                            locked_at TEXT,
+                            telegram_message_id INTEGER,
+                            FOREIGN KEY (candidate_id) REFERENCES signal_candidates(id)
+                        );
+                        """
                     )
-                if legacy_review_items:
-                    self._rebuild_review_items_table(conn)
+                    conn.execute(
+                        """
+                        INSERT INTO review_items
+                            (id, candidate_id, status, created_at, expires_at, locked_by, locked_at, telegram_message_id)
+                        SELECT
+                            id,
+                            candidate_id,
+                            status,
+                            ?,
+                            expires_at,
+                            NULL,
+                            NULL,
+                            NULL
+                        FROM review_items_legacy
+                        """,
+                        (created_at_default,),
+                    )
+                    conn.execute("DROP TABLE review_items_legacy")
+                elif "telegram_message_id" not in ri_columns and "review_items" in existing_tables:
+                    conn.execute("ALTER TABLE review_items ADD COLUMN telegram_message_id INTEGER")
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS deployment_results (
@@ -495,7 +418,13 @@ class DatabaseManager:
         def _op():
             with self._connect() as conn:
                 conn.execute(
-                    "INSERT OR IGNORE INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at, telegram_message_id) VALUES (?, ?, 'pending', ?, ?, NULL, NULL, NULL)",
+                    """
+                    INSERT INTO review_items (id, candidate_id, status, created_at, expires_at, locked_by, locked_at, telegram_message_id) 
+                    VALUES (?, ?, 'pending', ?, ?, NULL, NULL, NULL)
+                    ON CONFLICT(id) DO UPDATE SET 
+                        expires_at = excluded.expires_at 
+                    WHERE status = 'pending'
+                    """,
                     (review_id, candidate_id, _utc_now_iso(), expires_at),
                 )
         self._with_retry(_op)

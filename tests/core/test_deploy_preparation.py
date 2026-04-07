@@ -1,7 +1,9 @@
 """Tests for DeployPreparation."""
 
+import asyncio
 import json
 from pathlib import Path
+from time import perf_counter
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -215,6 +217,36 @@ async def test_prepare_image_caps_failed_fetch_attempts(db, monkeypatch):
     uri = await prep._prepare_image(candidate, "Moon", "MOON")
     assert uri == "ipfs://QmImageHash"
     assert len(called_urls) == 4
+    pinata.upload_file_bytes.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_prepare_image_returns_on_first_success_without_waiting_slow_candidates(db, monkeypatch):
+    prep, pinata, _ = make_preparation(db)
+
+    async def fake_fetch(url: str) -> bytes:
+        if url.endswith("slow.png"):
+            await asyncio.sleep(0.25)
+            return b"slow-image"
+        await asyncio.sleep(0.01)
+        return b"fast-image"
+
+    monkeypatch.setattr("clankandclaw.core.deploy_preparation.fetch_image_bytes", fake_fetch)
+    monkeypatch.setattr(
+        "clankandclaw.core.deploy_preparation._build_image_candidates",
+        lambda *_args, **_kwargs: [
+            "https://example.com/fast.png",
+            "https://example.com/slow.png",
+        ],
+    )
+
+    candidate = make_candidate(metadata={"image_url": "https://example.com/fast.png"})
+    started = perf_counter()
+    uri = await prep._prepare_image(candidate, "Moon", "MOON")
+    elapsed = perf_counter() - started
+
+    assert uri == "ipfs://QmImageHash"
+    assert elapsed < 0.20
     pinata.upload_file_bytes.assert_awaited_once()
 
 

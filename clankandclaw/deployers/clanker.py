@@ -55,10 +55,14 @@ def build_clanker_v4_config(deploy_request: DeployRequest) -> dict:
         "platform": "x" if deploy_request.source == "x" else ("farcaster" if deploy_request.source == "farcaster" else "automated"),
         "messageId": deploy_request.source_event_id or deploy_request.candidate_id,
         "id": deploy_request.source_event_id or deploy_request.candidate_id,
+        "authorHandle": deploy_request.author_handle or "",
     }
 
     # Build metadata: description is key for Clanker v4 deployment standards
-    metadata: dict[str, Any] = {"description": description}
+    metadata: dict[str, Any] = {
+        "description": description,
+        "external_url": deploy_request.context_url or "",
+    }
     social_urls = []
     if deploy_request.metadata_x_url:
         social_urls.append({"platform": "x", "url": deploy_request.metadata_x_url})
@@ -209,6 +213,10 @@ class ClankerDeployer:
     local node_modules for clanker-sdk and viem dependencies.
     """
 
+    @property
+    def platform_name(self) -> str:
+        return "clanker"
+        
     def __init__(
         self,
         execute: DeployCallable | None = None,
