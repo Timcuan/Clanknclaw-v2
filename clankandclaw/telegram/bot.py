@@ -725,8 +725,12 @@ class TelegramBot:
             ]
         )
 
-    async def _ensure_forum_topics_bound(self) -> tuple[list[str], list[str]]:
-        """Create forum topics when needed and bind thread IDs to runtime settings."""
+    async def _ensure_forum_topics_bound(
+        self,
+        *,
+        create_missing: bool = False,
+    ) -> tuple[list[str], list[str]]:
+        """Validate/bind forum topics and optionally create missing ones."""
         chat_id = self.chat_id
         if not chat_id:
             return [], ["chat is not configured"]
@@ -742,6 +746,17 @@ class TelegramBot:
             return [], ["paired chat is not a forum supergroup"]
 
         current_bindings = dict(self._dynamic_thread_bindings)
+        configured_bindings = {
+            "review": _normalize_thread_id(self.thread_review_id),
+            "deploy": _normalize_thread_id(self.thread_deploy_id),
+            "claim": _normalize_thread_id(self.thread_claim_id),
+            "ops": _normalize_thread_id(self.thread_ops_id),
+            "alert": _normalize_thread_id(self.thread_alert_id),
+        }
+        for category, thread_id in configured_bindings.items():
+            if thread_id is not None:
+                current_bindings[category] = thread_id
+
         for category, topic_title in build_forum_topic_plan(current_bindings):
             try:
                 # Smart discovery: If we already have an ID, try to 'adapt' it (rename instead of create)
@@ -756,8 +771,14 @@ class TelegramBot:
                         created.append(f"{category}:{existing_id}")
                         continue
                     except Exception:
+                        if not create_missing:
+                            failures.append(f"{category}: bound topic {existing_id} is missing/inaccessible")
+                            continue
                         # If edit fails, it might be deleted. Fall through to create.
                         logger.debug(f"Failed to edit topic {existing_id} for {category}, will recreate.")
+                elif not create_missing:
+                    failures.append(f"{category}: not bound")
+                    continue
 
                 # If no ID or topic missing, create new
                 forum_topic = await self.bot.create_forum_topic(
@@ -828,17 +849,11 @@ class TelegramBot:
 
         # Regular pairing (Ops binding)
         self._bind_dynamic_thread("ops", thread_id)
-        created, failures = await self._ensure_forum_topics_bound()
-        created_line = ", ".join(created) if created else "none"
-        if failures:
-            failures_text = "\n".join(f"• {_fmt_text(item)}" for item in failures[:5])
-            failure_block = (
-                "\n\n<b>Auto Thread Setup:</b> partial/failed\n"
-                f"{failures_text}\n"
-                "Tip: grant bot admin permission to <b>Manage Topics</b>, then run <code>/autothread</code>."
-            )
-        else:
-            failure_block = "\n\n<b>Auto Thread Setup:</b> done"
+        created_line = "none"
+        failure_block = (
+            "\n\n<b>Auto Thread Setup:</b> disabled on /pair to prevent duplicate topics.\n"
+            "Use <code>/pair &lt;category&gt;</code> inside each existing topic, or run <code>/autothread force</code> only when you really want to create missing topics."
+        )
         await message.answer(
             _fmt_dashboard_header("Paired", "🔗") +
             f"• <b>Chat ID:</b> {_fmt_inline_code(self.chat_id)}\n"
@@ -868,13 +883,13 @@ class TelegramBot:
             )
             return
 
-        created, failures = await self._ensure_forum_topics_bound()
+        created, failures = await self._ensure_forum_topics_bound(create_missing=force or bool(current_bindings))
         if failures:
             await message.answer(
                 _fmt_dashboard_header("Auto Thread Setup Incomplete", "⚠️") +
                 f"• <b>Created:</b> {_fmt_text(', '.join(created) if created else 'none')}\n"
                 f"• <b>Errors:</b> {_fmt_text(' | '.join(failures[:5]))}\n\n"
-                "Ensure bot has admin permission <b>Manage Topics</b>.",
+                "For existing topics, use <code>/pair review</code>, <code>/pair deploy</code>, etc. Use <code>/autothread force</code> only to create new topics.",
                 parse_mode="HTML",
                 reply_markup=_build_dashboard_keyboard(),
             )
@@ -2164,14 +2179,14 @@ class TelegramBot:
         except Exception as exc:
             logger.warning("Failed setting slash commands: %s", exc)
         try:
-            created, failures = await self._ensure_forum_topics_bound()
+            created, failures = await self._ensure_forum_topics_bound(create_missing=False)
             if created:
                 logger.info("telegram.auto_thread_setup created=%s", ",".join(created))
             if failures:
                 if failures == ["paired chat is not a forum supergroup"]:
                     logger.info("telegram.auto_thread_setup skipped: paired chat is not forum-enabled")
                 else:
-                    logger.warning("telegram.auto_thread_setup failures=%s", " | ".join(failures))
+                    logger.info("telegram.auto_thread_setup pending=%s", " | ".join(failures))
         except Exception as exc:
             logger.warning("telegram.auto_thread_setup failed: %s", exc)
         await self.dp.start_polling(self.bot, handle_signals=False)
