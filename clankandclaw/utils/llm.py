@@ -7,6 +7,7 @@ import re
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any, TypeAlias
 
 import httpx
@@ -60,8 +61,48 @@ class CircuitBreaker:
                 return True
             return False
 
+
+class DailyBudgetGuard:
+    """Simple UTC-day request budget for Gemini calls."""
+
+    def __init__(self, default_limit_per_day: int = 12000):
+        self.default_limit_per_day = max(0, default_limit_per_day)
+        self._lock = threading.Lock()
+        self._day_key: str | None = None
+        self._count = 0
+
+    def _current_day_key(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _resolve_limit(self) -> int:
+        raw = (os.getenv("GEMINI_DAILY_REQUEST_LIMIT") or "").strip()
+        if not raw:
+            return self.default_limit_per_day
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return self.default_limit_per_day
+
+    def allow_next(self) -> bool:
+        with self._lock:
+            today = self._current_day_key()
+            if self._day_key != today:
+                self._day_key = today
+                self._count = 0
+            limit = self._resolve_limit()
+            if limit <= 0:
+                return False
+            if self._count >= limit:
+                return False
+            self._count += 1
+            if self._count % 250 == 0:
+                logger.info("gemini.budget usage=%d limit=%d day=%s", self._count, limit, today)
+            return True
+
+
 # Global Circuit Breakers
 gemini_breaker = CircuitBreaker()
+gemini_budget = DailyBudgetGuard()
 _gemini_client: httpx.AsyncClient | None = None
 _gemini_client_lock = asyncio.Lock()
 
@@ -123,8 +164,13 @@ async def _call_gemini_api(
     profile: GeminiProfile = "lite",
 ) -> str:
     """Unified, resilient, and multi-tier Gemini calling engine."""
+    if (os.getenv("GEMINI_ENABLED", "true").strip().lower() in {"0", "false", "no", "off"}):
+        return ""
     if not gemini_breaker.is_available():
          return ""
+    if not gemini_budget.allow_next():
+        logger.warning("Gemini daily request budget exhausted; skipping LLM call.")
+        return ""
          
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:

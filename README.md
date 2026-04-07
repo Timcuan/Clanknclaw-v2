@@ -131,6 +131,12 @@ Optional Telegram thread overrides (explicit static routing):
 - `TELEGRAM_THREAD_OPS_ID`
 - `TELEGRAM_THREAD_ALERT_ID`
 
+Optional LLM efficiency/cost guards:
+
+- `GEMINI_ENABLED` (default `true`)
+- `GEMINI_MODEL` (recommended `models/gemini-2.5-flash-lite` for 24/7)
+- `GEMINI_DAILY_REQUEST_LIMIT` (hard UTC daily cap)
+
 ## Telegram Operations
 
 `ClanknClaw v2` uses a high-precision **Mission Control** interface designed for operator safety and chat-flow speed.
