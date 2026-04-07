@@ -28,11 +28,11 @@ def test_build_review_message_contains_required_fields():
         context_url="https://x.com/alice/status/1",
         author_handle="alice",
     )
-    assert "sig-1" in msg
-    assert "priority_review" in msg
+    assert "Review Candidate" not in msg
+    assert "ID:" not in msg
     assert "85" in msg
-    assert "deploy_keyword" in msg
-    assert "m5 Vol / Tx / Liq" in msg
+    assert "deploy keyword" in msg
+    assert "Market" in msg
 
 
 def test_build_review_message_includes_raw_text():
@@ -79,6 +79,17 @@ def test_build_review_message_omits_optional_fields_when_absent():
 def test_build_review_message_priority_emojis():
     assert "🔥" in build_review_message("sig-1", "priority_review", 90, [])
     assert "📋" in build_review_message("sig-1", "review", 50, [])
+
+
+def test_build_review_message_uses_chain_icon():
+    msg = build_review_message(
+        "sig-1",
+        "review",
+        50,
+        [],
+        metadata={"network": "base", "token_name": "Moon", "token_symbol": "MOON"},
+    )
+    assert msg.startswith("🔵")
 
 
 def test_build_queue_message_compact_list():

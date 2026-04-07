@@ -108,6 +108,15 @@ def _normalize_thread_id(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _format_reason_label(reason: str) -> str:
+    text = str(reason or "").strip().lower()
+    for prefix in ("gecko_", "x_", "farcaster_", "base_", "network_"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    text = text.replace("_", " ").strip()
+    return text if text else "signal"
+
+
 def build_review_message(
     candidate_id: str,
     review_priority: str,
@@ -120,12 +129,14 @@ def build_review_message(
     author_handle: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> str:
+    del candidate_id
     metadata = metadata or {}
     reason_view = reason_codes[:_MAX_REASONS]
-    reasons = ", ".join(reason_view) if reason_view else "—"
+    reasons = ", ".join(_format_reason_label(item) for item in reason_view) if reason_view else "—"
     if len(reason_codes) > _MAX_REASONS:
         reasons += f" (+{len(reason_codes) - _MAX_REASONS})"
     priority_emoji = "🔥" if review_priority == "priority_review" else "📋"
+    priority_label = "High" if review_priority == "priority_review" else "Review"
     source_label = _source_label(source)
     token_name = _fmt_text(metadata.get("token_name"), fallback="Unknown")
     token_symbol = _fmt_text(metadata.get("token_symbol"), fallback="N/A")
@@ -139,14 +150,13 @@ def build_review_message(
     tx_m5 = _fmt_num(tx_data.get("m5"), fallback="0")
 
     lines = [
-        f"{priority_emoji} <b>Review Candidate</b>",
         f"{network_icon} <b>{_fmt_text(token_name)}</b> <code>${_fmt_text(token_symbol)}</code>",
-        f"• <b>Score / Priority:</b> {_fmt_num(score)} / {_fmt_text(review_priority)}",
-        f"• <b>Chain / Source:</b> {_fmt_text(network)} / {source_label}",
-        f"• <b>ID:</b> {_fmt_inline_code(candidate_id)}",
-        f"• <b>m5 Vol / Tx / Liq:</b> ${volume_m5} / {tx_m5} / ${liquidity_usd}",
-        f"• <b>Signals:</b> {_fmt_text(_shorten_text(reasons, 140), fallback='—')}",
+        f"<i>{source_label} • {_fmt_text(network).upper()}</i>",
+        "",
+        f"• <b>Score:</b> {_fmt_num(score)} {priority_emoji} <b>{priority_label}</b>",
+        f"• <b>Market:</b> m5 ${volume_m5} · tx {tx_m5} · liq ${liquidity_usd}",
         f"• <b>Confidence:</b> {confidence_tier}",
+        f"• <b>Signals:</b> {_fmt_text(_shorten_text(reasons, 120), fallback='—')}",
     ]
 
     if author_handle:
@@ -154,7 +164,7 @@ def build_review_message(
 
     if context_url:
         safe_url = html.escape(context_url, quote=True)
-        lines.append(f'• <b>Link:</b> <a href="{safe_url}">Open source</a>')
+        lines.append(f'• <a href="{safe_url}"><i>Open source</i></a>')
 
     if raw_text:
         trimmed = _shorten_text(raw_text, 180)
