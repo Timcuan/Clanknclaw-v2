@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 TokenIdentity: TypeAlias = tuple[str, str]
 TokenIdentityFallback: TypeAlias = Callable[[str], TokenIdentity | Awaitable[TokenIdentity]]
+GeminiProfile: TypeAlias = str
 
 
 def _clean_best_effort(val: str) -> str:
@@ -83,7 +84,44 @@ async def _reset_gemini_client_for_tests() -> None:
             _gemini_client = None
 
 
-async def _call_gemini_api(prompt: str, json_mode: bool = True) -> str:
+def _build_model_tiers(profile: GeminiProfile = "lite") -> list[str]:
+    configured_model = (os.getenv("GEMINI_MODEL") or "").strip()
+    configured_lite = (os.getenv("GEMINI_MODEL_LITE") or "").strip()
+    configured_flash = (os.getenv("GEMINI_MODEL_FLASH") or "").strip()
+
+    if profile == "flash":
+        preferred = [
+            configured_model,
+            configured_flash,
+            "models/gemini-2.5-flash",
+            "models/gemini-flash-latest",
+            "models/gemini-2.5-flash-lite",
+        ]
+    else:
+        preferred = [
+            configured_model,
+            configured_lite,
+            "models/gemini-2.5-flash-lite",
+            "models/gemini-flash-lite-latest",
+            "models/gemini-2.5-flash",
+            "models/gemini-flash-latest",
+        ]
+
+    tiers: list[str] = []
+    for model_path in preferred:
+        if not model_path:
+            continue
+        if model_path not in tiers:
+            tiers.append(model_path)
+    return tiers
+
+
+async def _call_gemini_api(
+    prompt: str,
+    json_mode: bool = True,
+    *,
+    profile: GeminiProfile = "lite",
+) -> str:
     """Unified, resilient, and multi-tier Gemini calling engine."""
     if not gemini_breaker.is_available():
          return ""
@@ -93,19 +131,7 @@ async def _call_gemini_api(prompt: str, json_mode: bool = True) -> str:
         return ""
 
     # Tiered execution strategy with resilient fallback when a model is retired.
-    configured_model = (os.getenv("GEMINI_MODEL") or "").strip()
-    candidate_models = [
-        configured_model,
-        "models/gemini-2.5-flash",
-        "models/gemini-2.0-flash",
-        "models/gemini-1.5-flash",
-    ]
-    tiers: list[str] = []
-    for model_path in candidate_models:
-        if not model_path:
-            continue
-        if model_path not in tiers:
-            tiers.append(model_path)
+    tiers = _build_model_tiers(profile=profile)
     client = await _get_gemini_client()
     for model_path in tiers:
         try:
@@ -154,7 +180,7 @@ async def _call_gemini_api(prompt: str, json_mode: bool = True) -> str:
 async def extract_token_identity_with_llm(text: str) -> TokenIdentity:
     """Tiered extraction: Gemini 3.x -> Heuristic fallback."""
     prompt = f"Extract 'name' and 'symbol' (ticker) from this text. Return JSON only: {text}"
-    content = await _call_gemini_api(prompt)
+    content = await _call_gemini_api(prompt, profile="lite")
     
     if not content:
         return await _extract_heuristic(text)
@@ -182,7 +208,7 @@ async def enrich_signal_with_llm(text: str) -> dict[str, Any]:
 
     Text: {text}
     """
-    content = await _call_gemini_api(prompt)
+    content = await _call_gemini_api(prompt, profile="lite")
     if not content: return {}
     
     try:
@@ -242,7 +268,10 @@ Return ONLY valid JSON:
 Be permissive: only set safe=false for clear red flags. Meme names are fine."""
 
     try:
-        content = await asyncio.wait_for(_call_gemini_api(prompt, json_mode=True), timeout=5.0)
+        content = await asyncio.wait_for(
+            _call_gemini_api(prompt, json_mode=True, profile="lite"),
+            timeout=5.0,
+        )
         if not content:
             return _DEFAULT
         json_match = re.search(r"(\{.*\})", content, re.DOTALL)
@@ -332,7 +361,7 @@ async def suggest_token_metadata(theme: str) -> list[dict[str, str]]:
     
     Return ONLY a JSON array of objects with 'name' and 'symbol' keys.
     """
-    content = await _call_gemini_api(prompt)
+    content = await _call_gemini_api(prompt, profile="flash")
     if not content: return []
     
     try:
@@ -352,7 +381,7 @@ async def suggest_token_description(name: str, symbol: str, theme: str = "") -> 
     Tone: Banter-heavy, high-conviction, Base network 'moon mission' vibe (WAGMI, LFG).
     Constraint: Plain text, 150-250 characters, NO hashtags.
     """
-    content = await _call_gemini_api(prompt)
+    content = await _call_gemini_api(prompt, profile="flash")
     if not content:
         return f"🚀 {name} (${symbol}) - A community-driven token launching on the Base network. Clank and Claw verified. Join the movement!"
     
