@@ -216,3 +216,32 @@ async def test_poll_uses_gecko_context_url(db):
         await worker._poll_and_process()
 
     assert captured_urls == ["https://www.geckoterminal.com/base/pools/0xbbbb"]
+
+
+# --- Token address deduplication tests ---
+
+def _make_worker_simple() -> GeckoDetectorWorker:
+    db = MagicMock()
+    db.get_runtime_setting.return_value = None
+    return GeckoDetectorWorker(db=db)
+
+
+def test_mark_token_seen_returns_true_first_time():
+    w = _make_worker_simple()
+    assert w._mark_token_seen("0xabc") is True
+
+
+def test_mark_token_seen_returns_false_within_cooldown():
+    w = _make_worker_simple()
+    w._mark_token_seen("0xabc")
+    assert w._mark_token_seen("0xabc") is False
+
+
+def test_mark_token_seen_returns_true_after_cooldown_expires():
+    w = _make_worker_simple()
+    w._mark_token_seen("0xabc")
+    # Manually expire by backdating the recorded time
+    w._token_address_processed_at["0xabc"] = datetime.now(timezone.utc) - timedelta(
+        seconds=w._token_address_cooldown_seconds + 1
+    )
+    assert w._mark_token_seen("0xabc") is True

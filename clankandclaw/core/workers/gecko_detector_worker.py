@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
@@ -13,11 +14,13 @@ import httpx
 from clankandclaw.config import StealthConfig
 from clankandclaw.core.detectors.gecko_detector import normalize_gecko_payload
 from clankandclaw.core.pipeline import process_candidate
-from clankandclaw.utils.llm import validate_gecko_candidate_with_llm
+from clankandclaw.utils.llm import enrich_signal_with_llm, validate_gecko_candidate_with_llm
+from clankandclaw.utils.market_memory import load_market_memory, summarize_market_memory
 from clankandclaw.database.manager import DatabaseManager
 from clankandclaw.utils.stealth_client import StealthClient
 
 logger = logging.getLogger(__name__)
+_EVM_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -108,6 +111,8 @@ class GeckoDetectorWorker:
         self._pool_last_hot_score: dict[str, int] = {}
         self._pool_last_volume_m5: dict[str, float] = {}
         self._pool_last_notified_at: dict[str, datetime] = {}
+        self._token_address_processed_at: dict[str, datetime] = {}
+        self._token_address_cooldown_seconds: float = 900.0  # 15 minutes
         self._stealth_config = stealth_config or StealthConfig()
         self._last_request_at: datetime | None = None
         self._stealth: StealthClient | None = None
@@ -247,8 +252,13 @@ class GeckoDetectorWorker:
         token_id = str(token_data.get("id") or "")
         
         if token_id and token_id in token_index:
-            return token_index[token_id]
-            
+            token = dict(token_index[token_id])
+            if "address" not in token:
+                matched = _EVM_ADDRESS_RE.search(token_id)
+                if matched:
+                    token["address"] = matched.group(0)
+            return token
+
         # Fallback: if not in index, look for any token in pool attributes that isn't WETH/SOL
         attrs = pool.get("attributes") or {}
         pname = str(attrs.get("name") or "").lower()
@@ -256,7 +266,12 @@ class GeckoDetectorWorker:
             parts = pname.split(" / ")
             # If we know the network, we might know the common quote token name
             # but for now, we just return {} if relationship lookup failed
-            
+
+        if token_id:
+            matched = _EVM_ADDRESS_RE.search(token_id)
+            if matched:
+                return {"address": matched.group(0)}
+
         return {}
 
     def _profile_for_network(self, network: str, scan_mode: str | None = None) -> dict[str, float]:
@@ -290,21 +305,29 @@ class GeckoDetectorWorker:
                 "signal_tag": "gecko_trending",
             },
             "solana": {
-                "min_volume_h1_usd": 100000.0, "min_tx_count_h1": 200.0, "min_liquidity_usd": 35000.0,
-                "max_pool_age_minutes": 1440.0, "min_hot_points": 3.0, "require_target_source": 0.0,
+                "min_volume_m5_usd": 3400.0, "min_volume_m15_usd": 9500.0, "min_tx_count_m5": 17.0, "min_liquidity_usd": 11000.0,
+                "max_pool_age_minutes": 1440.0, "min_hot_points": 5.0, "require_target_source": 0.0,
                 "scan_mode": "trending_pools",
                 "required_dex_ids": ["raydium", "raydium-clmm", "meteora", "orca", "fluxbeam", "lifinity-v2"],
+                "min_spike_ratio": 0.22,
+                "check_buy_ratio": 1.0,
+                "signal_tag": "gecko_solana_momentum",
             },
             "bsc": {
-                "min_volume_h1_usd": 80000.0, "min_tx_count_h1": 150.0, "min_liquidity_usd": 25000.0,
-                "max_pool_age_minutes": 1440.0, "min_hot_points": 3.0, "require_target_source": 0.0,
+                "min_volume_m5_usd": 3200.0, "min_volume_m15_usd": 9000.0, "min_tx_count_m5": 16.0, "min_liquidity_usd": 11000.0,
+                "max_pool_age_minutes": 1440.0, "min_hot_points": 4.0, "require_target_source": 0.0,
                 "scan_mode": "trending_pools",
                 "required_dex_ids": ["pancakeswap_v2", "pancakeswap_v3", "pancakeswap_v4", "uniswap_v3"],
+                "min_spike_ratio": 0.22,
+                "check_buy_ratio": 1.0,
+                "signal_tag": "gecko_bsc_momentum",
             },
             "eth": {
-                "min_volume_m5_usd": 1000.0, "min_volume_m15_usd": 3000.0, "min_tx_count_m5": 8.0,
-                "min_liquidity_usd": 5000.0, "max_pool_age_minutes": 90.0, "min_hot_points": 3.0,
-                "require_target_source": 1.0, "scan_mode": "new_pools",
+                "min_volume_m5_usd": 1500.0, "min_volume_m15_usd": 4200.0, "min_tx_count_m5": 8.0,
+                "min_liquidity_usd": 6000.0, "max_pool_age_minutes": 120.0, "min_hot_points": 3.0,
+                "require_target_source": 0.0, "scan_mode": "new_pools",
+                "check_buy_ratio": 1.0,
+                "signal_tag": "gecko_eth_new_launch",
             },
         }
         # Select correct Base sub-profile based on scan_mode
@@ -374,6 +397,7 @@ class GeckoDetectorWorker:
             # Volume Momentum Gate: recent m5 volume must be significant
             stage1_fast_spike = (
                 volume_m5 >= float(profile.get("min_volume_m5_usd", 1.0))
+                and volume_m15 >= float(profile.get("min_volume_m15_usd", 1.0))
                 and tx_count_m5 >= int(float(profile.get("min_tx_count_m5", 1.0)))
                 and liquidity_usd >= float(profile["min_liquidity_usd"])
                 and age_minutes <= float(profile["max_pool_age_minutes"])
@@ -536,6 +560,26 @@ class GeckoDetectorWorker:
         if stale:
             logger.debug("Evicted %d stale pool state entries", len(stale))
 
+        # Also evict stale token address entries
+        token_cutoff = datetime.now(timezone.utc) - timedelta(seconds=self._token_address_cooldown_seconds * 2)
+        stale_tokens = [addr for addr, ts in self._token_address_processed_at.items() if ts < token_cutoff]
+        for addr in stale_tokens:
+            self._token_address_processed_at.pop(addr, None)
+        if stale_tokens:
+            logger.debug("Evicted %d stale token address entries", len(stale_tokens))
+
+    def _mark_token_seen(self, token_address: str) -> bool:
+        """Return True and record if token_address has not been processed within cooldown.
+        Return False if seen recently — caller should skip this pool."""
+        if not token_address:
+            return True  # no address, allow through
+        now = datetime.now(timezone.utc)
+        last = self._token_address_processed_at.get(token_address)
+        if last is not None and (now - last).total_seconds() < self._token_address_cooldown_seconds:
+            return False
+        self._token_address_processed_at[token_address] = now
+        return True
+
     def _should_process_hot_pool(self, pool_id: str, stats: dict[str, Any]) -> bool:
         now = datetime.now(timezone.utc)
         last_processed_at = self._pool_processed_at.get(pool_id)
@@ -668,6 +712,15 @@ class GeckoDetectorWorker:
 
                 token_data = self._extract_base_token(pool, token_index)
 
+                token_address = (token_data.get("address") or "").strip().lower()
+                if token_address and not self._mark_token_seen(token_address):
+                    logger.debug(
+                        "Skipping pool %s: token %s already processed within cooldown",
+                        pool_id, token_address,
+                    )
+                    skipped_by_cooldown += 1
+                    continue
+
                 raw_name = (token_data.get("name") or attrs.get("name") or "").strip()
                 token_symbol = (token_data.get("symbol") or "").strip().upper()
 
@@ -694,6 +747,7 @@ class GeckoDetectorWorker:
                     "author": "geckoterminal",
                     "timestamp": attrs.get("pool_created_at"),
                     "token_data": token_data,
+                    "token_address": token_data.get("address"),
                     "token_name": token_name,
                     "token_symbol": token_symbol,
                     "network": network,
@@ -750,6 +804,11 @@ class GeckoDetectorWorker:
 
                 # Build metadata from payload
                 token_data = payload.get("token_data") or {}
+                image_candidates: list[str] = []
+                for key in ("image_url", "image", "logo_url", "logo", "thumb", "large"):
+                    value = token_data.get(key)
+                    if isinstance(value, str) and value.startswith(("http://", "https://")):
+                        image_candidates.append(value)
                 metadata = {
                     "network": payload.get("network", "unknown"),
                     "token_name": payload.get("token_name") or token_data.get("name") or "",
@@ -763,13 +822,62 @@ class GeckoDetectorWorker:
                     "buy_ratio_m5": float(payload.get("buy_ratio_m5") or 0.0),
                     "pool_age_minutes": float(payload.get("pool_age_minutes") or 999.0),
                     "dex": payload.get("dex", "unknown"),
-                    "token_address": token_data.get("address"),
+                    "token_address": payload.get("token_address") or token_data.get("address"),
                     "fdv_usd": float(payload.get("fdv_usd") or 0.0),
                     "websites": payload.get("websites") or [],
                     "socials": payload.get("socials") or [],
                     "context_url": context_url,
-
+                    "image_url": image_candidates[0] if image_candidates else None,
+                    "image_candidates": image_candidates,
                 }
+                network_lc = str(metadata.get("network") or "base").strip().lower()
+                market_memory_hint = ""
+                try:
+                    market_memory_hint = summarize_market_memory(load_market_memory(self.db, network_lc))
+                except Exception:
+                    market_memory_hint = ""
+                if market_memory_hint:
+                    metadata["ai_market_memory_hint_applied"] = True
+                    metadata["ai_market_memory_hint"] = market_memory_hint[:240]
+
+                # --- Narrative Enrichment (review path; non-blocking) ---
+                # Lightweight LLM enrichment to improve narrative quality for cards/scoring.
+                # Keep this cheap and bounded to avoid 24/7 cost spikes.
+                if (
+                    metadata.get("token_name")
+                    and metadata.get("token_symbol")
+                    and scored.score >= 75
+                ):
+                    try:
+                        enrichment_text = (
+                            f"Token {metadata['token_name']} ({metadata['token_symbol']}) on "
+                            f"{metadata.get('network', 'base').upper()}. "
+                            f"m5 volume ${(metadata.get('volume') or {}).get('m5') or 0}, "
+                            f"m15 ${(metadata.get('volume') or {}).get('m15') or 0}, "
+                            f"tx_m5 {(metadata.get('transactions') or {}).get('m5') or 0}, "
+                            f"liq ${metadata.get('liquidity_usd') or 0}. "
+                            f"{candidate.raw_text}"
+                        )
+                        llm_enrichment = await asyncio.wait_for(
+                            enrich_signal_with_llm(
+                                enrichment_text,
+                                chain=network_lc,
+                                market_memory_hint=market_memory_hint,
+                            ),
+                            timeout=4.0,
+                        )
+                        if isinstance(llm_enrichment, dict) and llm_enrichment:
+                            metadata["ai_enriched"] = True
+                            if llm_enrichment.get("bullish_score") is not None:
+                                metadata["ai_bullish_score"] = int(llm_enrichment.get("bullish_score") or 0)
+                            if llm_enrichment.get("is_genuine_launch") is not None:
+                                metadata["ai_is_genuine"] = bool(llm_enrichment.get("is_genuine_launch"))
+                            if llm_enrichment.get("ai_rationale"):
+                                metadata["ai_rationale"] = str(llm_enrichment.get("ai_rationale"))
+                            if llm_enrichment.get("suggested_description") and not metadata.get("ai_description"):
+                                metadata["ai_description"] = str(llm_enrichment.get("suggested_description"))
+                    except Exception as exc:
+                        logger.debug("Narrative enrichment skipped for %s: %s", candidate.id, exc)
 
                 # --- LLM Quality Gate (auto-deploy path only) ---
                 # Only fires for candidates heading toward auto-deploy.
@@ -796,10 +904,15 @@ class GeckoDetectorWorker:
                             liquidity=float(payload.get("liquidity_usd") or 0.0),
                             age_minutes=float(payload.get("pool_age_minutes") or 999.0),
                             scan_mode=payload.get("scan_mode", "new_pools"),
+                            network=network_lc,
+                            market_memory_hint=market_memory_hint,
                         )
 
                         if llm_result.get("description"):
                             metadata["ai_description"] = llm_result["description"]
+                        if llm_result.get("narrative_type"):
+                            metadata["ai_narrative_type"] = llm_result["narrative_type"]
+                        metadata["ai_narrative_fit"] = bool(llm_result.get("narrative_fit", True))
 
                         if not llm_result.get("safe", True):
                             risk = llm_result.get("risk") or "flagged"
@@ -819,6 +932,18 @@ class GeckoDetectorWorker:
                                 review_priority="review",
                                 auto_trigger=False,
                             )
+                        elif metadata.get("ai_narrative_fit") is False:
+                            # Keep candidate reviewable but block blind auto-deploy.
+                            from clankandclaw.models.token import ScoredCandidate
+                            scored = ScoredCandidate(
+                                candidate_id=scored.candidate_id,
+                                score=scored.score,
+                                decision="review",
+                                reason_codes=scored.reason_codes + ["llm_narrative_mismatch"],
+                                recommended_platform=scored.recommended_platform,
+                                review_priority="review",
+                                auto_trigger=False,
+                            )
                     except Exception as exc:
                         logger.debug("LLM gate skipped for %s: %s", candidate.id, exc)
 
@@ -833,6 +958,29 @@ class GeckoDetectorWorker:
                         merged_codes.append(code)
 
                 if self._telegram_worker:
+                    # Persist enriched metadata so downstream deploy/detail cards can use
+                    # stable token fields even after metadata compaction.
+                    persisted_meta = dict(candidate.metadata or {})
+                    persisted_meta.update(metadata)
+                    try:
+                        self.db.save_candidate_and_decision(
+                            candidate_id=candidate.id,
+                            source=candidate.source,
+                            source_event_id=candidate.source_event_id,
+                            fingerprint=candidate.fingerprint,
+                            raw_text=candidate.raw_text,
+                            score=scored.score,
+                            decision=scored.decision,
+                            reason_codes=merged_codes,
+                            recommended_platform=scored.recommended_platform,
+                            review_priority=scored.review_priority,
+                            auto_trigger=scored.auto_trigger,
+                            observed_at=candidate.observed_at,
+                            metadata=persisted_meta,
+                        )
+                    except Exception as exc:
+                        logger.debug("Failed to persist enriched metadata for %s: %s", candidate.id, exc)
+
                     self._schedule_review_notification(
                         candidate.id,
                         scored.review_priority,
