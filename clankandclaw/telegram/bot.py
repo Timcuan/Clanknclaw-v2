@@ -21,6 +21,7 @@ from clankandclaw.telegram.ui import (
     _build_dashboard_keyboard, _build_back_home_keyboard, _build_tools_keyboard, _build_category_keyboard,
     build_action_callback_data as ui_build_action_callback_data,
     build_forum_topic_plan as ui_build_forum_topic_plan,
+    _SIGNAL_MAP,
 )
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 
 try:
     from aiogram import Bot, Dispatcher, F
+    from aiogram.exceptions import TelegramBadRequest
     from aiogram.filters import Command, StateFilter
     from aiogram.fsm.context import FSMContext
     from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -43,6 +45,7 @@ except ImportError:
     InlineKeyboardButton = Any  # type: ignore
     Message = Any  # type: ignore
     BotCommand = Any  # type: ignore
+    TelegramBadRequest = Exception  # type: ignore
     FSMContext = Any  # type: ignore
     State = Any  # type: ignore
     StatesGroup = Any  # type: ignore
@@ -117,6 +120,60 @@ def _format_reason_label(reason: str) -> str:
     return text if text else "signal"
 
 
+def _row_get(row: Any, key: str, default: Any = None) -> Any:
+    """Compat getter for dict-like objects and sqlite3.Row."""
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        keys = row.keys()
+    except Exception:
+        keys = ()
+    if key in keys:
+        try:
+            return row[key]
+        except Exception:
+            return default
+    return default
+
+
+def _parse_detector_health(raw_value: str | None) -> dict[str, str]:
+    if not raw_value:
+        return {"status": "unknown", "reason": "", "until": ""}
+    try:
+        parsed = json.loads(raw_value)
+        if isinstance(parsed, dict):
+            return {
+                "status": str(parsed.get("status") or "unknown").strip().lower(),
+                "reason": str(parsed.get("reason") or "").strip(),
+                "until": str(parsed.get("until") or "").strip(),
+            }
+    except Exception:
+        pass
+    return {"status": "unknown", "reason": "", "until": ""}
+
+
+def build_detector_health_alerts(runtime_get: Callable[[str], str | None]) -> str:
+    labels = [
+        ("health.x_detector", "X Detector"),
+        ("health.farcaster_detector", "Farcaster Detector"),
+    ]
+    lines: list[str] = []
+    for key, label in labels:
+        health = _parse_detector_health(runtime_get(key))
+        status = health.get("status", "unknown")
+        if status in {"ok", "healthy", ""}:
+            continue
+        reason = health.get("reason") or "unknown"
+        until = health.get("until") or ""
+        line = f"🟠 <b>{label}:</b> {html.escape(reason)}"
+        if until:
+            line += f" (until {html.escape(until)})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def build_review_message(
     candidate_id: str,
     review_priority: str,
@@ -131,10 +188,7 @@ def build_review_message(
 ) -> str:
     del candidate_id
     metadata = metadata or {}
-    reason_view = reason_codes[:_MAX_REASONS]
-    reasons = ", ".join(_format_reason_label(item) for item in reason_view) if reason_view else "—"
-    if len(reason_codes) > _MAX_REASONS:
-        reasons += f" (+{len(reason_codes) - _MAX_REASONS})"
+
     priority_emoji = "🔥" if review_priority == "priority_review" else "📋"
     priority_label = "High" if review_priority == "priority_review" else "Review"
     source_label = _source_label(source)
@@ -142,22 +196,63 @@ def build_review_message(
     token_symbol = _fmt_text(metadata.get("token_symbol"), fallback="N/A")
     network = _fmt_text(metadata.get("network"), fallback="unknown")
     network_icon = _network_icon(network)
-    confidence_tier = _fmt_text(metadata.get("confidence_tier"), fallback="n/a")
-    liquidity_usd = _fmt_num(metadata.get("liquidity_usd"), digits=2, fallback="0.00")
+
+    # Market data
+    liquidity_usd = _fmt_num(metadata.get("liquidity_usd"), digits=0, fallback="0")
     volume = metadata.get("volume") or {}
     tx_data = metadata.get("transactions") or {}
-    volume_m5 = _fmt_num(volume.get("m5"), digits=2, fallback="0.00")
-    tx_m5 = _fmt_num(tx_data.get("m5"), fallback="0")
+    volume_m5 = _fmt_num(volume.get("m5"), digits=0, fallback="0")
+    tx_m5_raw = tx_data.get("m5")
+    if isinstance(tx_m5_raw, dict):
+        tx_display = f"{tx_m5_raw.get('buys', '?')}B / {tx_m5_raw.get('sells', '?')}S"
+    else:
+        tx_display = _fmt_num(tx_m5_raw, fallback="0")
+    fdv_raw = metadata.get("fdv_usd")
+    fdv_str = f" · FDV ${_fmt_num(fdv_raw, digits=0)}" if fdv_raw else ""
+    age_raw = metadata.get("pool_age_minutes")
+    age_str = f" · {int(age_raw)}m old" if (age_raw is not None and age_raw < 999) else ""
+
+    # Signals — use icons from _SIGNAL_MAP, fall back to formatted label
+    _SKIP = {"network_base", "base_score"}
+    signal_parts: list[str] = []
+    for code in reason_codes[:_MAX_REASONS]:
+        if code in _SKIP or code.startswith("llm_risk_"):
+            continue
+        signal_parts.append(_SIGNAL_MAP.get(code) or _format_reason_label(code))
+    signals = ", ".join(signal_parts) if signal_parts else "—"
+    if len(reason_codes) > _MAX_REASONS:
+        signals += f" (+{len(reason_codes) - _MAX_REASONS})"
 
     lines = [
-        f"{network_icon} <b>{_fmt_text(token_name)}</b> <code>${_fmt_text(token_symbol)}</code>",
-        f"<i>{source_label} • {_fmt_text(network).upper()}</i>",
+        f"{network_icon} <b>{token_name}</b> <code>${token_symbol}</code>",
+        f"<i>{source_label} · {network.upper()} · {priority_emoji} {priority_label}</i>",
         "",
-        f"• <b>Score:</b> {_fmt_num(score)} {priority_emoji} <b>{priority_label}</b>",
-        f"• <b>Market:</b> m5 ${volume_m5} · tx {tx_m5} · liq ${liquidity_usd}",
-        f"• <b>Confidence:</b> {confidence_tier}",
-        f"• <b>Signals:</b> {_fmt_text(_shorten_text(reasons, 120), fallback='—')}",
+        f"• <b>Score:</b> {_fmt_num(score)}",
+        f"• <b>Market:</b> Liq ${liquidity_usd} · Vol(5m) ${volume_m5} · Tx {tx_display}{fdv_str}{age_str}",
     ]
+
+    # CA with explorer link
+    ca = str(metadata.get("token_address") or "")
+    if ca and len(ca) > 10:
+        ca_url = html.escape(_get_explorer_url(network, "address", ca), quote=True)
+        lines.append(f"• <b>CA:</b> <code>{ca}</code> <a href=\"{ca_url}\">↗</a>")
+
+    lines.append(f"• <b>Signals:</b> {_fmt_text(_shorten_text(signals, 140), fallback='—')}")
+
+    # Social links
+    social_links: list[str] = []
+    for web in metadata.get("websites") or []:
+        if isinstance(web, str) and web.startswith("http"):
+            social_links.append(f"<a href='{html.escape(web, quote=True)}'>🌐 Web</a>")
+    for soc in metadata.get("socials") or []:
+        if not isinstance(soc, str):
+            continue
+        if "twitter.com" in soc or "x.com" in soc:
+            social_links.append(f"<a href='{html.escape(soc, quote=True)}'>✖ X</a>")
+        elif "t.me" in soc or "telegram.org" in soc:
+            social_links.append(f"<a href='{html.escape(soc, quote=True)}'>✈ TG</a>")
+    if social_links:
+        lines.append("• <b>Links:</b> " + " · ".join(social_links))
 
     if author_handle:
         lines.append(f"• <b>Author:</b> @{_fmt_text(author_handle, fallback='unknown')}")
@@ -202,45 +297,44 @@ def build_candidate_detail_message(
     except Exception:
         meta = {}
 
+    token_name = _fmt_text(meta.get("token_name") or meta.get("suggested_name"), fallback="Unknown")
+    token_symbol = _fmt_text(meta.get("token_symbol") or meta.get("suggested_symbol"), fallback="N/A")
+    network = _fmt_text(meta.get("network"), fallback="unknown")
+    network_icon = _network_icon(network)
+    volume = meta.get("volume") or {}
+    tx_data = meta.get("transactions") or {}
+    volume_m5 = _fmt_num(volume.get("m5"), digits=2, fallback="0.00")
+    liquidity = _fmt_num(meta.get("liquidity_usd"), digits=2, fallback="0.00")
+    tx_m5 = _fmt_num(tx_data.get("m5"), fallback="0")
+    score = decision["score"] if decision else "n/a"
+    decision_label = decision["decision"] if decision else "n/a"
+    signals = _row_get(decision, "reason_codes", "—") if decision else "—"
+    if not signals:
+        signals = "—"
+    review_status = review_item["status"] if review_item else "n/a"
+    deploy_status = deployment["status"] if deployment else "n/a"
+    short_id = _fmt_truncate(candidate["id"], 20)
+
     lines = [
-        "🔎 <b>Candidate Detail</b>",
+        f"{network_icon} <b>{token_name}</b> <code>${token_symbol}</code>",
+        f"<i>{_source_label(candidate['source'])} • {_fmt_text(network).upper()} • {_fmt_text(short_id)}</i>",
         "",
-        "<b>Overview</b>",
-        f"• <b>ID:</b> {_fmt_inline_code(candidate['id'])}",
-        f"• <b>Source:</b> {_source_label(candidate['source'])}",
-        f"• <b>Author:</b> @{_fmt_text(meta.get('author_handle'))}" if meta.get("author_handle") else "• <b>Author:</b> n/a",
-        f"• <b>Link:</b> <a href=\"{html.escape(meta['context_url'], quote=True)}\">Open source</a>" if meta.get("context_url") else "• <b>Link:</b> n/a",
+        "<b>Snapshot</b>",
+        f"• <b>Score:</b> {_fmt_text(score)} • <b>Decision:</b> {_fmt_text(decision_label)}",
+        f"• <b>Market:</b> m5 ${volume_m5} • tx {tx_m5} • liq ${liquidity}",
+        f"• <b>Signals:</b> {_fmt_text(_shorten_text(str(signals), 140), fallback='—')}",
+        f"• <b>Review:</b> {_fmt_text(review_status)} • <b>Deploy:</b> {_fmt_text(deploy_status)}",
     ]
-
-    if decision:
-        lines.extend(
-            [
-                f"<b>Score:</b> {decision['score']}",
-                f"<b>Decision:</b> {decision['decision']}",
-                f"<b>Signals:</b> {decision['reason_codes'] or '—'}",
-                f"<b>Platform:</b> {decision['recommended_platform']}",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "<b>Score:</b> n/a",
-                "<b>Decision:</b> n/a",
-                "<b>Signals:</b> n/a",
-                "<b>Platform:</b> n/a",
-            ]
-        )
-
-    lines.append(f"<b>Review:</b> {review_item['status']}" if review_item else "<b>Review:</b> n/a")
-
-    if deployment:
-        lines.append(f"<b>Deploy:</b> {deployment['status']}")
-        if deployment.get("contract_address"):
-            lines.append(f"<b>Contract:</b> <code>{deployment['contract_address']}</code>")
-        if deployment.get("tx_hash"):
-            lines.append(f"<b>TX:</b> <code>{deployment['tx_hash']}</code>")
-    else:
-        lines.append("<b>Deploy:</b> n/a")
+    if meta.get("author_handle"):
+        lines.append(f"• <b>Author:</b> @{_fmt_text(meta.get('author_handle'))}")
+    if meta.get("context_url"):
+        lines.append(f'• <a href="{html.escape(meta["context_url"], quote=True)}"><i>Open source</i></a>')
+    contract_address = _row_get(deployment, "contract_address")
+    tx_hash = _row_get(deployment, "tx_hash")
+    if contract_address:
+        lines.append(f"• <b>CA:</b> <code>{contract_address}</code>")
+    if tx_hash:
+        lines.append(f"• <b>TX:</b> <code>{tx_hash}</code>")
 
     raw_text = candidate["raw_text"] or ""
     if raw_text:
@@ -256,15 +350,23 @@ def build_deploys_message(rows: list[Any]) -> str:
     if not rows:
         return "📭 No deployments yet."
 
-    lines = [f"🚀 <b>Recent Deployments</b>", f"Total: <b>{len(rows)}</b>", ""]
+    lines = [f"📂 <b>Recent Deployments</b>", f"Total: <b>{len(rows)}</b>", ""]
     for row in rows:
         if row["status"] == "deploy_success":
-            contract = row["contract_address"] or "n/a"
-            tx = row["tx_hash"] or "n/a"
-            lines.append(
-                f"✅ {_fmt_inline_code(row['candidate_id'])} | "
-                f"{_fmt_inline_code(contract)} | {_fmt_inline_code(tx)}"
-            )
+            contract = row["contract_address"] or ""
+            tx = row["tx_hash"] or ""
+            # Infer network from candidate_id for explorer links
+            cid = str(row["candidate_id"] or "").lower()
+            net = "solana" if "solana" in cid else "bsc" if "bsc" in cid else "eth" if "eth" in cid else "base"
+            ca_link = ""
+            tx_link = ""
+            if contract:
+                ca_url = html.escape(_get_explorer_url(net, "address", contract), quote=True)
+                ca_link = f"{_fmt_inline_code(contract)} <a href=\"{ca_url}\">↗</a>"
+            if tx:
+                tx_url = html.escape(_get_explorer_url(net, "tx", tx), quote=True)
+                tx_link = f"{_fmt_inline_code(tx)} <a href=\"{tx_url}\">↗</a>"
+            lines.append(f"✅ {_fmt_inline_code(row['candidate_id'])} | {ca_link} | {tx_link}")
             continue
 
         error_code = row["error_code"] or "deploy_failed"
@@ -285,32 +387,33 @@ def build_review_keyboard(
     *,
     encode_candidate_id: Callable[[str], str] | None = None,
 ) -> Any:
-    del context_url
     if not AIOGRAM_AVAILABLE:
         raise ImportError("aiogram is required for keyboard building")
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🚀 Deploy",
-                    callback_data=build_action_callback_data(
-                        "approve",
-                        candidate_id,
-                        encode_candidate_id=encode_candidate_id,
-                    ),
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                text="🚀 Deploy",
+                callback_data=build_action_callback_data(
+                    "approve",
+                    candidate_id,
+                    encode_candidate_id=encode_candidate_id,
                 ),
-                InlineKeyboardButton(
-                    text="🔎 Detail",
-                    callback_data=build_action_callback_data(
-                        "detail",
-                        candidate_id,
-                        encode_candidate_id=encode_candidate_id,
-                    ),
+            ),
+            InlineKeyboardButton(
+                text="🔎 Detail",
+                callback_data=build_action_callback_data(
+                    "detail",
+                    candidate_id,
+                    encode_candidate_id=encode_candidate_id,
                 ),
-            ],
-        ]
-    )
+            ),
+        ],
+    ]
+    if context_url:
+        keyboard.append([InlineKeyboardButton(text="🔗 Source", url=context_url)])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 
@@ -518,9 +621,10 @@ class TelegramBot:
                     return persisted
         return encoded_id
 
-    def _build_review_keyboard(self, candidate_id: str) -> Any:
+    def _build_review_keyboard(self, candidate_id: str, context_url: str | None = None) -> Any:
         return build_review_keyboard(
             candidate_id,
+            context_url=context_url,
             encode_candidate_id=self._encode_callback_candidate_id,
         )
 
@@ -945,6 +1049,10 @@ class TelegramBot:
             health_alerts += "🔴 <b>Review Thread:</b> Unpaired\n"
         if not is_deploy_paired:
             health_alerts += "🔴 <b>Deploy Thread:</b> Unpaired\n"
+
+        detector_alerts = build_detector_health_alerts(self._runtime_get)
+        if detector_alerts:
+            health_alerts += detector_alerts + "\n"
         
         if health_alerts:
             health_alerts = "<b>⚠️ SYSTEM ALERTS:</b>\n" + health_alerts + "\n"
@@ -996,7 +1104,7 @@ class TelegramBot:
             # Optimized: Run blocking DB call in background thread
             rows = await asyncio.to_thread(self._db.list_pending_reviews)
             msg = build_queue_message(rows)
-            await self._show_ui_view(event, _fmt_dashboard_header("Pending Queue", "📥") + msg, _build_dashboard_keyboard())
+            await self._show_ui_view(event, msg, _build_dashboard_keyboard())
         except Exception as exc:
             logger.error(f"Error listing queue: {exc}", exc_info=True)
             await self._show_ui_view(event, _fmt_dashboard_header("Notice", "⚠️") + "Error fetching queue.", _build_dashboard_keyboard())
@@ -1249,7 +1357,7 @@ class TelegramBot:
             # Optimized: Run blocking DB call in background thread
             rows = await asyncio.to_thread(self._db.list_recent_deployments, limit=10)
             msg = build_deploys_message(rows)
-            await self._show_ui_view(event, _fmt_dashboard_header("Recent History", "📂") + msg, _build_dashboard_keyboard())
+            await self._show_ui_view(event, msg, _build_dashboard_keyboard())
         except Exception as exc:
             logger.error(f"Error fetching deployments: {exc}", exc_info=True)
             await self._show_ui_view(event, _fmt_dashboard_header("Notice", "⚠️") + "Error fetching deployments.", _build_dashboard_keyboard())
@@ -1536,13 +1644,15 @@ class TelegramBot:
         self._bind_dynamic_thread("ops", thread_id)
         await message.answer(
             _fmt_dashboard_header("Manual Deploy Guide", "🧪") +
-            "<b>Direct Deploy:</b>\n"
-            "<code>/deploynow clanker \"Token Name\" SYMBOL auto optional description</code>\n\n"
-            "<b>Deploy Existing Candidate:</b>\n"
-            "<code>/deployca clanker &lt;candidate_id&gt;</code>\n\n"
+            "<b>Use wizard only (8 command set).</b>\n\n"
+            "Flow:\n"
+            "1. Open <b>Dashboard</b>\n"
+            "2. Choose <b>Manual Deploy Wizard</b>\n"
+            "3. Fill <b>platform, name, symbol, image, description</b>\n"
+            "4. Tap <b>Launch Deployment</b>\n\n"
             "Notes:\n"
-            "• Current executable platform: <b>clanker</b>\n"
-            "• Name with spaces must use quotes",
+            "• No additional slash command is needed\n"
+            "• Existing candidate deploy is available from candidate detail/edit",
             parse_mode="HTML",
             reply_markup=_build_back_home_keyboard(),
         )
@@ -1649,13 +1759,6 @@ class TelegramBot:
         deployment = self._db.get_latest_deployment_for_candidate(candidate_id)
         return build_candidate_detail_message(candidate, decision, review_item, deployment)
 
-    def _build_review_keyboard(self, candidate_id: str, context_url: str | None = None) -> Any:
-        return build_review_keyboard(
-            candidate_id,
-            context_url=context_url,
-            encode_candidate_id=self._encode_callback_candidate_id,
-        )
-
     async def _handle_detail(self, callback: CallbackQuery) -> None:
         if not callback.data or not callback.message:
             return
@@ -1665,6 +1768,53 @@ class TelegramBot:
         thread_id = getattr(callback.message, "message_thread_id", None)
         self._capture_operator_thread(thread_id)
         self._bind_dynamic_thread("review", thread_id)
+        encoded_candidate_id = callback.data.split(":", 1)[1]
+        candidate_id = self._decode_callback_candidate_id(encoded_candidate_id)
+        if not self._db:
+            await callback.answer("Database unavailable", show_alert=True)
+            return
+        try:
+            detail_message = await self._render_candidate_detail(candidate_id)
+            await callback.message.edit_text(
+                detail_message,
+                parse_mode="HTML",
+                reply_markup=self._build_review_keyboard(candidate_id),
+                disable_web_page_preview=True,
+            )
+            await callback.answer("Opened Detail")
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc).lower():
+                await callback.answer("Detail already open")
+                return
+            logger.error("Error rendering candidate detail: %s", exc, exc_info=True)
+            await callback.answer("Detail failed", show_alert=True)
+        except Exception as exc:
+            logger.error("Error rendering candidate detail: %s", exc, exc_info=True)
+            await callback.answer("Detail failed", show_alert=True)
+
+    def _resolve_candidate_brief(self, candidate_id: str) -> tuple[str, str, str, str]:
+        network = "base"
+        token_name = "Unknown"
+        token_symbol = "N/A"
+        if self._db:
+            try:
+                row = self._db.get_candidate(candidate_id)
+                if row:
+                    meta = json.loads(row["metadata_json"] or "{}")
+                    network = str(meta.get("network") or network)
+                    token_name = str(meta.get("token_name") or meta.get("suggested_name") or token_name)
+                    token_symbol = str(meta.get("token_symbol") or meta.get("suggested_symbol") or token_symbol)
+                    raw_text_val = _row_get(row, "raw_text")
+                    if (token_name == "Unknown" or token_symbol == "N/A") and raw_text_val:
+                        raw_text = str(raw_text_val)
+                        matched = re.search(r":\s*([A-Za-z0-9 ._-]{2,50})\s*\(([A-Za-z0-9]{2,10})\)", raw_text)
+                        if matched:
+                            token_name = matched.group(1).strip() or token_name
+                            token_symbol = matched.group(2).strip().upper() or token_symbol
+            except Exception:
+                pass
+        return _network_icon(network), _fmt_text(token_name), _fmt_text(token_symbol), network
+
     async def _handle_nav_status(self, callback: CallbackQuery, state: FSMContext) -> None:
         """Dashboard Navigation: Quick jump to Status."""
         await self._handle_status(callback, state)
@@ -1971,7 +2121,7 @@ class TelegramBot:
             await callback.message.edit_text(
                 updated,
                 parse_mode="HTML",
-                reply_markup=self._build_review_keyboard(candidate_id, mode="summary"),
+                reply_markup=self._build_review_keyboard(candidate_id),
                 disable_web_page_preview=True,
             )
             await callback.answer("Refreshed Summary")
@@ -2066,16 +2216,29 @@ class TelegramBot:
             logger.error(f"Error sending review notification: {exc}", exc_info=True)
             return None
 
-    async def send_deploy_preparing(self, candidate_id: str) -> None:
+    async def send_deploy_preparing(
+        self,
+        candidate_id: str,
+        *,
+        token_name: str | None = None,
+        token_symbol: str | None = None,
+        network: str | None = None,
+    ) -> None:
         """Notify that deploy preparation has started."""
         try:
+            if token_name and token_symbol:
+                resolved_name = _fmt_text(token_name)
+                resolved_symbol = _fmt_text(token_symbol)
+                resolved_network = str(network or "base").lower()
+                icon = _network_icon(resolved_network)
+            else:
+                icon, resolved_name, resolved_symbol, _ = self._resolve_candidate_brief(candidate_id)
             await self._send_bot_message(
                 text=(
-                    "⚙️ <b>Deploy Pipeline</b>\n\n"
-                    "<b>Status</b>\n"
-                    "• <b>Step:</b> preparing\n"
-                    f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}\n"
-                    "• <b>Action:</b> fetch image + upload IPFS"
+                    "⚙️ <b>Deploying</b>\n"
+                    f"{icon} <b>{resolved_name}</b> <code>${resolved_symbol}</code>\n"
+                    "• <b>Stage:</b> prepare metadata + image IPFS\n"
+                    f"• <b>Ref:</b> {_fmt_inline_code(_fmt_truncate(candidate_id, 24))}"
                 ),
                 parse_mode="HTML",
                 message_thread_id=self._thread_for("deploy"),
@@ -2088,17 +2251,28 @@ class TelegramBot:
         candidate_id: str,
         tx_hash: str,
         contract_address: str,
+        *,
+        token_name: str | None = None,
+        token_symbol: str | None = None,
+        network: str | None = None,
     ) -> None:
         """Send deploy success notification."""
         try:
+            if token_name and token_symbol:
+                resolved_name = _fmt_text(token_name)
+                resolved_symbol = _fmt_text(token_symbol)
+                resolved_network = str(network or "base").lower()
+                icon = _network_icon(resolved_network)
+            else:
+                icon, resolved_name, resolved_symbol, resolved_network = self._resolve_candidate_brief(candidate_id)
+            tx_url = html.escape(_get_explorer_url(resolved_network, "tx", tx_hash), quote=True)
+            ca_url = html.escape(_get_explorer_url(resolved_network, "address", contract_address), quote=True)
             await self._send_bot_message(
                 text=(
-                    "🎉 <b>Deploy Result</b>\n\n"
-                    "<b>Status</b>\n"
-                    "• <b>Outcome:</b> success\n"
-                    f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}\n"
-                    f"• <b>Contract:</b> {_fmt_inline_code(contract_address)}\n"
-                    f"• <b>TX:</b> {_fmt_inline_code(tx_hash)}"
+                    "✅ <b>Deploy Success</b>\n"
+                    f"{icon} <b>{resolved_name}</b> <code>${resolved_symbol}</code>\n"
+                    f"• <b>Contract:</b> <a href=\"{ca_url}\">{_fmt_inline_code(_fmt_truncate(contract_address, 14))}</a>\n"
+                    f"• <b>TX:</b> <a href=\"{tx_url}\">{_fmt_inline_code(_fmt_truncate(tx_hash, 18))}</a>"
                 ),
                 parse_mode="HTML",
                 message_thread_id=self._thread_for("deploy"),
@@ -2117,9 +2291,7 @@ class TelegramBot:
         try:
             await self._send_bot_message(
                 text=(
-                    "❌ <b>Deploy Result</b>\n\n"
-                    "<b>Status</b>\n"
-                    "• <b>Outcome:</b> failed\n"
+                    "❌ <b>Deploy Failed</b>\n"
                     f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}\n"
                     f"• <b>Error:</b> {_fmt_text(error_code)}\n"
                     f"• <b>Message:</b> {_fmt_text(error_message)}"
