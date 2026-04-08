@@ -30,6 +30,12 @@ def quick_filter(candidate: SignalCandidate) -> FilterDecision:
         hot_score = int(metadata.get("hot_score") or 0)
         spike_ratio_m1_m5 = float(metadata.get("spike_ratio_m1_m5") or 0.0)
         buy_ratio_m5 = float(metadata.get("buy_ratio_m5") or 0.0)
+        chain_quality = {
+            "base": {"min_volume_m5": 700.0, "min_tx_m5": 4, "min_liquidity": 2000.0, "override_hot": 5, "override_volume": 2200.0},
+            "solana": {"min_volume_m5": 3200.0, "min_tx_m5": 16, "min_liquidity": 11000.0, "override_hot": 6, "override_volume": 7000.0},
+            "bsc": {"min_volume_m5": 3200.0, "min_tx_m5": 16, "min_liquidity": 11000.0, "override_hot": 6, "override_volume": 7000.0},
+            "eth": {"min_volume_m5": 900.0, "min_tx_m5": 6, "min_liquidity": 3500.0, "override_hot": 5, "override_volume": 3000.0},
+        }.get(network, {"min_volume_m5": 1000.0, "min_tx_m5": 6, "min_liquidity": 4000.0, "override_hot": 6, "override_volume": 5000.0})
 
         # Hard reject: gate failed at detector level
         if gate_stage in {"stage1_failed", "stage2_failed", "stage3_failed"}:
@@ -46,12 +52,26 @@ def quick_filter(candidate: SignalCandidate) -> FilterDecision:
             return FilterDecision(False, ["gecko_sell_dominated"])
 
         strong_momentum = (
-            hot_score >= 5
-            and volume_m5 >= 2000
-            and tx_m5 >= 10
+            hot_score >= int(chain_quality["override_hot"])
+            and volume_m5 >= float(chain_quality["override_volume"])
+            and tx_m5 >= int(chain_quality["min_tx_m5"])
             and (spike_ratio_m1_m5 >= 0.2 or (volume_m1 >= 300 and tx_m1 >= 2))
         )
-        if confidence_tier in {"high", "medium"}:
+        has_quality_data = (
+            (isinstance(volume, dict) and any(k in volume for k in ("m5", "m15")))
+            and (isinstance(tx_data, dict) and any(k in tx_data for k in ("m5",)))
+            and ("liquidity_usd" in metadata)
+        )
+        quality_ok = (
+            (not has_quality_data)
+            or (
+                volume_m5 >= float(chain_quality["min_volume_m5"])
+                and tx_m5 >= int(chain_quality["min_tx_m5"])
+                and float(metadata.get("liquidity_usd") or 0.0) >= float(chain_quality["min_liquidity"])
+            )
+        )
+
+        if confidence_tier in {"high", "medium"} and quality_ok:
             return FilterDecision(True, [f"gecko_confidence_{confidence_tier}"])
         if strong_momentum:
             return FilterDecision(True, ["gecko_low_confidence_override"])
@@ -62,16 +82,20 @@ def quick_filter(candidate: SignalCandidate) -> FilterDecision:
         x_target_mention = bool(metadata.get("x_target_mention"))
         x_intent_score = int(metadata.get("x_intent_score") or 0)
         has_contract = bool(metadata.get("has_contract"))
-        if x_target_mention and (has_contract or x_intent_score >= 1):
+        if x_target_mention and (has_contract or x_intent_score >= 2):
             return FilterDecision(True, ["x_target_intent"])
+        if x_target_mention:
+            return FilterDecision(False, ["x_intent_too_low"])
 
     if candidate.source == "farcaster":
         metadata = candidate.metadata or {}
         fc_target_mention = bool(metadata.get("fc_target_mention"))
         fc_intent_score = int(metadata.get("fc_intent_score") or 0)
         has_contract = bool(metadata.get("has_contract"))
-        if fc_target_mention and (has_contract or fc_intent_score >= 1):
+        if fc_target_mention and (has_contract or fc_intent_score >= 2):
             return FilterDecision(True, ["farcaster_target_intent"])
+        if fc_target_mention:
+            return FilterDecision(False, ["fc_intent_too_low"])
 
     lowered = candidate.raw_text.lower()
     if not _contains_word(lowered, "deploy") and not _contains_word(lowered, "launch"):
