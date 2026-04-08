@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -66,22 +67,17 @@ async def test_farcaster_worker_process_event_sends_notification(db):
 @pytest.mark.asyncio
 async def test_farcaster_worker_sets_billing_blocked_on_402(db):
     worker = make_worker(db)
-    worker.process_event = AsyncMock()  # should not be called
+    mock_response = MagicMock()
+    mock_response.status_code = 402
+    with patch.object(worker, "_request_with_retry", AsyncMock(return_value=mock_response)):
+        processed = await worker._run_feed(MagicMock(), {})
 
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_response = MagicMock()
-        mock_response.status_code = 402
-        mock_response.raise_for_status = MagicMock()
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client_cls.return_value = mock_client
-
-        await worker._poll_and_process()
-
+    assert processed == 0
     assert worker._billing_blocked is True
-    worker.process_event.assert_not_awaited()
+    raw = worker.db.get_runtime_setting("health.farcaster_detector")
+    payload = json.loads(raw or "{}")
+    assert payload.get("status") == "degraded"
+    assert payload.get("reason") == "billing_402"
 
 
 def test_farcaster_seen_cache_deduplicates_in_o1_pattern(db):
@@ -92,3 +88,25 @@ def test_farcaster_seen_cache_deduplicates_in_o1_pattern(db):
         worker._mark_cast_seen(f"cast-{i}")
     assert len(worker._seen_cast_ids) <= worker._max_seen_cast_ids
     assert len(worker._seen_cast_id_set) <= worker._max_seen_cast_ids
+
+
+def _make_worker_with_channels(channels=None) -> FarcasterDetectorWorker:
+    db = MagicMock()
+    db.get_runtime_setting.return_value = None
+    return FarcasterDetectorWorker(
+        db=db,
+        channel_ids=channels or ["clanker", "bankr"],
+    )
+
+
+def test_farcaster_worker_stores_channel_ids():
+    w = _make_worker_with_channels(channels=["clanker", "bankr"])
+    assert "clanker" in w.channel_ids
+    assert "bankr" in w.channel_ids
+
+
+def test_farcaster_worker_channel_ids_default_empty():
+    db = MagicMock()
+    db.get_runtime_setting.return_value = None
+    w = FarcasterDetectorWorker(db=db)
+    assert w.channel_ids == []

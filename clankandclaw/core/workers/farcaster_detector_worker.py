@@ -1,6 +1,7 @@
 """Farcaster detector worker for polling and processing Farcaster signals."""
 
 import asyncio
+import json
 import logging
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,8 @@ class FarcasterDetectorWorker:
         max_results: int = 50,
         target_handles: list[str] | None = None,
         query_terms: list[str] | None = None,
+        channel_ids: list[str] | None = None,
+        channel_feed_url: str = "https://api.neynar.com/v2/farcaster/feed/channel",
         request_timeout_seconds: float = 20.0,
         max_requests_per_minute: int = 45,
         max_process_concurrency: int = 8,
@@ -47,6 +50,8 @@ class FarcasterDetectorWorker:
         self.max_results = max_results
         self.target_handles = [h.lower().lstrip("@") for h in (target_handles or ["bankr", "clanker"])]
         self.query_terms = query_terms or ["deploy", "launch", "contract", "ca", "token"]
+        self.channel_feed_url = channel_feed_url
+        self.channel_ids: list[str] = [c.lower().lstrip("/") for c in (channel_ids or [])]
         self.request_timeout_seconds = request_timeout_seconds
         self.max_requests_per_minute = max(1, max_requests_per_minute)
         self.max_process_concurrency = max(1, max_process_concurrency)
@@ -63,6 +68,8 @@ class FarcasterDetectorWorker:
         self._seen_cast_id_set: set[str] = set()
         self._max_seen_cast_ids = 5000
         self._billing_blocked = False
+        self._billing_blocked_until: datetime | None = None
+        self._last_billing_block_log_at: datetime | None = None
         self._stealth: StealthClient | None = None
         self._process_semaphore = asyncio.Semaphore(self.max_process_concurrency)
         self._query_semaphore = asyncio.Semaphore(self.max_query_concurrency)
@@ -76,6 +83,19 @@ class FarcasterDetectorWorker:
         self._request_interval_multiplier = 1.0
         self._provider_cooldown_until: datetime | None = None
         self._consecutive_request_failures = 0
+        self._health_runtime_key = "health.farcaster_detector"
+
+    def _set_health(self, status: str, reason: str | None = None, until: datetime | None = None) -> None:
+        payload = {
+            "status": status,
+            "reason": reason or "",
+            "until": until.isoformat() if until else "",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self.db.set_runtime_setting(self._health_runtime_key, json.dumps(payload, separators=(",", ":")))
+        except Exception as exc:
+            logger.debug("Failed writing runtime health for farcaster_detector: %s", exc)
 
     def set_telegram_worker(self, telegram_worker: Any) -> None:
         self._telegram_worker = telegram_worker
@@ -86,6 +106,9 @@ class FarcasterDetectorWorker:
             return
         if not self.api_key:
             logger.warning("Farcaster detector started without NEYNAR_API_KEY; polling may fail")
+            self._set_health("degraded", "missing_api_key")
+        else:
+            self._set_health("ok")
         self._running = True
         self._last_poll_time = datetime.now(timezone.utc)
         self._stealth = StealthClient(self._stealth_config, timeout=self.request_timeout_seconds)
@@ -140,8 +163,21 @@ class FarcasterDetectorWorker:
             logger.warning("Farcaster detector cooldown active until %s", self._provider_cooldown_until.isoformat())
             return
         if self._billing_blocked:
-            logger.warning("Farcaster detector polling paused: Neynar API restricted. Check plan limits.")
-            return
+            now = datetime.now(timezone.utc)
+            if self._billing_blocked_until and now >= self._billing_blocked_until:
+                self._billing_blocked = False
+                self._billing_blocked_until = None
+                self._last_billing_block_log_at = None
+                self._set_health("ok")
+                logger.info("Farcaster detector billing lock cleared; retrying provider calls")
+            else:
+                if (
+                    self._last_billing_block_log_at is None
+                    or (now - self._last_billing_block_log_at).total_seconds() >= 600
+                ):
+                    logger.warning("Farcaster detector polling paused: Neynar API restricted. Check plan limits.")
+                    self._last_billing_block_log_at = now
+                return
 
         api_headers: dict[str, str] = {}
         if self.api_key:
@@ -152,6 +188,8 @@ class FarcasterDetectorWorker:
             stealth = StealthClient(self._stealth_config, timeout=self.request_timeout_seconds)
 
         processed_count = await self._run_feed(stealth, api_headers)
+        channel_count = await self._run_channel_feeds(stealth, api_headers)
+        processed_count += channel_count
 
         self._last_poll_time = datetime.now(timezone.utc)
         logger.info(
@@ -188,10 +226,12 @@ class FarcasterDetectorWorker:
         stealth: StealthClient,
         api_headers: dict[str, str],
         params: dict[str, Any],
+        url_override: str | None = None,
     ) -> httpx.Response:
+        url = url_override or self.api_url
         for attempt in range(3):
             await self._respect_rate_limit(stealth)
-            response = await stealth.get(self.api_url, headers=api_headers, params=params)
+            response = await stealth.get(url, headers=api_headers, params=params)
             self._last_request_at = datetime.now(timezone.utc)
             stealth.on_response(response.status_code)
             if response.status_code in {403, 429, 500, 502, 503, 504} and attempt < 2:
@@ -271,6 +311,8 @@ class FarcasterDetectorWorker:
             
             if response.status_code == 402:
                 self._billing_blocked = True
+                self._billing_blocked_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+                self._set_health("degraded", "billing_402", self._billing_blocked_until)
                 logger.error("Neynar API returned 402 PaymentRequired")
                 return 0
             
@@ -328,6 +370,67 @@ class FarcasterDetectorWorker:
             if process_tasks:
                 await asyncio.gather(*process_tasks)
             return len(process_tasks)
+
+    async def _run_channel_feeds(
+        self,
+        stealth: StealthClient,
+        api_headers: dict[str, str],
+    ) -> int:
+        if not self.channel_ids:
+            return 0
+        total = 0
+        for channel_id in self.channel_ids:
+            async with self._query_semaphore:
+                try:
+                    params = {"channel_ids": channel_id, "limit": self.max_results}
+                    response = await self._request_with_retry(
+                        stealth, api_headers, params,
+                        url_override=self.channel_feed_url,
+                    )
+                    if response.status_code == 402:
+                        logger.warning("Neynar 402 for channel=%s", channel_id)
+                        continue
+                    response.raise_for_status()
+                    casts = response.json().get("casts", [])
+                    logger.info("Fetched %d casts from channel=%s", len(casts), channel_id)
+                    process_tasks: list[asyncio.Task[None]] = []
+                    for cast in casts:
+                        cast_id = str(cast.get("hash") or cast.get("id") or "")
+                        if not cast_id or not self._mark_cast_seen(cast_id):
+                            continue
+                        author_data = cast.get("author") or {}
+                        reactions = cast.get("reactions") or {}
+                        replies = cast.get("replies") or {}
+                        event = {
+                            "id": cast_id,
+                            "text": cast.get("text") or "",
+                            "author": {"username": author_data.get("username")},
+                            "created_at": cast.get("timestamp"),
+                            "mentioned_handles": [
+                                h.get("username")
+                                for h in (cast.get("mentioned_profiles") or [])
+                                if isinstance(h, dict)
+                            ],
+                            "like_count": int(reactions.get("likes_count") or 0),
+                            "recast_count": int(reactions.get("recasts_count") or 0),
+                            "reply_count": int(replies.get("count") or 0),
+                        }
+                        context_url = str(
+                            cast.get("permalink")
+                            or f"https://warpcast.com/~/conversations/{cast_id}"
+                        )
+                        process_tasks.append(
+                            asyncio.create_task(
+                                self._process_event_with_semaphore(event, context_url)
+                            )
+                        )
+                    if process_tasks:
+                        await asyncio.gather(*process_tasks)
+                    total += len(process_tasks)
+                except Exception as exc:
+                    logger.warning("Channel feed error channel=%s: %s", channel_id, exc)
+        return total
+
     def _mark_cast_seen(self, cast_id: str) -> bool:
         if cast_id in self._seen_cast_id_set:
             return False
