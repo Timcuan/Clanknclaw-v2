@@ -3,6 +3,20 @@ from dataclasses import dataclass
 
 from clankandclaw.models.token import SignalCandidate
 
+_MEME_NARRATIVE_TERMS = (
+    "meme", "memecoin", "moon", "doge", "pepe", "cat", "frog", "inu",
+    "cto", "degen", "pump", "sendit", "alpha call", "viral", "trend", "trending",
+    "fomo", "raid", "raids", "ct narrative", "send",
+)
+_CHINA_NARRATIVE_TERMS = (
+    "china", "chinese", "cn", "yuan", "cny", "dragon", "lunar", "asia",
+)
+_TECH_AI_NARRATIVE_TERMS = (
+    "ai", "agent", "agents", "model", "llm", "ml", "infra", "protocol", "sdk",
+    "api", "compute", "gpu", "inference", "automation", "framework", "rollup",
+    "l2", "zk", "oracle", "depin",
+)
+
 
 @dataclass
 class ScoreResult:
@@ -12,6 +26,11 @@ class ScoreResult:
 
 def _contains_word(text: str, word: str) -> bool:
     return re.search(rf"\b{re.escape(word)}\b", text) is not None
+
+
+def _contains_any_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in phrases)
 
 
 def score_candidate(candidate: SignalCandidate) -> ScoreResult:
@@ -123,6 +142,17 @@ def score_candidate(candidate: SignalCandidate) -> ScoreResult:
 
     if candidate.source == "gecko":
         metadata = candidate.metadata or {}
+        narrative_blob = " ".join(
+            str(part or "")
+            for part in (
+                candidate.raw_text,
+                metadata.get("description"),
+                metadata.get("ai_description"),
+                metadata.get("ai_rationale"),
+                metadata.get("token_name"),
+                metadata.get("suggested_name"),
+            )
+        ).lower()
         network = str(metadata.get("network") or "").lower()
         volume = metadata.get("volume") or {}
         tx_data = metadata.get("transactions") or {}
@@ -285,6 +315,90 @@ def score_candidate(candidate: SignalCandidate) -> ScoreResult:
         if candidate.suggested_symbol:
             score += 5
             reasons.append("symbol_present")
+
+        # --- Chain-specific quality shaping ---
+        if network == "base":
+            if scan_mode == "new_pools" and pool_age <= 30 and tx_m5 >= 8:
+                score += 8
+                reasons.append("base_early_window")
+            # Bot-risk: extreme m1 burst followed by sell pressure (softer than Solana)
+            if spike_ratio_m1_m5 > 0.80 and buy_ratio_m5 < 0.55 and tx_m5 >= 5:
+                score -= 8
+                reasons.append("base_bot_risk")
+        elif network == "eth":
+            if scan_mode == "new_pools" and pool_age <= 35 and tx_m5 >= 7:
+                score += 7
+                reasons.append("eth_early_window")
+            if buy_ratio_m5 >= 0.6 and volume_m5 >= 1800:
+                score += 5
+                reasons.append("eth_buy_pressure")
+            # Bot-risk: same dump pattern as Solana, tighter threshold for ETH
+            if spike_ratio_m1_m5 > 0.85 and buy_ratio_m5 < 0.50 and tx_m5 >= 4:
+                score -= 8
+                reasons.append("eth_bot_risk")
+        elif network == "solana":
+            if spike_ratio_m1_m5 > 0.75 and buy_ratio_m5 < 0.55:
+                score -= 15
+                reasons.append("solana_bot_risk")
+            if liquidity >= 18000 and tx_m5 >= 22:
+                score += 7
+                reasons.append("solana_depth_bonus")
+        elif network == "bsc":
+            if liquidity < 6000 and spike_ratio_m1_m5 > 0.7:
+                score -= 12
+                reasons.append("bsc_shallow_spike_penalty")
+            if buy_ratio_m5 >= 0.6 and tx_m5 >= 14:
+                score += 5
+                reasons.append("bsc_flow_bonus")
+
+        # --- Chain narrative alignment ---
+        has_meme_narrative = _contains_any_phrase(narrative_blob, _MEME_NARRATIVE_TERMS)
+        has_cn_narrative = _contains_any_phrase(narrative_blob, _CHINA_NARRATIVE_TERMS)
+        has_tech_ai_narrative = _contains_any_phrase(narrative_blob, _TECH_AI_NARRATIVE_TERMS)
+
+        if network in {"solana", "bsc"}:
+            if has_meme_narrative:
+                score += 6
+                reasons.append(f"{network}_meme_narrative")
+            if has_cn_narrative:
+                score += 4
+                reasons.append(f"{network}_cn_narrative")
+            if has_tech_ai_narrative and not has_meme_narrative:
+                score -= 4
+                reasons.append(f"{network}_narrative_mismatch")
+
+        if network in {"base", "eth"}:
+            if has_tech_ai_narrative:
+                score += 7
+                reasons.append(f"{network}_tech_ai_narrative")
+            if has_meme_narrative and not has_tech_ai_narrative:
+                score -= 3
+                reasons.append(f"{network}_meme_narrative_penalty")
+
+        ai_narrative_type = str(metadata.get("ai_narrative_type") or "").lower()
+        ai_narrative_fit = metadata.get("ai_narrative_fit")
+        if ai_narrative_type in {"meme_cn", "tech_ai", "mixed", "other"}:
+            reasons.append(f"ai_narrative_{ai_narrative_type}")
+            if network in {"solana", "bsc"} and ai_narrative_type == "meme_cn":
+                score += 4
+            if network in {"base", "eth"} and ai_narrative_type == "tech_ai":
+                score += 4
+        if ai_narrative_fit is False:
+            score -= 8
+            reasons.append("ai_narrative_mismatch")
+
+        # --- LLM enrichment shaping for Gecko ---
+        if metadata.get("ai_enriched"):
+            bullish = int(metadata.get("ai_bullish_score") or 0)
+            if bullish >= 85:
+                score += 6
+                reasons.append("gecko_ai_bullish_strong")
+            elif bullish >= 70:
+                score += 3
+                reasons.append("gecko_ai_bullish_ok")
+            if metadata.get("ai_is_genuine") is False:
+                score -= 10
+                reasons.append("gecko_ai_launch_doubt")
 
         return ScoreResult(score=score, reason_codes=reasons)
 
