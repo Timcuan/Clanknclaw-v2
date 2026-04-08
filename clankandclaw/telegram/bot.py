@@ -1681,12 +1681,13 @@ class TelegramBot:
             try:
                 # Update current message to processing state immediately
                 if callback.message:
+                    _icon, _name, _sym, _net = self._resolve_candidate_brief(candidate_id)
                     await callback.message.edit_text(
-                        _fmt_dashboard_header("Approving", "⌛") +
-                        f"Candidate {_fmt_inline_code(candidate_id)} approved.\n"
-                        "Check <b>cnc-deploy</b> for logs.",
+                        f"⏳ <b>Queued for deploy</b>\n\n"
+                        f"{_icon} <b>{_fmt_text(_name)}</b> <code>${_fmt_text(_sym)}</code>\n"
+                        f"<i>Deploying to {_net.upper()}…</i>",
                         parse_mode="HTML",
-                        reply_markup=None, # Remove all buttons
+                        reply_markup=None,
                     )
                 
                 await self.on_approve(candidate_id)
@@ -1724,11 +1725,12 @@ class TelegramBot:
             try:
                 # Update current message to rejected state immediately
                 if callback.message:
+                    _icon, _name, _sym, _ = self._resolve_candidate_brief(candidate_id)
                     await callback.message.edit_text(
                         f"❌ <b>Rejected</b>\n\n"
-                        f"Candidate {_fmt_inline_code(candidate_id)} has been rejected.",
+                        f"{_icon} <b>{_fmt_text(_name)}</b> <code>${_fmt_text(_sym)}</code>",
                         parse_mode="HTML",
-                        reply_markup=None, # Remove all buttons
+                        reply_markup=None,
                     )
                 
                 await self.on_reject(candidate_id)
@@ -2235,10 +2237,9 @@ class TelegramBot:
                 icon, resolved_name, resolved_symbol, _ = self._resolve_candidate_brief(candidate_id)
             await self._send_bot_message(
                 text=(
-                    "⚙️ <b>Deploying</b>\n"
+                    f"⚙️ <b>Deploying</b>\n\n"
                     f"{icon} <b>{resolved_name}</b> <code>${resolved_symbol}</code>\n"
-                    "• <b>Stage:</b> prepare metadata + image IPFS\n"
-                    f"• <b>Ref:</b> {_fmt_inline_code(_fmt_truncate(candidate_id, 24))}"
+                    f"• Preparing token metadata…"
                 ),
                 parse_mode="HTML",
                 message_thread_id=self._thread_for("deploy"),
@@ -2267,12 +2268,13 @@ class TelegramBot:
                 icon, resolved_name, resolved_symbol, resolved_network = self._resolve_candidate_brief(candidate_id)
             tx_url = html.escape(_get_explorer_url(resolved_network, "tx", tx_hash), quote=True)
             ca_url = html.escape(_get_explorer_url(resolved_network, "address", contract_address), quote=True)
+            safe_ca = html.escape(contract_address)
             await self._send_bot_message(
                 text=(
-                    "✅ <b>Deploy Success</b>\n"
+                    f"✅ <b>Deployed</b>\n\n"
                     f"{icon} <b>{resolved_name}</b> <code>${resolved_symbol}</code>\n"
-                    f"• <b>Contract:</b> <a href=\"{ca_url}\">{_fmt_inline_code(_fmt_truncate(contract_address, 14))}</a>\n"
-                    f"• <b>TX:</b> <a href=\"{tx_url}\">{_fmt_inline_code(_fmt_truncate(tx_hash, 18))}</a>"
+                    f"• <b>CA:</b> <code>{safe_ca}</code> <a href=\"{ca_url}\">↗</a>\n"
+                    f"• <b>TX:</b> <a href=\"{tx_url}\">{_fmt_truncate(tx_hash, 22)}</a>"
                 ),
                 parse_mode="HTML",
                 message_thread_id=self._thread_for("deploy"),
@@ -2289,12 +2291,13 @@ class TelegramBot:
     ) -> None:
         """Send deploy failure notification."""
         try:
+            icon, resolved_name, resolved_symbol, _ = self._resolve_candidate_brief(candidate_id)
             await self._send_bot_message(
                 text=(
-                    "❌ <b>Deploy Failed</b>\n"
-                    f"• <b>Candidate:</b> {_fmt_inline_code(candidate_id)}\n"
+                    f"❌ <b>Deploy Failed</b>\n\n"
+                    f"{icon} <b>{_fmt_text(resolved_name)}</b> <code>${_fmt_text(resolved_symbol)}</code>\n"
                     f"• <b>Error:</b> {_fmt_text(error_code)}\n"
-                    f"• <b>Message:</b> {_fmt_text(error_message)}"
+                    f"• <i>{_fmt_text(_shorten_text(error_message, 120))}</i>"
                 ),
                 parse_mode="HTML",
                 message_thread_id=self._thread_for("alert"),
