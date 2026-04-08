@@ -166,6 +166,7 @@ def test_quick_filter_x_rejects_target_mention_intent_score_1_no_contract():
     )
     decision = quick_filter(candidate)
     assert decision.allowed is False
+    assert "x_intent_too_low" in decision.reason_codes
 
 
 def test_quick_filter_x_allows_target_mention_intent_score_2():
@@ -197,6 +198,7 @@ def test_quick_filter_fc_rejects_target_mention_intent_score_1_no_contract():
     )
     decision = quick_filter(candidate)
     assert decision.allowed is False
+    assert "farcaster_intent_too_low" in decision.reason_codes
 
 
 def test_quick_filter_fc_allows_target_mention_intent_score_2():

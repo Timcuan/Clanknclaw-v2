@@ -95,7 +95,7 @@ def quick_filter(candidate: SignalCandidate) -> FilterDecision:
         if fc_target_mention and (has_contract or fc_intent_score >= 2):
             return FilterDecision(True, ["farcaster_target_intent"])
         if fc_target_mention:
-            return FilterDecision(False, ["fc_intent_too_low"])
+            return FilterDecision(False, ["farcaster_intent_too_low"])
 
     lowered = candidate.raw_text.lower()
     if not _contains_word(lowered, "deploy") and not _contains_word(lowered, "launch"):
