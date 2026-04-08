@@ -99,13 +99,13 @@ def _make_worker_with_channels(channels=None) -> FarcasterDetectorWorker:
     )
 
 
-def test_farcaster_worker_stores_channel_ids():
+def test_farcaster_worker_has_channel_ids():
     w = _make_worker_with_channels(channels=["clanker", "bankr"])
     assert "clanker" in w.channel_ids
     assert "bankr" in w.channel_ids
 
 
-def test_farcaster_worker_channel_ids_default_empty():
+def test_farcaster_worker_channel_ids_default_empty_when_not_set():
     db = MagicMock()
     db.get_runtime_setting.return_value = None
     w = FarcasterDetectorWorker(db=db)
