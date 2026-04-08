@@ -51,7 +51,11 @@ class FarcasterDetectorWorker:
         self.target_handles = [h.lower().lstrip("@") for h in (target_handles or ["bankr", "clanker"])]
         self.query_terms = query_terms or ["deploy", "launch", "contract", "ca", "token"]
         self.channel_feed_url = channel_feed_url
-        self.channel_ids: list[str] = [c.lower().lstrip("/") for c in (channel_ids or [])]
+        _normalized = [c.lower().lstrip("/") for c in (channel_ids or []) if c]
+        _seen_ch: set[str] = set()
+        self.channel_ids: list[str] = [
+            c for c in _normalized if c not in _seen_ch and not _seen_ch.add(c)
+        ]
         self.request_timeout_seconds = request_timeout_seconds
         self.max_requests_per_minute = max(1, max_requests_per_minute)
         self.max_process_concurrency = max(1, max_process_concurrency)
@@ -378,21 +382,20 @@ class FarcasterDetectorWorker:
     ) -> int:
         if not self.channel_ids:
             return 0
-        total = 0
-        for channel_id in self.channel_ids:
+
+        async def _fetch_channel(channel_id: str) -> int:
             async with self._query_semaphore:
+                params = {"channel_ids": channel_id, "limit": self.max_results}
                 try:
-                    params = {"channel_ids": channel_id, "limit": self.max_results}
                     response = await self._request_with_retry(
-                        stealth, api_headers, params,
-                        url_override=self.channel_feed_url,
+                        stealth, api_headers, params, url_override=self.channel_feed_url
                     )
                     if response.status_code == 402:
-                        logger.warning("Neynar 402 for channel=%s", channel_id)
-                        continue
+                        logger.warning("Neynar channel feed 402 for channel=%s", channel_id)
+                        return 0
                     response.raise_for_status()
                     casts = response.json().get("casts", [])
-                    logger.info("Fetched %d casts from channel=%s", len(casts), channel_id)
+                    logger.info("Fetched %d casts from Farcaster channel=%s", len(casts), channel_id)
                     process_tasks: list[asyncio.Task[None]] = []
                     for cast in casts:
                         cast_id = str(cast.get("hash") or cast.get("id") or "")
@@ -407,8 +410,7 @@ class FarcasterDetectorWorker:
                             "author": {"username": author_data.get("username")},
                             "created_at": cast.get("timestamp"),
                             "mentioned_handles": [
-                                h.get("username")
-                                for h in (cast.get("mentioned_profiles") or [])
+                                h.get("username") for h in (cast.get("mentioned_profiles") or [])
                                 if isinstance(h, dict)
                             ],
                             "like_count": int(reactions.get("likes_count") or 0),
@@ -426,10 +428,20 @@ class FarcasterDetectorWorker:
                         )
                     if process_tasks:
                         await asyncio.gather(*process_tasks)
-                    total += len(process_tasks)
+                    return len(process_tasks)
+                except httpx.HTTPStatusError as exc:
+                    logger.warning(
+                        "Channel feed HTTP error channel=%s status=%d body=%s",
+                        channel_id, exc.response.status_code,
+                        exc.response.text[:200],
+                    )
+                    return 0
                 except Exception as exc:
                     logger.warning("Channel feed error channel=%s: %s", channel_id, exc)
-        return total
+                    return 0
+
+        results = await asyncio.gather(*[_fetch_channel(ch) for ch in self.channel_ids])
+        return sum(results)
 
     def _mark_cast_seen(self, cast_id: str) -> bool:
         if cast_id in self._seen_cast_id_set:
